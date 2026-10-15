@@ -58,6 +58,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 rlimit = "0.11.0"
 # No libudev, so Linux CI builds it; macOS lists ports through IOKit.
 serialport = { version = "4", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rcgen = "0.14"
+getrandom = "0.3"
+base64 = "0.22"
+qrcode = { version = "0.14", default-features = false }
+tungstenite = "0.30"
+rustix = { version = "1.1.5", features = ["fs"] }
 
 # Native calls stay behind `cfg(target_os = "macos")`; CI builds on Linux.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -65,6 +72,7 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSResponder"] }
 objc2-foundation = { version = "0.3", features = ["NSString"] }
 security-framework = "3"
+mdns-sd = "0.21"
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["eframe"] }

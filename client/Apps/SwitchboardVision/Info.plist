@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Switchboard</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+	</dict>
+	<!-- Bonjour browsing on visionOS needs both: the service named and
+	     the reason the system shows when it asks for the local network. -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_switchboard._tcp</string>
+	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Switchboard listens while you dictate a message to a session.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Switchboard turns what you dictate into the message you send a session.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Switchboard finds the Macs running Switchboard on your network and talks to the ones you pair with.</string>
+</dict>
+</plist>

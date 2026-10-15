@@ -12,6 +12,8 @@ pub mod file_refs;
 pub mod grid;
 pub mod model;
 pub mod reconcile;
+mod remote;
+pub mod revision;
 mod sessions;
 mod workflow;
 
@@ -20,7 +22,7 @@ mod tests;
 
 pub use action::{
     AppAction, AppCore, Clock, Composer, ENV_SETUP_LOCKED, ENV_SETUP_WINDOW, Effect, Notice,
-    RULE_SCALE, View, clamp_scale,
+    PAIRING_ATTEMPTS, PAIRING_WINDOW, PairingWindow, RULE_SCALE, View, clamp_scale,
 };
 pub use control::{ControlAction, ControlOutcome, GrantTarget, aws_view};
 pub use controller::{MenuKind, RadialMenu, UiRequest};

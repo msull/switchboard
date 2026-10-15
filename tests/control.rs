@@ -53,12 +53,12 @@ fn port_with(
 ) -> Port {
     let opener = FakeOpener::default();
     let services = Services {
-        secrets: Box::new(secrets),
+        secrets: std::sync::Arc::new(secrets),
         store: Box::new(MemoryStore {
             initial,
             ..MemoryStore::default()
         }),
-        host: Box::new(host),
+        host: std::sync::Arc::new(host),
         opener: Box::new(opener.clone()),
         operations: Box::new(operations.clone()),
         ..fakes::services()
@@ -287,8 +287,124 @@ fn a_repeated_op_is_answered_from_the_log_and_runs_nothing_again() {
     let lines = lines_of(&port.operations);
     assert_eq!(
         lines.iter().filter(|l| l.op() == "tx").count(),
-        1,
+        2,
+        "the request line before the run and the reply after: {lines:?}"
+    );
+    assert!(
+        matches!(
+            lines.iter().find(|l| l.op() == "tx"),
+            Some(OpLine::Requested { .. })
+        ),
         "{lines:?}"
+    );
+}
+
+/// A non-replayable command whose reply line never landed (the app died
+/// after the keys went in): the retry with the same op is answered
+/// `interrupted` and nothing is sent twice; a failed request-line
+/// append refuses the command before anything runs; an op never seen
+/// is `unknown`.
+#[test]
+fn an_interrupted_send_is_never_run_again_and_its_status_says_so() {
+    let operations = FakeOperations::default();
+    let host = FakeHost::default();
+    let mut port = port_on(Loaded::default(), operations.clone(), host.clone());
+    let reply = call(
+        &mut port,
+        Request::new("sp", Body::SpaceNew { name: "D".into() }),
+    );
+    let space = made_id(&reply, RecordKind::Space);
+    let reply = call(
+        &mut port,
+        Request::new(
+            "pj",
+            Body::ProjectAdd {
+                space,
+                name: "#1".into(),
+                root: PathBuf::from("/tmp"),
+            },
+        ),
+    );
+    let project = made_id(&reply, RecordKind::Project);
+    let made = call(&mut port, Request::new("se", session_new(&project, None)));
+    let session = made_id(&made, RecordKind::Session);
+    let record = switchboard::core::RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    host.state().statuses.push(HostStatus {
+        id: HostId(record.host_name()),
+        liveness: HostLiveness::Running {
+            pid: 7,
+            command: "claude".into(),
+        },
+        cwd: None,
+        last_activity: None,
+        title: None,
+    });
+    port.app.poll_now();
+    operations
+        .fail_replies
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let send = |session: &str| {
+        Request::new(
+            "tx",
+            Body::SessionSend {
+                session: session.to_owned(),
+                text: "hello".into(),
+            },
+        )
+    };
+    let first = call(&mut port, send(&session));
+    assert!(matches!(first, Reply::Persisted { .. }), "{first:?}");
+    assert_eq!(host.state().written.len(), 1, "the keys went in");
+    operations
+        .fail_replies
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let again = call(&mut port, send(&session));
+    match again {
+        Reply::Failed { reason } => assert!(reason.starts_with("interrupted"), "{reason}"),
+        other => panic!("ran again: {other:?}"),
+    }
+    assert_eq!(host.state().written.len(), 1, "nothing was sent twice");
+    let status = call(
+        &mut port,
+        Request::new(
+            "q1",
+            Body::OpStatus {
+                operation: "tx".into(),
+            },
+        ),
+    );
+    assert!(
+        matches!(
+            status,
+            Reply::OpStatus {
+                status: OpStatus::Interrupted
+            }
+        ),
+        "{status:?}"
+    );
+    let unknown = call(
+        &mut port,
+        Request::new(
+            "q2",
+            Body::OpStatus {
+                operation: "never".into(),
+            },
+        ),
+    );
+    assert!(
+        matches!(
+            unknown,
+            Reply::OpStatus {
+                status: OpStatus::Unknown
+            }
+        ),
+        "{unknown:?}"
+    );
+    let lines = lines_of(&operations);
+    assert_eq!(
+        lines.iter().filter(|l| l.op() == "tx").count(),
+        1,
+        "the request line alone: {lines:?}"
     );
 }
 
@@ -661,13 +777,24 @@ fn bad_input_is_failed_and_changes_nothing() {
         Request::new("", Body::SpaceNew { name: "D".into() }),
     );
     assert!(matches!(&reply, Reply::Failed { reason } if reason.contains("op")));
-    // A failed command leaves no request line: nothing was made.
+    // A failed creation leaves no request line: nothing was made. A
+    // non-replayable command's request line goes down before the run
+    // whatever the outcome, and its reply follows it.
+    let lines = lines_of(&port.operations);
     assert!(
-        lines_of(&port.operations)
+        lines
             .iter()
+            .filter(|l| l.op() != "c")
             .all(|l| matches!(l, OpLine::Replied { .. })),
-        "{:?}",
-        lines_of(&port.operations)
+        "{lines:?}"
+    );
+    let send_lines: Vec<&OpLine> = lines.iter().filter(|l| l.op() == "c").collect();
+    assert!(
+        matches!(
+            send_lines.as_slice(),
+            [OpLine::Requested { .. }, OpLine::Replied { .. }]
+        ),
+        "{send_lines:?}"
     );
     assert!(
         port.app.core().notice().is_none(),
@@ -897,8 +1024,8 @@ fn env_port() -> EnvPort {
     let operations = switchboard::adapters::control::OperationsLog::open(log_dir.path())
         .expect("operations log");
     let services = Services {
-        secrets: Box::new(secrets.clone()),
-        host: Box::new(host.clone()),
+        secrets: std::sync::Arc::new(secrets.clone()),
+        host: std::sync::Arc::new(host.clone()),
         operations: Box::new(operations),
         ..fakes::services()
     };

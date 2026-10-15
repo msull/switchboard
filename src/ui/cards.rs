@@ -171,7 +171,7 @@ pub fn session_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     let running = cx.core.is_running(record.id);
     let entry = matches!(record.kind, SessionKind::Command | SessionKind::Service);
     let hollow = !running && !entry;
-    let conversation = cx.state.conversations.get(&record.id).map(|(_, c)| c);
+    let conversation = cx.conversations.get(record.id);
     // An agent's pane ends in its own chrome (prompt hints, token
     // counts), so its excerpt comes from the transcript instead.
     let caption = if matches!(record.kind, SessionKind::Agent(_)) {

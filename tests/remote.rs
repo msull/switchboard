@@ -1,0 +1,2980 @@
+//! The remote port end to end inside one process: the real TLS listener
+//! on a loopback port, a pinned client on a thread, the app with fakes
+//! answering on its "frame". What a device relies on is checked here:
+//! `/info` to anyone and nothing else, pairing inside the window with
+//! the host's own key, a token that reads every view, revocation and
+//! scope from the dialog's side, the allowlist, the bounds, and a
+//! screen with the project's secret values named rather than shown.
+
+// Tests assert emptiness with `assert!` throughout.
+#![allow(clippy::assert_is_empty)]
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use rustls::pki_types::ServerName;
+use rustls::{ClientConfig, ClientConnection, StreamOwned};
+use switchboard::SwitchboardApp;
+use switchboard::adapters::fakes::{
+    self, FakeAdvertiser, FakeHost, FakeOperations, FakeRemoteStore, FakeSecrets, FakeTranscripts,
+    MemoryStore,
+};
+use switchboard::adapters::remote::{self, MAX_UNAUTHENTICATED, pinned_client};
+use switchboard::app::Services;
+use switchboard::content::ContentKey;
+use switchboard::core::{AppAction, RecordId};
+use switchboard::ports::host::{HostId, HostStatus, Liveness as HostLiveness};
+use switchboard::ports::remote::{Listen, Scope};
+use switchboard::ports::transcript::{Conversation, Turn};
+use switchboard_control::{
+    Body, Client, Launch, Made, Pin, PinTarget, RecordKind, Rect, Reply, Request, SessionKind,
+};
+use tungstenite::client::IntoClientRequest as _;
+
+struct Port {
+    app: SwitchboardApp,
+    addr: SocketAddr,
+    client: Arc<ClientConfig>,
+    control: PathBuf,
+    host: FakeHost,
+    secrets: FakeSecrets,
+    remote: FakeRemoteStore,
+    advertiser: FakeAdvertiser,
+    transcripts: FakeTranscripts,
+    _dir: tempfile::TempDir,
+}
+
+/// A started app with the remote port on a free loopback port and the
+/// control socket beside it (the tests make records through the latter).
+fn port() -> Port {
+    port_with(
+        FakeHost::default(),
+        FakeSecrets::default(),
+        FakeRemoteStore::default(),
+    )
+}
+
+fn port_with(host: FakeHost, secrets: FakeSecrets, remote: FakeRemoteStore) -> Port {
+    let advertiser = FakeAdvertiser::default();
+    let transcripts = FakeTranscripts::default();
+    let services = Services {
+        secrets: std::sync::Arc::new(secrets.clone()),
+        host: Arc::new(host.clone()),
+        remote: Box::new(remote.clone()),
+        advertiser: Box::new(advertiser.clone()),
+        operations: Box::new(FakeOperations::default()),
+        transcripts: Arc::new(transcripts.clone()),
+        ..fakes::services()
+    };
+    let mut app = SwitchboardApp::with_services(services);
+    // The editors a draft is read from save through a fake dialog.
+    app.ui_state.prompt_boxes.native = false;
+    app.start();
+    let dir = tempfile::Builder::new()
+        .prefix("sbr")
+        .tempdir_in("/tmp")
+        .expect("temp dir");
+    let control = app.listen_at(dir.path(), || {}).expect("control socket");
+    app.set_remote_port_override(Some(0));
+    let addr = app.listen_remote(|| {}).expect("remote port");
+    let spki = remote
+        .state()
+        .identity
+        .as_ref()
+        .unwrap()
+        .spki_sha256
+        .clone();
+    Port {
+        app,
+        addr,
+        client: pinned_client(&spki).unwrap(),
+        control,
+        host,
+        secrets,
+        remote,
+        advertiser,
+        transcripts,
+        _dir: dir,
+    }
+}
+
+/// A conversation of `n` turns; the last answer names a token.
+fn conversation(n: usize) -> Conversation {
+    let mut c = Conversation {
+        title: Some("explain-repo".into()),
+        model: Some("claude-fable-5-1".into()),
+        branch: Some("main".into()),
+        ..Conversation::default()
+    };
+    for i in 1..=n {
+        c.turns.push(Turn {
+            n: i,
+            user: format!("prompt {i}"),
+            final_text: if i == n {
+                "the token is tok-5e3cr3t".into()
+            } else {
+                format!("answer {i}")
+            },
+            assistant_msgs: 1,
+            activity: vec![switchboard::ports::transcript::Activity {
+                kind: switchboard::ports::transcript::ActivityKind::Tool,
+                line: "Read README.md".into(),
+                at: None,
+                error: false,
+                detail: Some(switchboard::ports::transcript::ToolDetail {
+                    name: "Read".into(),
+                    input: r#"{"file_path": "README.md"}"#.into(),
+                    result: "# Switchboard\n".repeat(i * 40),
+                    path: None,
+                }),
+                text: None,
+            }],
+            tools: 1,
+            ..Turn::default()
+        });
+    }
+    c
+}
+
+/// Launch the session so the fake agent launcher binds a Claude Code
+/// handle to it (the transcript fake serves every handle).
+fn launched(port: &mut Port, session: &str) -> RecordId {
+    let id = RecordId(uuid::Uuid::parse_str(session).unwrap());
+    port.app.dispatch(AppAction::ReturnToSession(id));
+    port.app.poll_now();
+    id
+}
+
+/// A command session with its first run opened, and the run's log
+/// written with `text`.
+fn command_with_run(port: &mut Port, project: &str, text: &str) -> (String, RecordId) {
+    let reply = control(
+        port,
+        Request::new(
+            "cmd",
+            Body::SessionNew {
+                project: project.to_owned(),
+                name: "build".into(),
+                session_kind: SessionKind::Command,
+                cwd: PathBuf::from("/tmp"),
+                launch: Launch::Command {
+                    command: "make".into(),
+                    shell: "sh".into(),
+                },
+                prompt: None,
+                notes: String::new(),
+                env: std::collections::BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            },
+        ),
+    );
+    let session = made_id(&reply, RecordKind::Session);
+    let id = launched(port, &session);
+    let run = port
+        .app
+        .core()
+        .session(id)
+        .unwrap()
+        .runs
+        .last()
+        .unwrap()
+        .log
+        .clone();
+    let dir =
+        switchboard::adapters::scrollback::scrollback_dir(&fakes::services().store.data_dir());
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(run), text).unwrap();
+    (session, id)
+}
+
+/// One HTTP request over a fresh pinned TLS connection: the status and
+/// the body.
+fn http(
+    addr: SocketAddr,
+    config: &Arc<ClientConfig>,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+    body: &str,
+) -> std::io::Result<(u16, String)> {
+    let tcp = TcpStream::connect(addr)?;
+    tcp.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let conn = ClientConnection::new(
+        Arc::clone(config),
+        ServerName::try_from("localhost").unwrap(),
+    )
+    .map_err(std::io::Error::other)?;
+    let mut s = StreamOwned::new(conn, tcp);
+    while s.conn.is_handshaking() {
+        s.conn.complete_io(&mut s.sock)?;
+    }
+    let auth = bearer
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    write!(
+        s,
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    )?;
+    s.flush()?;
+    let mut reader = BufReader::new(s);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let status: u16 = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, line.clone()))?;
+    let mut length = 0usize;
+    loop {
+        let mut h = String::new();
+        reader.read_line(&mut h)?;
+        let h = h.trim_end();
+        if h.is_empty() {
+            break;
+        }
+        if let Some(v) = h.strip_prefix("Content-Length:") {
+            length = v.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut out = vec![0; length];
+    reader.read_exact(&mut out)?;
+    Ok((status, String::from_utf8_lossy(&out).into_owned()))
+}
+
+/// A request from a client thread, served by the app on this thread.
+fn call(
+    port: &mut Port,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+    body: &str,
+) -> (u16, serde_json::Value) {
+    let addr = port.addr;
+    let config = Arc::clone(&port.client);
+    let (method, path, bearer, body) = (
+        method.to_owned(),
+        path.to_owned(),
+        bearer.map(str::to_owned),
+        body.to_owned(),
+    );
+    let client =
+        std::thread::spawn(move || http(addr, &config, &method, &path, bearer.as_deref(), &body));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !client.is_finished() {
+        assert!(std::time::Instant::now() < deadline, "no reply");
+        port.app.serve_pending();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let (status, text) = client.join().unwrap().expect("http");
+    let value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+    (status, value)
+}
+
+fn get(port: &mut Port, path: &str, bearer: Option<&str>) -> (u16, serde_json::Value) {
+    call(port, "GET", path, bearer, "")
+}
+
+/// The error code of a refusal.
+fn code(value: &serde_json::Value) -> &str {
+    value["error"]["code"].as_str().unwrap_or("")
+}
+
+/// One call on the control socket, for making records.
+fn control(port: &mut Port, request: Request) -> Reply {
+    let path = port.control.clone();
+    let client = std::thread::spawn(move || {
+        let mut client = Client::connect(&path).expect("connect");
+        client.call(&request).expect("reply")
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !client.is_finished() {
+        assert!(std::time::Instant::now() < deadline, "no reply");
+        port.app.serve_pending();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    client.join().unwrap()
+}
+
+fn made_id(reply: &Reply, kind: RecordKind) -> String {
+    reply
+        .made()
+        .iter()
+        .find(|m: &&Made| m.kind == kind)
+        .unwrap_or_else(|| panic!("no {kind:?} in {reply:?}"))
+        .id
+        .clone()
+}
+
+/// A space, a project in it, and a session in that, with `notes`.
+fn seed(port: &mut Port, notes: &str) -> (String, String, String) {
+    let reply = control(
+        port,
+        Request::new("sp", Body::SpaceNew { name: "D".into() }),
+    );
+    let space = made_id(&reply, RecordKind::Space);
+    let reply = control(
+        port,
+        Request::new(
+            "pj",
+            Body::ProjectAdd {
+                space: space.clone(),
+                name: "#1".into(),
+                root: PathBuf::from("/tmp"),
+            },
+        ),
+    );
+    let project = made_id(&reply, RecordKind::Project);
+    let reply = control(
+        port,
+        Request::new(
+            "se",
+            Body::SessionNew {
+                project: project.clone(),
+                name: "investigator".into(),
+                session_kind: SessionKind::Claude,
+                cwd: PathBuf::from("/tmp"),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: notes.into(),
+                env: std::collections::BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            },
+        ),
+    );
+    let session = made_id(&reply, RecordKind::Session);
+    // The host lists no pane for it: a session that is not running.
+    port.app.poll_now();
+    (space, project, session)
+}
+
+/// Open the pairing window with `code` and pair as `name`: the token.
+fn pair(port: &mut Port, code: &str, scope: Scope, name: &str) -> String {
+    port.app.dispatch(AppAction::OpenPairing {
+        code: code.into(),
+        scope,
+    });
+    let spki = port
+        .remote
+        .state()
+        .identity
+        .as_ref()
+        .unwrap()
+        .spki_sha256
+        .clone();
+    let body = serde_json::json!({ "code": code, "device_name": name, "spki_sha256": spki });
+    let (status, reply) = call(port, "POST", "/api/v1/pair", None, &body.to_string());
+    assert_eq!(status, 200, "{reply}");
+    reply["body"]["token"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn info_is_served_to_anyone_and_every_other_read_is_refused_unpaired() {
+    let mut port = port();
+    let (status, info) = get(&mut port, "/api/v1/info", None);
+    assert_eq!(status, 200, "{info}");
+    let identity = port.remote.state().identity.clone().unwrap();
+    let body = &info["body"];
+    assert_eq!(body["server_id"], identity.server_id.to_string());
+    assert_eq!(body["server_name"], identity.server_name);
+    assert_eq!(body["spki_sha256"], identity.spki_sha256);
+    assert_eq!(body["protocol"], 1);
+    assert_eq!(body["pairing_open"], false);
+    assert_eq!(body["limits"]["screen_lines"], 200);
+    assert!(info["epoch"].is_string());
+    assert_eq!(info["revision"], 0);
+    assert!(
+        !info.to_string().contains("remote-key"),
+        "no key material in /info"
+    );
+
+    for path in [
+        "/api/v1/projects",
+        "/api/v1/spaces",
+        "/api/v1/waiting",
+        "/api/v1/sessions/x",
+    ] {
+        let (status, reply) = get(&mut port, path, None);
+        assert_eq!(
+            (status, code(&reply)),
+            (401, "unauthorized"),
+            "{path}: {reply}"
+        );
+        let (status, reply) = get(&mut port, path, Some("not-a-token"));
+        assert_eq!(
+            (status, code(&reply)),
+            (401, "unauthorized"),
+            "{path}: {reply}"
+        );
+    }
+    let (status, reply) = get(&mut port, "/other", None);
+    assert_eq!((status, code(&reply)), (404, "not_found"), "{reply}");
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        "/api/v1/pair",
+        None,
+        r#"{"code":"AAAAAAAA","spki_sha256":"x"}"#,
+    );
+    assert_eq!((status, code(&reply)), (403, "pairing_closed"), "{reply}");
+}
+
+#[test]
+fn a_pairing_inside_the_window_gives_a_token_that_reads_every_view() {
+    let mut port = port();
+    let (space, project, session) = seed(&mut port, "ticket 1");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    assert_eq!(token.len(), 43);
+    assert!(port.app.core().pairing().is_none(), "the code is spent");
+    {
+        let saved = port.remote.state();
+        assert_eq!(saved.devices.len(), 1);
+        assert_eq!(saved.devices[0].name, "Vision Pro");
+        assert_eq!(saved.devices[0].scope, Scope::Read);
+        assert_eq!(saved.devices[0].token_sha256, remote::token_sha256(&token));
+        let text = serde_json::to_string(&saved.devices).unwrap();
+        assert!(!text.contains(&token), "the token itself is never stored");
+    }
+    let t = Some(token.as_str());
+    let (status, reply) = get(&mut port, "/api/v1/projects", t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["projects"][0]["id"], project);
+    assert!(reply["epoch"].is_string());
+    let (status, reply) = get(&mut port, &format!("/api/v1/projects?space={space}"), t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["projects"].as_array().unwrap().len(), 1);
+    let (status, reply) = get(&mut port, "/api/v1/spaces", t);
+    assert_eq!(status, 200, "{reply}");
+    assert!(
+        reply["body"]["spaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == space)
+    );
+    let (status, reply) = get(&mut port, &format!("/api/v1/spaces/{space}/sets"), t);
+    assert_eq!(status, 200, "{reply}");
+    assert!(reply["body"]["sets"].is_array());
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/projects/{project}/sessions"),
+        t,
+    );
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["sessions"][0]["id"], session);
+    assert_eq!(reply["body"]["sessions"][0]["notes"], "ticket 1");
+    let (status, reply) = get(&mut port, &format!("/api/v1/sessions/{session}"), t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["session"]["name"], "investigator");
+    let (status, reply) = get(&mut port, "/api/v1/waiting", t);
+    assert_eq!(status, 200, "{reply}");
+    assert!(reply["body"]["sessions"].is_array());
+    let (status, reply) = get(&mut port, &format!("/api/v1/sessions/{session}/screen"), t);
+    assert_eq!(
+        (status, code(&reply)),
+        (400, "failed"),
+        "not running: {reply}"
+    );
+    let (status, reply) = get(&mut port, "/api/v1/sessions/not-a-uuid", t);
+    assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{}", uuid::Uuid::nil()),
+        t,
+    );
+    assert_eq!((status, code(&reply)), (404, "not_found"), "{reply}");
+    let (status, reply) = get(&mut port, "/api/v1/info", t);
+    assert_eq!(status, 200, "{reply}");
+    assert!(
+        port.app.core().devices()[0].last_seen.is_some(),
+        "an authenticated request marks the device seen"
+    );
+}
+
+/// A working set made through the control port is read whole with its
+/// pins through `/sets/{id}`, found across the spaces.
+#[test]
+fn a_set_is_read_by_its_id_across_spaces() {
+    let mut port = port();
+    let (space, _, session) = seed(&mut port, "");
+    let reply = control(
+        &mut port,
+        Request::new(
+            "st",
+            Body::SetNew {
+                space: space.clone(),
+                name: "Deploy".into(),
+            },
+        ),
+    );
+    let set = made_id(&reply, RecordKind::Set);
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let (status, reply) = get(&mut port, &format!("/api/v1/sets/{set}"), Some(&token));
+    assert_eq!(status, 200, "{reply}");
+    let view = &reply["body"]["sets"][0];
+    assert_eq!(view["id"], set);
+    assert_eq!(view["name"], "Deploy");
+    assert!(view["items"].is_array(), "{view}");
+    assert_ne!(session, "");
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/sets/{}", uuid::Uuid::nil()),
+        Some(&token),
+    );
+    assert_eq!((status, code(&reply)), (404, "not_found"), "{reply}");
+}
+
+#[test]
+fn a_pairing_with_another_hosts_key_or_the_wrong_code_counts_and_three_close_the_window() {
+    let mut port = port();
+    port.app.dispatch(AppAction::OpenPairing {
+        code: "ABCD2345".into(),
+        scope: Scope::Read,
+    });
+    let spki = port
+        .remote
+        .state()
+        .identity
+        .as_ref()
+        .unwrap()
+        .spki_sha256
+        .clone();
+    let (status, info) = get(&mut port, "/api/v1/info", None);
+    assert_eq!(status, 200);
+    assert_eq!(info["body"]["pairing_open"], true);
+    // The right code through a substituted certificate: refused.
+    let relayed = serde_json::json!({ "code": "ABCD2345", "device_name": "x", "spki_sha256": "ff".repeat(32) });
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        "/api/v1/pair",
+        None,
+        &relayed.to_string(),
+    );
+    assert_eq!((status, code(&reply)), (403, "wrong_key"), "{reply}");
+    assert_eq!(port.app.core().pairing().unwrap().failures, 1);
+    let wrong = serde_json::json!({ "code": "ZZZZZZZZ", "device_name": "x", "spki_sha256": spki });
+    let (status, reply) = call(&mut port, "POST", "/api/v1/pair", None, &wrong.to_string());
+    assert_eq!((status, code(&reply)), (403, "wrong_code"), "{reply}");
+    let (status, reply) = call(&mut port, "POST", "/api/v1/pair", None, "not json");
+    assert_eq!((status, code(&reply)), (400, "bad_request"), "{reply}");
+    assert_eq!(
+        port.app.core().pairing().unwrap().failures,
+        2,
+        "a bad body is not an attempt"
+    );
+    let (status, reply) = call(&mut port, "POST", "/api/v1/pair", None, &wrong.to_string());
+    assert_eq!((status, code(&reply)), (403, "wrong_code"), "{reply}");
+    assert!(
+        port.app.core().pairing().is_none(),
+        "three failures close the window"
+    );
+    // The right code, too late.
+    let right = serde_json::json!({ "code": "abcd2345", "device_name": "x", "spki_sha256": spki });
+    let (status, reply) = call(&mut port, "POST", "/api/v1/pair", None, &right.to_string());
+    assert_eq!((status, code(&reply)), (403, "pairing_closed"), "{reply}");
+    assert!(port.remote.state().devices.is_empty());
+    assert!(port.app.core().devices().is_empty());
+}
+
+#[test]
+fn a_consumed_code_is_refused_and_the_window_grants_its_scope() {
+    let mut port = port();
+    let token = pair(&mut port, "ABCD2345", Scope::Control, "Pad");
+    assert_eq!(port.app.core().devices()[0].scope, Scope::Control);
+    let spki = port
+        .remote
+        .state()
+        .identity
+        .as_ref()
+        .unwrap()
+        .spki_sha256
+        .clone();
+    let again = serde_json::json!({ "code": "ABCD2345", "device_name": "y", "spki_sha256": spki });
+    let (status, reply) = call(&mut port, "POST", "/api/v1/pair", None, &again.to_string());
+    assert_eq!((status, code(&reply)), (403, "pairing_closed"), "{reply}");
+    assert_eq!(port.app.core().devices().len(), 1);
+    // The code is matched case-insensitively: it is typed by hand.
+    let token2 = pair(&mut port, "wxyz6789", Scope::Read, "Phone");
+    assert_ne!(token, token2);
+    assert_eq!(port.app.core().devices().len(), 2);
+}
+
+#[test]
+fn revoke_and_a_scope_change_take_effect_on_the_next_request() {
+    let mut port = port();
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let id = port.app.core().devices()[0].id;
+    let (status, _) = get(&mut port, "/api/v1/spaces", Some(&token));
+    assert_eq!(status, 200);
+    port.app.dispatch(AppAction::SetDeviceScope {
+        device: id,
+        scope: Scope::Control,
+    });
+    assert_eq!(
+        port.remote.state().devices[0].scope,
+        Scope::Control,
+        "saved"
+    );
+    port.app.dispatch(AppAction::RevokeDevice(id));
+    assert!(port.remote.state().devices.is_empty(), "saved");
+    let (status, reply) = get(&mut port, "/api/v1/spaces", Some(&token));
+    assert_eq!((status, code(&reply)), (401, "unauthorized"), "{reply}");
+}
+
+/// Nothing a device sends changes the host in this milestone, and what
+/// is not on the table is refused by name, before translation.
+#[test]
+fn the_allowlist_refuses_everything_else_with_no_side_effect() {
+    let mut port = port();
+    let (_, project, session) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Control, "Pad");
+    let t = Some(token.as_str());
+    for (method, path) in [
+        ("POST", format!("/api/v1/sessions/{session}/kill")),
+        ("POST", format!("/api/v1/sessions/{session}/notes")),
+        ("GET", format!("/api/v1/sessions/{session}/env")),
+        ("GET", "/api/v1/env/resolve".into()),
+        ("POST", "/api/v1/projects".into()),
+        ("DELETE", format!("/api/v1/sessions/{session}")),
+        ("GET", "/api/v2/projects".into()),
+    ] {
+        let (status, reply) = call(&mut port, method, &path, t, r#"{"text":"hi"}"#);
+        assert_eq!(
+            (status, code(&reply)),
+            (404, "not_found"),
+            "{method} {path}: {reply}"
+        );
+    }
+    // A file no set pins is refused by name, with nothing read.
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/projects/{project}/files/README.md"),
+        t,
+    );
+    assert_eq!((status, code(&reply)), (404, "not_pinned"), "{reply}");
+    assert!(
+        port.host.state().written.is_empty(),
+        "nothing reached a pane"
+    );
+    assert_eq!(
+        port.app
+            .core()
+            .session(RecordId(uuid::Uuid::parse_str(&session).unwrap()))
+            .unwrap()
+            .notes,
+        ""
+    );
+}
+
+/// Make the fake host list `session` as a running Claude pane showing
+/// `screen`.
+fn running(port: &mut Port, session: &str, screen: &str) {
+    let record = RecordId(uuid::Uuid::parse_str(session).unwrap());
+    let pane = HostId(record.host_name());
+    port.host.state().statuses.push(HostStatus {
+        id: pane.clone(),
+        liveness: HostLiveness::Running {
+            pid: 7,
+            command: "claude".into(),
+        },
+        cwd: None,
+        last_activity: None,
+        title: None,
+    });
+    port.host.state().snapshots.insert(pane, screen.into());
+    port.app.poll_now();
+}
+
+/// A session's draft is its Prompt Box editor on the host (§4.5): a
+/// device's speech events land in it as the host's recognizer's do,
+/// utterance by utterance, the editor's tools work on it, and `send`
+/// takes its text to the pane under the device's op and clears it.
+/// Any paired device reads it; only the control scope changes it.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_draft_is_the_sessions_editor_fed_by_dictation_and_worked_by_its_tools() {
+    let mut port = port();
+    let (_, project, session) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    let draft = format!("/api/v1/sessions/{session}/draft");
+    let dictation = format!("/api/v1/sessions/{session}/dictation");
+
+    let (status, reply) = get(&mut port, &draft, t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["draft"]["text"], "");
+    assert_eq!(reply["body"]["draft"]["status"], "idle");
+    assert_eq!(reply["body"]["draft"]["can_undo"], false);
+    assert_eq!(reply["body"]["draft"]["ai"], false);
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &dictation,
+        t,
+        r#"{"session":7,"events":[]}"#,
+    );
+    assert_eq!((status, code(&reply)), (403, "scope"), "{reply}");
+    let (status, reply) = call(&mut port, "POST", &draft, t, r#"{"action":"undo"}"#);
+    assert_eq!((status, code(&reply)), (403, "scope"), "{reply}");
+
+    let id = port.app.core().devices()[0].id;
+    port.app.dispatch(AppAction::SetDeviceScope {
+        device: id,
+        scope: Scope::Control,
+    });
+    let s = subscribe(&mut port, &token);
+    let _hello = next_frame(&mut port, &s, 5);
+
+    // An utterance revises in place and commits on its final; the
+    // next one goes after it, spaced by the editor.
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &dictation,
+        t,
+        r#"{"session":7,"events":[
+            {"sequence":1,"kind":"started"},
+            {"sequence":2,"kind":"voice_started","utterance":1},
+            {"sequence":3,"kind":"partial","utterance":1,"revision":1,"text":"fix the"},
+            {"sequence":4,"kind":"partial","utterance":1,"revision":2,"text":"fix the test"},
+            {"sequence":5,"kind":"final","utterance":1,"text":"Fix the test."}]}"#,
+    );
+    assert_eq!(status, 200, "{reply}");
+    let view = &reply["body"]["draft"];
+    assert_eq!(view["text"], "Fix the test.");
+    assert_eq!(view["status"], "listening");
+    assert_eq!(view["live"], serde_json::Value::Null);
+    assert_eq!(view["can_undo"], true);
+    let (_, reply) = call(
+        &mut port,
+        "POST",
+        &dictation,
+        t,
+        r#"{"session":7,"events":[
+            {"sequence":6,"kind":"voice_started","utterance":2},
+            {"sequence":7,"kind":"partial","utterance":2,"revision":1,"text":"and run"}]}"#,
+    );
+    let view = &reply["body"]["draft"];
+    assert_eq!(view["text"], "Fix the test. and run");
+    assert_eq!(view["live"], serde_json::json!([13, 21]));
+    let (_, reply) = call(
+        &mut port,
+        "POST",
+        &dictation,
+        t,
+        r#"{"session":7,"events":[
+            {"sequence":8,"kind":"final","utterance":2,"text":"and run it"},
+            {"sequence":9,"kind":"stopped"}]}"#,
+    );
+    let view = &reply["body"]["draft"];
+    assert_eq!(view["text"], "Fix the test. and run it");
+    assert_eq!(view["status"], "idle");
+    let seen = resources(&events(&mut port, &s));
+    assert!(
+        seen.contains(&("changed".into(), "draft".into(), session.clone())),
+        "{seen:?}"
+    );
+
+    // The editor's tools: undo takes the last utterance back, replace
+    // is what a device typed, the AI pass needs a key.
+    let (_, reply) = call(&mut port, "POST", &draft, t, r#"{"action":"undo"}"#);
+    assert_eq!(reply["body"]["draft"]["text"], "Fix the test.");
+    assert_eq!(reply["body"]["draft"]["can_redo"], true);
+    let (_, reply) = call(
+        &mut port,
+        "POST",
+        &draft,
+        t,
+        r#"{"action":"replace","text":"ship it"}"#,
+    );
+    assert_eq!(reply["body"]["draft"]["text"], "ship it");
+    let (status, reply) = call(&mut port, "POST", &draft, t, r#"{"action":"clean_up"}"#);
+    assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+    let (status, reply) = call(&mut port, "POST", &draft, t, r#"{"action":"shout"}"#);
+    assert_eq!((status, code(&reply)), (400, "bad_request"), "{reply}");
+    let (status, reply) = call(&mut port, "POST", &draft, t, r#"{"action":"send"}"#);
+    assert_eq!((status, code(&reply)), (400, "bad_request"), "{reply}");
+
+    // Send goes to the pane under the op, once, and clears the draft;
+    // a session that is not running refuses and keeps it.
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &draft,
+        t,
+        r#"{"action":"send","op":"d1"}"#,
+    );
+    assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+    assert!(port.host.state().written.is_empty());
+    let (_, reply) = get(&mut port, &draft, t);
+    assert_eq!(reply["body"]["draft"]["text"], "ship it");
+    running(&mut port, &session, "");
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &draft,
+        t,
+        r#"{"action":"send","op":"d2"}"#,
+    );
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["draft"]["text"], "");
+    assert_eq!(port.host.state().written.len(), 1);
+    let (status, _) = call(
+        &mut port,
+        "POST",
+        &draft,
+        t,
+        r#"{"action":"send","op":"d2"}"#,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(port.host.state().written.len(), 1, "the op is the key");
+
+    // Only an agent session has a prompt.
+    let (_, shell) = command_with_run(&mut port, &project, "echo");
+    let (status, reply) = get(&mut port, &format!("/api/v1/sessions/{}/draft", shell.0), t);
+    assert_eq!((status, code(&reply)), (400, "no_draft"), "{reply}");
+}
+
+/// A project with a root of its own on disk, for the file reads.
+fn project_with_root(port: &mut Port, space: &str, root: &std::path::Path) -> String {
+    let reply = control(
+        port,
+        Request::new(
+            "pj2",
+            Body::ProjectAdd {
+                space: space.to_owned(),
+                name: "#2".into(),
+                root: root.to_path_buf(),
+            },
+        ),
+    );
+    made_id(&reply, RecordKind::Project)
+}
+
+/// A working set in `space` pinning `paths` of `project`.
+fn pin_files(port: &mut Port, space: &str, project: &str, paths: &[&str]) -> String {
+    let reply = control(
+        port,
+        Request::new(
+            "st",
+            Body::SetNew {
+                space: space.to_owned(),
+                name: "Desk".into(),
+            },
+        ),
+    );
+    let set = made_id(&reply, RecordKind::Set);
+    let items = paths
+        .iter()
+        .enumerate()
+        .map(|(i, path)| Pin {
+            target: PinTarget::File {
+                project: project.to_owned(),
+                path: PathBuf::from(path),
+            },
+            rect: Rect {
+                x: 0,
+                y: u32::try_from(i).unwrap() * 2,
+                w: 2,
+                h: 2,
+            },
+        })
+        .collect();
+    let reply = control(
+        port,
+        Request::new(
+            "ss",
+            Body::SetSync {
+                set: set.clone(),
+                items,
+            },
+        ),
+    );
+    assert!(
+        !matches!(reply, Reply::Failed { .. }),
+        "set.sync: {reply:?}"
+    );
+    set
+}
+
+/// `file.read` (§4.3): a file some working set pins is read whole,
+/// masked of the project's secrets, with its size and modification
+/// time; a dotenv file is refused though pinned, a file over the
+/// limit is refused with its size, and a watched file moves on the
+/// poll when it is edited. The policy is resolved on the worker.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_pinned_file_is_read_masked_and_watched_and_only_when_pinned() {
+    let mut port = port();
+    let (space, _, _) = seed(&mut port, "");
+    let dir = tempfile::Builder::new()
+        .prefix("sbfile")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    let plan = "# Plan\nuse tok-5e3cr3t here\n";
+    std::fs::write(dir.path().join("docs/plan.md"), plan).unwrap();
+    std::fs::write(dir.path().join(".env"), "API_TOKEN=tok-5e3cr3t\n").unwrap();
+    std::fs::write(dir.path().join("docs/big.txt"), "x".repeat(800 * 1024)).unwrap();
+    let project = project_with_root(&mut port, &space, dir.path());
+    let pid = switchboard::core::ProjectId(uuid::Uuid::parse_str(&project).unwrap());
+    port.app.dispatch(AppAction::SetProjectEnv(
+        pid,
+        switchboard::core::ProjectEnv {
+            vars: vec![switchboard::core::EnvVar {
+                name: "API_TOKEN".into(),
+                value: String::new(),
+                secret: true,
+            }],
+            ..Default::default()
+        },
+    ));
+    port.secrets.state().insert(
+        switchboard::core::SecretScope::Project(pid).account("API_TOKEN"),
+        "tok-5e3cr3t".into(),
+    );
+    port.app.set_watch_poll(Duration::from_millis(50));
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    let path = format!("/api/v1/projects/{project}/files/docs/plan.md");
+
+    let (status, reply) = get(&mut port, &path, t);
+    assert_eq!((status, code(&reply)), (404, "not_pinned"), "{reply}");
+    pin_files(
+        &mut port,
+        &space,
+        &project,
+        &["docs/plan.md", ".env", "docs/big.txt", "docs/missing.md"],
+    );
+    let (status, reply) = get(&mut port, &path, t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["text"], "# Plan\nuse <API_TOKEN> here\n");
+    assert_eq!(reply["body"]["path"], "docs/plan.md");
+    assert_eq!(reply["body"]["size"], plan.len());
+    assert!(reply["body"]["modified_ms"].is_u64(), "{reply}");
+    assert!(!reply.to_string().contains("tok-5e3cr3t"), "{reply}");
+    let first = reply["revision"].as_u64().unwrap();
+    let (_, again) = get(&mut port, &path, t);
+    assert_eq!(
+        again["revision"], first,
+        "an unchanged file keeps its revision"
+    );
+
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/projects/{project}/files/.env"),
+        t,
+    );
+    assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+    assert!(!reply.to_string().contains("tok-5e3cr3t"), "{reply}");
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/projects/{project}/files/docs/big.txt"),
+        t,
+    );
+    assert_eq!((status, code(&reply)), (413, "too_large"), "{reply}");
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("819200"),
+        "{reply}"
+    );
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/projects/{project}/files/docs/missing.md"),
+        t,
+    );
+    assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/projects/{project}/files/docs/../plan.md"),
+        t,
+    );
+    assert_eq!((status, code(&reply)), (400, "bad_request"), "{reply}");
+    let (status, reply) = get(&mut port, &format!("/api/v1/projects/{project}/files"), t);
+    assert_eq!(status, 404, "{reply}");
+
+    // Watched: an edit moves it on the poll, with a new revision.
+    let sub = subscribe(&mut port, &token);
+    let id = format!("{project}/docs/plan.md");
+    sub.send("watch", "file", &id);
+    let seen = resources(&events(&mut port, &sub));
+    assert!(
+        seen.contains(&("watching".into(), "file".into(), id.clone())),
+        "{seen:?}"
+    );
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(dir.path().join("docs/plan.md"), "# Plan\nrevised\n").unwrap();
+    let got = events(&mut port, &sub);
+    let seen = resources(&got);
+    assert!(
+        seen.contains(&("changed".into(), "file".into(), id.clone())),
+        "{seen:?}"
+    );
+    let (_, reply) = get(&mut port, &path, t);
+    assert_eq!(reply["body"]["text"], "# Plan\nrevised\n");
+    assert!(reply["revision"].as_u64().unwrap() > first);
+
+    // A secret store that fails refuses rather than answers unmasked:
+    // the policy is read again after any save, and the store is asked.
+    port.secrets.set_failing(true);
+    port.app.dispatch(AppAction::SetProjectEnv(
+        pid,
+        switchboard::core::ProjectEnv {
+            vars: vec![switchboard::core::EnvVar {
+                name: "API_TOKEN".into(),
+                value: String::new(),
+                secret: true,
+            }],
+            ..Default::default()
+        },
+    ));
+    let (status, reply) = get(&mut port, &path, t);
+    assert_eq!((status, code(&reply)), (503, "policy"), "{reply}");
+}
+
+/// The control scope (§4.5): `send`, `resume` and `trust` go through
+/// the control socket's `serve`, so the device's op is the idempotency
+/// key and a repeat is answered from the log without reaching the pane
+/// again; a read device is refused by name and nothing runs.
+#[test]
+fn the_control_scope_sends_with_the_op_as_the_key_and_a_read_device_is_refused() {
+    let mut port = port();
+    let (_, _, session) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    let send = format!("/api/v1/sessions/{session}/send");
+    let hello = r#"{"op":"tx1","text":"hello"}"#;
+    let (status, reply) = call(&mut port, "POST", &send, t, hello);
+    assert_eq!((status, code(&reply)), (403, "scope"), "{reply}");
+    assert!(port.host.state().written.is_empty());
+
+    let id = port.app.core().devices()[0].id;
+    port.app.dispatch(AppAction::SetDeviceScope {
+        device: id,
+        scope: Scope::Control,
+    });
+    // A resume on the not-running session launches it once; the op is
+    // the key, so a repeat does not spend a second turn.
+    let spawned = port.host.state().spawned.len();
+    let resume = format!("/api/v1/sessions/{session}/resume");
+    let (status, reply) = call(&mut port, "POST", &resume, t, r#"{"op":"rs0"}"#);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(port.host.state().spawned.len(), spawned + 1, "launched");
+    let (status, _) = call(&mut port, "POST", &resume, t, r#"{"op":"rs0"}"#);
+    assert_eq!(status, 200);
+    assert_eq!(port.host.state().spawned.len(), spawned + 1, "once");
+
+    running(&mut port, &session, "\u{276f} ");
+    let (status, reply) = call(&mut port, "POST", &send, t, hello);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["made"], serde_json::json!([]));
+    let written = port.host.state().written.clone();
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert_eq!(written[0].1, "hello");
+    let (status, again) = call(&mut port, "POST", &send, t, hello);
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(
+        port.host.state().written.len(),
+        1,
+        "a repeat never types twice"
+    );
+    let (_, done) = get(&mut port, "/api/v1/ops/tx1", t);
+    assert_eq!(done["body"]["status"]["status"], "done");
+
+    for body in [
+        r#"{"text":"hi"}"#,
+        r#"{"op":"tx3"}"#,
+        r#"{"op":"","text":"x"}"#,
+        "nope",
+    ] {
+        let (status, reply) = call(&mut port, "POST", &send, t, body);
+        assert_eq!(
+            (status, code(&reply)),
+            (400, "bad_request"),
+            "{body}: {reply}"
+        );
+    }
+    assert_eq!(port.host.state().written.len(), 1);
+
+    // A resume while running is accepted and launches nothing; trust
+    // with no question asked is refused by name; an unknown session is
+    // not found.
+    let (status, reply) = call(&mut port, "POST", &resume, t, r#"{"op":"rs1"}"#);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(port.host.state().spawned.len(), spawned + 1);
+    let trust = format!("/api/v1/sessions/{session}/trust");
+    let (status, reply) = call(&mut port, "POST", &trust, t, r#"{"op":"tr1"}"#);
+    assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+    assert_eq!(port.host.state().written.len(), 1);
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        "/api/v1/sessions/00000000-0000-0000-0000-000000000000/send",
+        t,
+        r#"{"op":"tx9","text":"x"}"#,
+    );
+    assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+
+    // Lowered again, the next command is refused.
+    port.app.dispatch(AppAction::SetDeviceScope {
+        device: id,
+        scope: Scope::Read,
+    });
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &send,
+        t,
+        r#"{"op":"tx4","text":"hello"}"#,
+    );
+    assert_eq!((status, code(&reply)), (403, "scope"), "{reply}");
+}
+
+/// A pane at Claude Code's folder question: the session view says so,
+/// `trust` answers it, and the answer reaches the pane once.
+#[test]
+fn trust_answers_the_folder_question_the_session_view_carries() {
+    let mut port = port();
+    let (_, _, session) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Control, "Vision Pro");
+    let t = Some(token.as_str());
+    running(
+        &mut port,
+        &session,
+        "Quick safety check: Is this a project you created or one you trust?\n\
+         \u{276f} No, exit\n  Yes, I trust this folder\n",
+    );
+    let (_, view) = get(&mut port, &format!("/api/v1/sessions/{session}"), t);
+    assert_eq!(view["body"]["session"]["trust_question"], true, "{view}");
+    let trust = format!("/api/v1/sessions/{session}/trust");
+    let (status, reply) = call(&mut port, "POST", &trust, t, r#"{"op":"tr1"}"#);
+    assert_eq!(status, 200, "{reply}");
+    let keys = port.host.state().keys.len();
+    assert!(keys >= 1, "the answer reached the pane");
+    let (status, _) = call(&mut port, "POST", &trust, t, r#"{"op":"tr1"}"#);
+    assert_eq!(status, 200);
+    assert_eq!(port.host.state().keys.len(), keys, "once");
+}
+
+#[test]
+fn a_screen_is_read_with_the_projects_secret_values_named() {
+    let mut port = port();
+    let (_, project, session) = seed(&mut port, "");
+    let pid = switchboard::core::ProjectId(uuid::Uuid::parse_str(&project).unwrap());
+    port.app.dispatch(AppAction::SetProjectEnv(
+        pid,
+        switchboard::core::ProjectEnv {
+            vars: vec![switchboard::core::EnvVar {
+                name: "API_TOKEN".into(),
+                value: String::new(),
+                secret: true,
+            }],
+            ..Default::default()
+        },
+    ));
+    port.secrets.state().insert(
+        switchboard::core::SecretScope::Project(pid).account("API_TOKEN"),
+        "tok-5e3cr3t".into(),
+    );
+    let record = RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    let pane = HostId(record.host_name());
+    port.host.state().statuses.push(HostStatus {
+        id: pane.clone(),
+        liveness: HostLiveness::Running {
+            pid: 7,
+            command: "claude".into(),
+        },
+        cwd: None,
+        last_activity: None,
+        title: None,
+    });
+    port.host.state().snapshots.insert(
+        pane,
+        "one\ntwo\n$ env | grep TOKEN\nAPI_TOKEN=tok-5e3cr3t\n\n\n".into(),
+    );
+    port.app.poll_now();
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/screen?lines=2"),
+        Some(&token),
+    );
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(
+        reply["body"]["text"],
+        "$ env | grep TOKEN\nAPI_TOKEN=<API_TOKEN>"
+    );
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/screen"),
+        Some(&token),
+    );
+    assert_eq!(status, 200);
+    let text = reply["body"]["text"].as_str().unwrap();
+    assert!(text.starts_with("one\ntwo"), "{text}");
+    assert!(!reply.to_string().contains("tok-5e3cr3t"), "{reply}");
+}
+
+/// Every string in a collection is bounded and the cut ones are named;
+/// a session read alone carries its notes whole.
+#[test]
+fn strings_are_bounded_in_a_collection_and_whole_alone() {
+    let mut port = port();
+    let notes = "n".repeat(10_000);
+    let (_, project, session) = seed(&mut port, &notes);
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/projects/{project}/sessions"),
+        Some(&token),
+    );
+    assert_eq!(status, 200);
+    let view = &reply["body"]["sessions"][0];
+    assert_eq!(view["notes"].as_str().unwrap().len(), 4096);
+    assert_eq!(view["truncated"], serde_json::json!(["notes"]));
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}"),
+        Some(&token),
+    );
+    assert_eq!(status, 200);
+    let view = &reply["body"]["session"];
+    assert_eq!(view["notes"].as_str().unwrap().len(), 10_000);
+    assert!(view.get("truncated").is_none(), "{view}");
+}
+
+#[test]
+fn a_wrong_pin_fails_at_the_handshake_before_any_request() {
+    let mut port = port();
+    let other = pinned_client(&"00".repeat(32)).unwrap();
+    let result = http(port.addr, &other, "GET", "/api/v1/info", None, "");
+    assert!(result.is_err(), "{result:?}");
+    // The right pin is still served.
+    let (status, _) = get(&mut port, "/api/v1/info", None);
+    assert_eq!(status, 200);
+}
+
+#[test]
+fn pair_is_rate_limited_per_listener() {
+    let mut port = port();
+    let mut statuses = Vec::new();
+    for _ in 0..7 {
+        let (status, _) = call(&mut port, "POST", "/api/v1/pair", None, "{}");
+        statuses.push(status);
+    }
+    assert_eq!(statuses, vec![403, 403, 403, 403, 403, 403, 429]);
+    let (status, reply) = get(&mut port, "/api/v1/info", None);
+    assert_eq!(status, 200, "info has its own limit: {reply}");
+}
+
+/// A certificate whose key is gone is remade over a new key under the
+/// same server id, every pairing is dropped, and the owner is told; a
+/// key that is present keeps the identity across restarts.
+#[test]
+fn a_missing_key_at_start_remakes_the_identity_and_clears_the_devices() {
+    let (old, _key_never_stored) = remote::make_identity(None, "Old", Listen::default()).unwrap();
+    let store = FakeRemoteStore::default();
+    {
+        let mut state = store.state();
+        state.identity = Some(old.clone());
+        state
+            .devices
+            .push(switchboard::ports::remote::PairedDevice {
+                id: uuid::Uuid::new_v4(),
+                name: "Stale".into(),
+                scope: Scope::Read,
+                token_sha256: "ab".repeat(32),
+                created: std::time::SystemTime::UNIX_EPOCH,
+                last_seen: None,
+            });
+    }
+    let secrets = FakeSecrets::default();
+    let port = port_with(FakeHost::default(), secrets.clone(), store.clone());
+    let fresh = store.state().identity.clone().unwrap();
+    assert_eq!(fresh.server_id, old.server_id, "the same installation");
+    assert_eq!(fresh.server_name, "Old");
+    assert_ne!(fresh.spki_sha256, old.spki_sha256, "a new key");
+    assert!(store.state().devices.is_empty());
+    assert!(port.app.core().identity_rotated());
+    assert!(port.app.core().devices().is_empty());
+    assert!(
+        secrets.state().contains_key(&fresh.key_account()),
+        "the new key is stored"
+    );
+    drop(port);
+
+    // The key is there now: a restart keeps everything.
+    let again = port_with(FakeHost::default(), secrets, store.clone());
+    assert_eq!(
+        store.state().identity.as_ref().unwrap().spki_sha256,
+        fresh.spki_sha256
+    );
+    assert!(!again.app.core().identity_rotated());
+}
+
+#[test]
+fn two_instances_have_distinct_identities_and_a_read_only_one_does_not_listen() {
+    let mut a = port();
+    let mut b = port();
+    let (_, ia) = get(&mut a, "/api/v1/info", None);
+    let (_, ib) = get(&mut b, "/api/v1/info", None);
+    assert_ne!(ia["body"]["server_id"], ib["body"]["server_id"]);
+    assert_ne!(ia["body"]["spki_sha256"], ib["body"]["spki_sha256"]);
+    assert_ne!(ia["epoch"], ib["epoch"]);
+    // B's pin does not open A.
+    let result = http(a.addr, &b.client, "GET", "/api/v1/info", None, "");
+    assert!(result.is_err());
+
+    let services = Services {
+        store: Box::new(MemoryStore {
+            lock_result: Some(false),
+            ..MemoryStore::default()
+        }),
+        ..fakes::services()
+    };
+    let mut app = SwitchboardApp::with_services(services);
+    // The editors a draft is read from save through a fake dialog.
+    app.ui_state.prompt_boxes.native = false;
+    app.start();
+    app.set_remote_port_override(Some(0));
+    assert!(app.listen_remote(|| {}).is_err());
+    assert!(app.remote_addr().is_none());
+}
+
+/// A changed address rebinds the port; a changed name does not.
+#[test]
+fn a_change_of_address_rebinds_the_port() {
+    let mut port = port();
+    let before = port.app.remote_addr().unwrap();
+    port.app.dispatch(AppAction::SetServerName("Desk".into()));
+    assert_eq!(
+        port.app.remote_addr(),
+        Some(before),
+        "a rename keeps the socket"
+    );
+    assert_eq!(
+        port.remote.state().identity.as_ref().unwrap().server_name,
+        "Desk"
+    );
+    port.app.dispatch(AppAction::SetRemoteListen {
+        lan: false,
+        port: 43199,
+    });
+    let after = port.app.remote_addr().unwrap();
+    assert_ne!(after, before, "rebound");
+    assert!(after.ip().is_loopback());
+    port.addr = after;
+    let (status, _) = get(&mut port, "/api/v1/info", None);
+    assert_eq!(status, 200, "served on the new socket");
+}
+
+/// Bonjour follows the listen preference: nothing on loopback, the
+/// record while the port is on the local network, under the current
+/// name, and withdrawn when the owner turns the network off.
+#[test]
+fn bonjour_advertises_only_while_the_port_is_on_the_lan() {
+    let mut port = port();
+    assert_eq!(
+        port.advertiser.current(),
+        None,
+        "loopback is not advertised"
+    );
+    // The core refuses port 0; the test's override still picks a free one.
+    port.app.dispatch(AppAction::SetRemoteListen {
+        lan: true,
+        port: 43187,
+    });
+    let addr = port.app.remote_addr().unwrap();
+    assert!(addr.ip().is_unspecified(), "bound to every interface");
+    let ad = port.advertiser.current().expect("advertised on the LAN");
+    let identity = port.remote.state().identity.clone().unwrap();
+    assert_eq!(ad.port, addr.port());
+    assert_eq!(ad.server_id, identity.server_id);
+    assert_eq!(ad.server_name, identity.server_name);
+    assert!(
+        ad.instance.starts_with(&identity.server_name),
+        "{:?} carries the display name",
+        ad.instance
+    );
+    assert!(
+        ad.instance
+            .contains(&identity.server_id.simple().to_string()[..6]),
+        "{:?} carries a short id suffix",
+        ad.instance
+    );
+    let txt = ad.txt();
+    assert!(txt.contains(&("v".to_owned(), "1".to_owned())));
+    assert!(txt.contains(&("id".to_owned(), identity.server_id.to_string())));
+    assert!(
+        !txt.iter().any(|(_, v)| v == &identity.spki_sha256),
+        "no key material in the TXT records"
+    );
+
+    port.app.dispatch(AppAction::SetServerName("Desk".into()));
+    let renamed = port.advertiser.current().expect("still advertised");
+    assert_eq!(renamed.server_name, "Desk");
+    assert!(renamed.instance.starts_with("Desk ("));
+    assert_eq!(
+        port.app.remote_addr(),
+        Some(addr),
+        "a rename re-advertises without rebinding"
+    );
+
+    port.app.dispatch(AppAction::SetRemoteListen {
+        lan: false,
+        port: 43187,
+    });
+    assert_eq!(port.advertiser.current(), None, "withdrawn off the LAN");
+    assert!(port.app.remote_addr().unwrap().ip().is_loopback());
+}
+
+/// The Swift client's fixtures: one reply of each shape the port sends,
+/// as `client/Fixtures/*.json`. The committed files must still decode
+/// as the wire types here (the `reply` tag put back), and the Swift
+/// tests decode the same files, so a shape change on either side fails
+/// a test. `SWITCHBOARD_WRITE_FIXTURES=1` rewrites them from a seeded
+/// port.
+/// Every fixture from a seeded port, written to `dir`.
+fn write_fixtures(dir: &std::path::Path) {
+    let mut port = port();
+    let mut scripted = conversation(2);
+    scripted.turns[1].final_text = "pong".into();
+    port.transcripts.set(Some(scripted));
+    let (space, project, session) = seed(&mut port, "ticket 1\nnotes with two lines");
+    launched(&mut port, &session);
+    let (command, _) = command_with_run(&mut port, &project, "$ make\nbuilding\n");
+    let record = RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    let pane = HostId(record.host_name());
+    port.host.state().statuses.push(HostStatus {
+        id: pane.clone(),
+        liveness: HostLiveness::Running {
+            pid: 7,
+            command: "claude".into(),
+        },
+        cwd: None,
+        last_activity: None,
+        title: None,
+    });
+    port.host
+        .state()
+        .snapshots
+        .insert(pane, "$ claude\n> fix the test\n\n".into());
+    port.app.poll_now();
+    control(
+        &mut port,
+        Request::new(
+            "st",
+            Body::SetNew {
+                space: space.clone(),
+                name: "Desk".into(),
+            },
+        ),
+    );
+    // A fixed name: the fake's default is this machine's hostname.
+    port.app
+        .dispatch(AppAction::SetServerName("Desk Mac".into()));
+    let identity = port.remote.state().identity.clone().unwrap();
+    let (_, info) = get(&mut port, "/api/v1/info", None);
+    port.app.dispatch(AppAction::OpenPairing {
+        code: "ABCD2345".into(),
+        scope: Scope::Read,
+    });
+    let body = serde_json::json!({
+        "code": "ABCD2345", "device_name": "Vision Pro", "spki_sha256": identity.spki_sha256
+    });
+    let (_, paired) = call(&mut port, "POST", "/api/v1/pair", None, &body.to_string());
+    let token = paired["body"]["token"].as_str().unwrap().to_owned();
+    let t = Some(token.as_str());
+    let mut files = vec![
+        ("info", info),
+        ("pair", paired),
+        ("projects", get(&mut port, "/api/v1/projects", t).1),
+        ("spaces", get(&mut port, "/api/v1/spaces", t).1),
+        (
+            "sets",
+            get(&mut port, &format!("/api/v1/spaces/{space}/sets"), t).1,
+        ),
+        (
+            "sessions",
+            get(
+                &mut port,
+                &format!("/api/v1/projects/{project}/sessions"),
+                t,
+            )
+            .1,
+        ),
+        (
+            "session",
+            get(&mut port, &format!("/api/v1/sessions/{session}"), t).1,
+        ),
+        ("waiting", get(&mut port, "/api/v1/waiting", t).1),
+        (
+            "screen",
+            get(&mut port, &format!("/api/v1/sessions/{session}/screen"), t).1,
+        ),
+        ("error", get(&mut port, "/api/v1/projects", None).1),
+        (
+            "pin",
+            serde_json::json!({
+                "certificate": identity.certificate,
+                "spki_sha256": identity.spki_sha256,
+            }),
+        ),
+    ];
+    // The command fixtures need the control scope.
+    let device = port.app.core().devices()[0].id;
+    port.app.dispatch(AppAction::SetDeviceScope {
+        device,
+        scope: Scope::Control,
+    });
+    files.extend(content_fixtures(&mut port, &session, &command, &token));
+    files.push(("file", file_fixture(&mut port, &space, &token)));
+    for (name, value) in &mut files {
+        if *name == "pair" {
+            // A fixture never carries a real token.
+            value["body"]["token"] = serde_json::json!("A".repeat(43));
+        }
+        let text = serde_json::to_string_pretty(value).unwrap();
+        std::fs::write(dir.join(format!("{name}.json")), text + "\n").unwrap();
+    }
+}
+
+/// A pinned file of a project with a root on disk, read.
+fn file_fixture(port: &mut Port, space: &str, token: &str) -> serde_json::Value {
+    let root = tempfile::Builder::new()
+        .prefix("sbfix")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::create_dir(root.path().join("docs")).unwrap();
+    std::fs::write(
+        root.path().join("docs/plan.md"),
+        "# Plan\n\n1. Fix the test.\n",
+    )
+    .unwrap();
+    let pinned = project_with_root(port, space, root.path());
+    pin_files(port, space, &pinned, &["docs/plan.md"]);
+    get(
+        port,
+        &format!("/api/v1/projects/{pinned}/files/docs/plan.md"),
+        Some(token),
+    )
+    .1
+}
+
+/// The content replies: a page, the last response, the runs, a tail.
+fn content_fixtures(
+    port: &mut Port,
+    session: &str,
+    command: &str,
+    token: &str,
+) -> Vec<(&'static str, serde_json::Value)> {
+    let t = Some(token);
+    vec![
+        (
+            "conversation",
+            get(
+                port,
+                &format!("/api/v1/sessions/{session}/conversation?limit=1"),
+                t,
+            )
+            .1,
+        ),
+        (
+            "turn",
+            get(
+                port,
+                &format!("/api/v1/sessions/{session}/conversation/1"),
+                t,
+            )
+            .1,
+        ),
+        (
+            "last_response",
+            get(
+                port,
+                &format!("/api/v1/sessions/{session}/last-response"),
+                t,
+            )
+            .1,
+        ),
+        (
+            "runs",
+            get(port, &format!("/api/v1/sessions/{command}/runs"), t).1,
+        ),
+        (
+            "run_output",
+            get(
+                port,
+                &format!("/api/v1/sessions/{command}/runs/1/output"),
+                t,
+            )
+            .1,
+        ),
+        (
+            "command",
+            call(
+                port,
+                "POST",
+                &format!("/api/v1/sessions/{session}/send"),
+                t,
+                r#"{"op":"fixture-send","text":"ping"}"#,
+            )
+            .1,
+        ),
+        ("op_status", get(port, "/api/v1/ops/fixture-send", t).1),
+        (
+            "draft",
+            call(
+                port,
+                "POST",
+                &format!("/api/v1/sessions/{session}/dictation"),
+                t,
+                r#"{"session":7,"events":[{"sequence":1,"kind":"started"},{"sequence":2,"kind":"voice_started","utterance":1},{"sequence":3,"kind":"final","utterance":1,"text":"Fix the test."},{"sequence":4,"kind":"partial","utterance":2,"revision":1,"text":"and run"}]}"#,
+            )
+            .1,
+        ),
+    ]
+}
+
+#[test]
+fn the_client_fixtures_decode_on_both_sides() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("client/Fixtures");
+    if std::env::var_os("SWITCHBOARD_WRITE_FIXTURES").is_some() {
+        write_fixtures(&dir);
+    }
+    let read = |name: &str| -> serde_json::Value {
+        let path = dir.join(format!("{name}.json"));
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path:?}: {e}"))
+    };
+    for (name, tag) in [
+        ("projects", "projects"),
+        ("spaces", "spaces"),
+        ("sets", "sets"),
+        ("sessions", "sessions"),
+        ("session", "session"),
+        ("waiting", "waiting"),
+        ("screen", "screen"),
+    ] {
+        let fixture = read(name);
+        assert!(fixture["epoch"].is_string(), "{name}: epoch");
+        assert!(fixture["revision"].is_u64(), "{name}: revision");
+        let mut body = fixture["body"].clone();
+        body["reply"] = serde_json::json!(tag);
+        let reply: Reply = serde_json::from_value(body)
+            .unwrap_or_else(|e| panic!("{name}.json no longer decodes as the wire type: {e}"));
+        assert!(
+            !matches!(reply, Reply::Failed { .. }),
+            "{name}: a failure fixture"
+        );
+    }
+    // The content shapes have no wire type on the control side; they
+    // are checked by field.
+    let page = read("conversation");
+    assert_eq!(page["body"]["next"], 2);
+    assert_eq!(page["body"]["turns"][0]["n"], 1);
+    let last = read("last_response");
+    assert_eq!(last["body"]["n"], 2);
+    assert!(last["body"]["text"].is_string());
+    let runs = read("runs");
+    assert_eq!(runs["body"]["runs"][0]["n"], 1);
+    let output = read("run_output");
+    assert_eq!(output["body"]["n"], 1);
+    assert!(output["body"]["text"].is_string());
+    let file = read("file");
+    assert_eq!(file["body"]["path"], "docs/plan.md");
+    assert!(file["body"]["text"].is_string() && file["body"]["size"].is_u64());
+    let draft = read("draft");
+    assert_eq!(draft["body"]["draft"]["text"], "Fix the test. and run");
+    assert_eq!(draft["body"]["draft"]["status"], "listening");
+    let info = read("info");
+    assert_eq!(info["body"]["protocol"], 1);
+    assert!(info["body"]["spki_sha256"].is_string());
+    let pair = read("pair");
+    assert_eq!(pair["body"]["token"].as_str().map(str::len), Some(43));
+    assert_eq!(pair["body"]["scope"], "read");
+    let error = read("error");
+    assert_eq!(code(&error), "unauthorized");
+    let pin = read("pin");
+    let der = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        pin["certificate"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        remote::spki_sha256_of_cert(&der).unwrap(),
+        pin["spki_sha256"].as_str().unwrap(),
+        "the pin fixture's hash is the certificate's"
+    );
+}
+
+// --- events
+
+/// A device's event subscription: a thread holding the WebSocket over
+/// the pinned connection, each text frame handed over `frames`, the
+/// close as an `Err`. While `paused` the thread reads nothing, which is
+/// how a test makes a subscriber fall behind.
+/// What the test sends down its subscriber's socket.
+enum Out {
+    Text(String),
+    Close,
+}
+
+struct Subscriber {
+    frames: std::sync::mpsc::Receiver<Result<String, String>>,
+    outbox: std::sync::mpsc::Sender<Out>,
+    paused: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Subscriber {
+    /// A `watch` or `unwatch` frame for a screen.
+    fn send(&self, kind: &str, resource_kind: &str, id: &str) {
+        let text = serde_json::json!({
+            "type": kind,
+            "resource": { "kind": resource_kind, "id": id },
+        })
+        .to_string();
+        self.outbox.send(Out::Text(text)).expect("socket thread");
+    }
+
+    /// Close the socket from the device's side.
+    fn close(&self) {
+        let _ = self.outbox.send(Out::Close);
+    }
+}
+
+fn subscribe(port: &mut Port, token: &str) -> Subscriber {
+    subscribe_at(port, token, "/api/v1/events")
+}
+
+/// A subscription at `path`, for its query (`?scope=all`).
+fn subscribe_at(port: &mut Port, token: &str, path: &str) -> Subscriber {
+    let addr = port.addr;
+    let url = format!("wss://localhost{path}");
+    let config = Arc::clone(&port.client);
+    let token = token.to_owned();
+    let (tx, frames) = std::sync::mpsc::channel();
+    let (outbox, out_rx) = std::sync::mpsc::channel::<Out>();
+    let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hold = Arc::clone(&paused);
+    std::thread::spawn(move || {
+        let tcp = TcpStream::connect(addr).expect("connect");
+        let conn = ClientConnection::new(config, ServerName::try_from("localhost").unwrap())
+            .expect("client");
+        let mut s = StreamOwned::new(conn, tcp);
+        while s.conn.is_handshaking() {
+            s.conn.complete_io(&mut s.sock).expect("handshake");
+        }
+        let mut request = url.into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+        let (mut ws, _) = match tungstenite::client(request, s) {
+            Ok(ok) => ok,
+            Err(e) => {
+                let _ = tx.send(Err(format!("upgrade refused: {e}")));
+                return;
+            }
+        };
+        // A short read timeout, so the outbox is looked at between
+        // frames; the library keeps a part-read frame across it.
+        ws.get_mut()
+            .sock
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .expect("timeout");
+        loop {
+            while hold.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            for out in out_rx.try_iter() {
+                match out {
+                    Out::Text(text) => ws.send(tungstenite::Message::text(text)).expect("send"),
+                    Out::Close => {
+                        let _ = ws.close(None);
+                        let _ = ws.flush();
+                        return;
+                    }
+                }
+            }
+            match ws.read() {
+                Ok(tungstenite::Message::Text(text)) => {
+                    if tx.send(Ok(text.to_string())).is_err() {
+                        return;
+                    }
+                }
+                Ok(tungstenite::Message::Close(_)) => {
+                    let _ = tx.send(Err("closed".into()));
+                    return;
+                }
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e))
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(e) => {
+                    let _ = tx.send(Err(format!("closed: {e}")));
+                    return;
+                }
+            }
+        }
+    });
+    let subscriber = Subscriber {
+        frames,
+        outbox,
+        paused,
+    };
+    let hello = next_frame(port, &subscriber, 5)
+        .expect("hello")
+        .expect("a frame");
+    let hello: serde_json::Value = serde_json::from_str(&hello).unwrap();
+    assert_eq!(hello["type"], "hello", "{hello}");
+    subscriber
+}
+
+/// The next frame within `secs`, the app serving meanwhile.
+fn next_frame(port: &mut Port, s: &Subscriber, secs: u64) -> Option<Result<String, String>> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        port.app.serve_pending();
+        match s.frames.try_recv() {
+            Ok(frame) => return Some(frame),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => return None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        if std::time::Instant::now() > deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Every event frame that arrives before 300 ms of silence, parsed.
+fn events(port: &mut Port, s: &Subscriber) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let mut quiet = std::time::Instant::now();
+    loop {
+        port.app.serve_pending();
+        match s.frames.try_recv() {
+            Ok(Ok(text)) => {
+                out.push(serde_json::from_str(&text).unwrap());
+                quiet = std::time::Instant::now();
+                continue;
+            }
+            Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        if quiet.elapsed() > Duration::from_millis(300) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    out
+}
+
+/// `(type, kind, id)` of each event, for comparing.
+fn resources(events: &[serde_json::Value]) -> Vec<(String, String, String)> {
+    events
+        .iter()
+        .map(|e| {
+            (
+                e["type"].as_str().unwrap_or("").to_owned(),
+                e["resource"]["kind"].as_str().unwrap_or("").to_owned(),
+                e["resource"]["id"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_subscriber_gets_hello_then_changed_and_removed_as_the_state_moves() {
+    let mut port = port();
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let sub = subscribe(&mut port, &token);
+    assert_eq!(port.app.subscriber_count(), 1);
+    let before = port.app.revision();
+    let (space, project, session) = seed(&mut port, "ticket 1");
+    let got = events(&mut port, &sub);
+    let moved = resources(&got);
+    for expected in [
+        ("changed", "space", space.as_str()),
+        ("changed", "spaces", ""),
+        ("changed", "project", project.as_str()),
+        ("changed", "projects", ""),
+        ("changed", "session", session.as_str()),
+        ("changed", "sessions", project.as_str()),
+    ] {
+        let expected = (
+            expected.0.to_owned(),
+            expected.1.to_owned(),
+            expected.2.to_owned(),
+        );
+        assert!(moved.contains(&expected), "{expected:?} in {moved:?}");
+    }
+    let identity = port.remote.state().identity.clone().unwrap();
+    for event in &got {
+        assert_eq!(event["server_id"], identity.server_id.to_string());
+        assert!(event["revision"].as_u64().unwrap() > before, "{event}");
+        assert!(event["at_ms"].as_u64().unwrap() > 0);
+        assert!(event["epoch"].is_string());
+    }
+    assert_eq!(port.app.revision(), got.last().unwrap()["revision"]);
+
+    let record = RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    port.app.dispatch(AppAction::RemoveSession(record));
+    let moved = resources(&events(&mut port, &sub));
+    assert!(
+        moved.contains(&("removed".into(), "session".into(), session.clone())),
+        "{moved:?}"
+    );
+    assert!(
+        moved.contains(&("changed".into(), "sessions".into(), project.clone())),
+        "{moved:?}"
+    );
+}
+
+/// Dispatch's worker records, a ticket's project and a worker session
+/// with an op of Dispatch's `<ticket>-<nonce>` form, are the ticket
+/// view's and not the browser's: a listing leaves them out and a plain
+/// subscriber never hears of them, while `scope=all` gets everything.
+/// A supervisor's records and the owner's own are listed as ever, and
+/// a worker record is still read by its id.
+/// A project added over the control port under `op`.
+fn project_under_op(port: &mut Port, op: &str, space: &str, name: &str) -> String {
+    let reply = control(
+        port,
+        Request::new(
+            op,
+            Body::ProjectAdd {
+                space: space.to_owned(),
+                name: name.into(),
+                root: PathBuf::from("/tmp"),
+            },
+        ),
+    );
+    made_id(&reply, RecordKind::Project)
+}
+
+/// A session made over the control port under `op`.
+fn session_under_op(port: &mut Port, op: &str, project: &str, name: &str) -> String {
+    let reply = control(
+        port,
+        Request::new(
+            op,
+            Body::SessionNew {
+                project: project.to_owned(),
+                name: name.into(),
+                session_kind: SessionKind::Claude,
+                cwd: PathBuf::from("/tmp"),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: String::new(),
+                env: std::collections::BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            },
+        ),
+    );
+    made_id(&reply, RecordKind::Session)
+}
+
+/// The ids of a listing at `path`, under `key`.
+fn listed(port: &mut Port, path: &str, token: &str, key: &str) -> Vec<String> {
+    let (status, reply) = get(port, path, Some(token));
+    assert_eq!(status, 200, "{reply}");
+    reply["body"][key]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The ids of the `session` frames a subscriber got.
+fn session_frames(port: &mut Port, s: &Subscriber) -> Vec<String> {
+    resources(&events(port, s))
+        .into_iter()
+        .filter(|(_, kind, _)| kind == "session")
+        .map(|(_, _, id)| id)
+        .collect()
+}
+
+#[test]
+fn dispatchs_worker_records_are_listed_and_announced_only_for_scope_all() {
+    let mut port = port();
+    let (space, project, session) = seed(&mut port, "");
+    let ticket = project_under_op(&mut port, "2fac53cf-1a0b9b3f", &space, "#7");
+    let planner = session_under_op(&mut port, "2fac53cf-cfb35312", &ticket, "planner");
+    let sup_project = project_under_op(&mut port, "sup-Switchboard-710de0ce", &space, "Sup · S");
+    let supervisor = session_under_op(&mut port, "sup-Switchboard-62f47554", &sup_project, "Sup");
+    let reviewer = session_under_op(&mut port, "2fac53cf-c6c61153", &project, "reviewer");
+    port.app.poll_now();
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let shown = listed(&mut port, "/api/v1/projects", &token, "projects");
+    assert!(
+        shown.contains(&project) && shown.contains(&sup_project),
+        "{shown:?}"
+    );
+    assert!(!shown.contains(&ticket), "the ticket's project is left out");
+    let all = listed(&mut port, "/api/v1/projects?scope=all", &token, "projects");
+    assert!(all.contains(&ticket), "scope=all lists it");
+    let path = format!("/api/v1/projects/{project}/sessions");
+    let shown = listed(&mut port, &path, &token, "sessions");
+    assert!(
+        shown.contains(&session) && !shown.contains(&reviewer),
+        "{shown:?}"
+    );
+    let all = listed(&mut port, &format!("{path}?scope=all"), &token, "sessions");
+    assert!(all.contains(&reviewer), "scope=all lists the worker");
+    let path = format!("/api/v1/projects/{sup_project}/sessions");
+    let shown = listed(&mut port, &path, &token, "sessions");
+    assert!(
+        shown.contains(&supervisor),
+        "a supervisor's session is the owner's"
+    );
+    let (status, _) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{reviewer}"),
+        Some(&token),
+    );
+    assert_eq!(status, 200, "a worker record is still read by its id");
+
+    let plain = subscribe(&mut port, &token);
+    let all = subscribe_at(&mut port, &token, "/api/v1/events?scope=all");
+    for (id, name) in [
+        (&reviewer, "reviewer 2"),
+        (&planner, "planner 2"),
+        (&supervisor, "Supervisor 2"),
+        (&session, "investigator 2"),
+    ] {
+        let record = RecordId(uuid::Uuid::parse_str(id).unwrap());
+        port.app
+            .dispatch(AppAction::RenameSession(record, name.into()));
+    }
+    let heard = resources(&events(&mut port, &plain));
+    assert!(
+        !heard
+            .iter()
+            .any(|(_, kind, id)| kind == "sessions" && id == &ticket),
+        "no frame about the ticket project's collection: {heard:?}"
+    );
+    let plain_ids: Vec<String> = heard
+        .into_iter()
+        .filter(|(_, kind, _)| kind == "session")
+        .map(|(_, _, id)| id)
+        .collect();
+    assert!(
+        plain_ids.contains(&session) && plain_ids.contains(&supervisor),
+        "{plain_ids:?}"
+    );
+    assert!(
+        !plain_ids.contains(&reviewer) && !plain_ids.contains(&planner),
+        "{plain_ids:?}"
+    );
+    let all_ids = session_frames(&mut port, &all);
+    assert!(
+        all_ids.contains(&reviewer) && all_ids.contains(&planner),
+        "{all_ids:?}"
+    );
+}
+
+/// What the effect list would miss: a set rename (`SaveViews`), a trust
+/// question (`PromptSeen`, no save) and a Codex pane passing its quiet
+/// interval (`HostListed`, no save) each emit `changed`; ten ticks over
+/// a running pane with nothing else moving emit nothing, though
+/// `quiet_secs` moved on each.
+#[test]
+fn a_rename_a_trust_question_and_a_quiet_pane_emit_but_ten_quiet_passes_do_not() {
+    let mut port = port();
+    let (space, _project, session) = seed(&mut port, "");
+    control(
+        &mut port,
+        Request::new(
+            "st",
+            Body::SetNew {
+                space: space.clone(),
+                name: "Desk".into(),
+            },
+        ),
+    );
+    let set = port
+        .app
+        .core()
+        .set_views(switchboard::core::SpaceId(
+            uuid::Uuid::parse_str(&space).unwrap(),
+        ))
+        .into_iter()
+        .find(|s| s.name == "Desk")
+        .unwrap();
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let sub = subscribe(&mut port, &token);
+    port.app.dispatch(AppAction::RenameWorkingSet {
+        set: switchboard::core::SetId(uuid::Uuid::parse_str(&set.id).unwrap()),
+        name: "Bench".into(),
+    });
+    assert_eq!(
+        resources(&events(&mut port, &sub)),
+        vec![("changed".into(), "set".into(), set.id.clone())]
+    );
+
+    let record = RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    let pane = HostId(record.host_name());
+    port.host.state().statuses.push(HostStatus {
+        id: pane.clone(),
+        liveness: HostLiveness::Running {
+            pid: 7,
+            command: "claude".into(),
+        },
+        cwd: None,
+        last_activity: Some(std::time::SystemTime::now()),
+        title: None,
+    });
+    port.app.poll_now();
+    let _ = events(&mut port, &sub);
+    port.app.dispatch(AppAction::PromptSeen {
+        id: record,
+        seen: true,
+    });
+    let moved = resources(&events(&mut port, &sub));
+    assert!(
+        moved.contains(&("changed".into(), "session".into(), session.clone())),
+        "{moved:?}"
+    );
+    assert!(
+        moved.contains(&("changed".into(), "waiting".into(), String::new())),
+        "{moved:?}"
+    );
+    let revision = port.app.revision();
+    for _ in 0..10 {
+        port.app.dispatch(AppAction::Tick);
+        port.app.serve_pending();
+    }
+    assert_eq!(events(&mut port, &sub), Vec::<serde_json::Value>::new());
+    assert_eq!(port.app.revision(), revision, "nothing moved");
+}
+
+/// A mutation after `hello`: its event and a snapshot taken after it
+/// carry the same revision, so the client reconciles the two as one.
+#[test]
+fn a_mutation_after_hello_is_seen_at_the_revision_the_snapshot_carries() {
+    let mut port = port();
+    let (_, _, session) = seed(&mut port, "before");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let sub = subscribe(&mut port, &token);
+    let hello_revision = port.app.revision();
+    let record = RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    port.app
+        .dispatch(AppAction::SetSessionNotes(record, "after".into()));
+    let got = events(&mut port, &sub);
+    let changed = got
+        .iter()
+        .find(|e| e["resource"]["kind"] == "session")
+        .expect("the session changed");
+    assert_eq!(changed["revision"], hello_revision + 1);
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}"),
+        Some(&token),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(reply["body"]["session"]["notes"], "after");
+    assert_eq!(reply["revision"], changed["revision"]);
+}
+
+/// A subscriber that stops reading is dropped once it falls a queue
+/// behind: it gets `resync_required` and the close, and a subscriber
+/// that keeps up sees every event meanwhile. The device's socket
+/// buffers hold a good deal before the host's send blocks, so the
+/// burst here is a hundred and fifty sessions flipping between listed
+/// and not, as many times as it takes.
+#[test]
+fn an_overflowed_subscriber_is_told_to_resync_and_closed_while_another_keeps_up() {
+    let mut port = port();
+    let (_, project, _) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let slow = subscribe(&mut port, &token);
+    let fast = subscribe(&mut port, &token);
+    slow.paused.store(true, std::sync::atomic::Ordering::SeqCst);
+    for n in 1..150 {
+        port.app.dispatch(AppAction::Control {
+            op: format!("se{n}"),
+            action: switchboard::core::ControlAction::try_from(Body::SessionNew {
+                project: project.clone(),
+                name: format!("s{n}"),
+                session_kind: SessionKind::Shell,
+                cwd: PathBuf::from("/tmp"),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: String::new(),
+                env: std::collections::BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            })
+            .unwrap(),
+        });
+    }
+    let all: Vec<HostStatus> = port.app.core().workspaces()[0]
+        .sessions
+        .iter()
+        .map(|s| HostStatus {
+            id: HostId(s.id.host_name()),
+            liveness: HostLiveness::Running {
+                pid: 7,
+                command: "sh".into(),
+            },
+            cwd: None,
+            last_activity: None,
+            title: None,
+        })
+        .collect();
+    let mut rounds = 0;
+    while port.app.subscriber_count() == 2 && rounds < 200 {
+        port.host.state().statuses = if rounds % 2 == 0 {
+            all.clone()
+        } else {
+            Vec::new()
+        };
+        port.app.poll_now();
+        port.app.serve_pending();
+        rounds += 1;
+    }
+    assert_eq!(port.app.subscriber_count(), 1, "the slow one is dropped");
+    slow.paused
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let mut last_text = None;
+    let mut closed = false;
+    while let Some(frame) = next_frame(&mut port, &slow, 15) {
+        let Ok(text) = frame else {
+            closed = true;
+            break;
+        };
+        last_text = Some(text);
+    }
+    let last: serde_json::Value = serde_json::from_str(&last_text.expect("frames")).unwrap();
+    assert_eq!(last["type"], "resync_required", "{last}");
+    assert!(closed, "the socket was closed after it");
+    let seen_by_fast = events(&mut port, &fast);
+    assert!(
+        seen_by_fast.len() > 300,
+        "{} events reached the fast one",
+        seen_by_fast.len()
+    );
+    assert_eq!(
+        port.app.subscriber_count(),
+        1,
+        "the fast one is still subscribed"
+    );
+}
+
+/// Revoke in the dialog closes the device's socket at once, with no
+/// `resync_required`: there is nothing to come back for.
+#[test]
+fn revoke_closes_the_devices_socket() {
+    let mut port = port();
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let sub = subscribe(&mut port, &token);
+    let device = port.app.core().devices()[0].id;
+    port.app.dispatch(AppAction::RevokeDevice(device));
+    assert_eq!(port.app.subscriber_count(), 0);
+    match next_frame(&mut port, &sub, 5) {
+        Some(Err(reason)) => assert!(reason.starts_with("closed"), "{reason}"),
+        other => panic!("expected the close, got {other:?}"),
+    }
+    let (status, _) = get(&mut port, "/api/v1/waiting", Some(&token));
+    assert_eq!(status, 401, "the token is gone too");
+}
+
+/// `/ops/{op}` on the port: a creation's status is `done` with its
+/// reply, an op never seen is `unknown`; and `/events` without an
+/// upgrade is refused by name.
+#[test]
+fn ops_status_is_read_on_the_port_and_events_needs_an_upgrade() {
+    let mut port = port();
+    seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let (status, reply) = get(&mut port, "/api/v1/ops/se", Some(&token));
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["status"]["status"], "done");
+    assert_eq!(reply["body"]["status"]["reply"]["reply"], "launched");
+    let (_, reply) = get(&mut port, "/api/v1/ops/never", Some(&token));
+    assert_eq!(reply["body"]["status"]["status"], "unknown");
+    let (status, reply) = get(&mut port, "/api/v1/events", Some(&token));
+    assert_eq!((status, code(&reply)), (400, "upgrade_required"), "{reply}");
+    let (status, _) = get(&mut port, "/api/v1/events", None);
+    assert_eq!(status, 401);
+}
+
+/// The diff pass over three hundred sessions, timed and printed (run
+/// with `--nocapture`); the spec's budget is 1 ms of frame time per
+/// pass.
+#[test]
+fn the_fingerprint_pass_over_three_hundred_sessions_is_measured() {
+    let mut port = port();
+    let (_, project, _) = seed(&mut port, "ticket");
+    for n in 1..300 {
+        port.app.dispatch(AppAction::Control {
+            op: format!("se{n}"),
+            action: switchboard::core::ControlAction::try_from(Body::SessionNew {
+                project: project.clone(),
+                name: format!("s{n}"),
+                session_kind: SessionKind::Shell,
+                cwd: PathBuf::from("/tmp"),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: "n".repeat(500),
+                env: std::collections::BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            })
+            .unwrap(),
+        });
+    }
+    assert_eq!(port.app.core().workspaces()[0].sessions.len(), 300);
+    let now = std::time::SystemTime::now();
+    let t0 = std::time::Instant::now();
+    let runs = 20;
+    let mut fp = None;
+    for _ in 0..runs {
+        fp = Some(switchboard::core::revision::Fingerprints::of(
+            port.app.core(),
+            now,
+        ));
+    }
+    let per_pass = t0.elapsed() / runs;
+    let fp = fp.unwrap();
+    let t1 = std::time::Instant::now();
+    let changes = fp.changes(&fp);
+    let compare = t1.elapsed();
+    assert!(changes.is_empty());
+    println!(
+        "fingerprint pass over {} resources: {per_pass:?}; compare: {compare:?}",
+        fp.len()
+    );
+}
+
+/// Put `session`'s pane on the fake host, running, showing `text`.
+fn pane_running(port: &mut Port, session: &str, text: &str) -> RecordId {
+    let record = RecordId(uuid::Uuid::parse_str(session).unwrap());
+    let pane = HostId(record.host_name());
+    {
+        let mut state = port.host.state();
+        state.statuses.retain(|s| s.id != pane);
+        state.statuses.push(HostStatus {
+            id: pane.clone(),
+            liveness: HostLiveness::Running {
+                pid: 7,
+                command: "claude".into(),
+            },
+            cwd: None,
+            last_activity: None,
+            title: None,
+        });
+        state.snapshots.insert(pane, text.into());
+    }
+    port.app.poll_now();
+    record
+}
+
+/// Serve until `check` holds or `secs` pass.
+fn settle(port: &mut Port, secs: u64, check: impl Fn(&SwitchboardApp) -> bool) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        port.app.serve_pending();
+        if check(&port.app) {
+            return true;
+        }
+        if std::time::Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A screen read by a paired device: the revision and the text.
+fn screen(port: &mut Port, session: &str, token: &str, lines: Option<usize>) -> (u64, String) {
+    let query = lines.map(|n| format!("?lines={n}")).unwrap_or_default();
+    let (status, reply) = get(
+        port,
+        &format!("/api/v1/sessions/{session}/screen{query}"),
+        Some(token),
+    );
+    assert_eq!(status, 200, "{reply}");
+    (
+        reply["revision"].as_u64().unwrap(),
+        reply["body"]["text"].as_str().unwrap().to_owned(),
+    )
+}
+
+/// A `watch` is answered `watching` and enters the key; the poll then
+/// observes the pane and emits `changed` for the screen; two reads of
+/// the same text carry one revision, however many lines each asks for,
+/// and the poll says nothing while the pane holds still; a pane that
+/// moves is a new revision, which the next read carries.
+#[test]
+fn a_watched_screen_moves_on_poll_and_an_unchanged_read_keeps_its_revision() {
+    let mut port = port();
+    let (_, _, session) = seed(&mut port, "");
+    let record = pane_running(&mut port, &session, "one\ntwo\n");
+    port.app.set_watch_poll(Duration::from_millis(50));
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let sub = subscribe(&mut port, &token);
+    sub.send("watch", "screen", &session);
+    let got = events(&mut port, &sub);
+    let moved = resources(&got);
+    assert_eq!(
+        moved.first(),
+        Some(&("watching".into(), "screen".into(), session.clone())),
+        "{moved:?}"
+    );
+    assert!(
+        moved.contains(&("changed".into(), "screen".into(), session.clone())),
+        "{moved:?}"
+    );
+    assert_eq!(port.app.watched_keys(), vec![ContentKey::Screen(record)]);
+    let first = port
+        .app
+        .content_revision(&ContentKey::Screen(record))
+        .unwrap();
+    assert_eq!(got.last().unwrap()["revision"], first);
+
+    let (r1, text) = screen(&mut port, &session, &token, None);
+    assert_eq!((r1, text.as_str()), (first, "one\ntwo"));
+    let (r2, text) = screen(&mut port, &session, &token, Some(1));
+    assert_eq!((r2, text.as_str()), (first, "two"));
+    assert!(events(&mut port, &sub).is_empty(), "nothing moved");
+
+    port.host
+        .state()
+        .snapshots
+        .insert(HostId(record.host_name()), "one\ntwo\nthree\n".into());
+    let got = events(&mut port, &sub);
+    assert_eq!(
+        resources(&got),
+        vec![("changed".into(), "screen".into(), session.clone())]
+    );
+    let next = got[0]["revision"].as_u64().unwrap();
+    assert!(next > first);
+    let (r3, text) = screen(&mut port, &session, &token, None);
+    assert_eq!((r3, text.as_str()), (next, "one\ntwo\nthree"));
+}
+
+/// A secret added to the project after the watch moves the screen
+/// though the pane did not: the policy is in the version, and the next
+/// read carries the value's name instead of the value.
+#[test]
+fn a_policy_change_moves_a_watched_screen_though_the_pane_did_not() {
+    let mut port = port();
+    let (_, project, session) = seed(&mut port, "");
+    pane_running(&mut port, &session, "$ env\nAPI_TOKEN=tok-5e3cr3t\n");
+    port.app.set_watch_poll(Duration::from_millis(50));
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let sub = subscribe(&mut port, &token);
+    sub.send("watch", "screen", &session);
+    let got = events(&mut port, &sub);
+    assert_eq!(got.len(), 2, "{got:?}");
+    let (first, text) = screen(&mut port, &session, &token, None);
+    assert!(
+        text.contains("tok-5e3cr3t"),
+        "no secret declared yet: {text}"
+    );
+
+    let pid = switchboard::core::ProjectId(uuid::Uuid::parse_str(&project).unwrap());
+    port.secrets.state().insert(
+        switchboard::core::SecretScope::Project(pid).account("API_TOKEN"),
+        "tok-5e3cr3t".into(),
+    );
+    port.app.dispatch(AppAction::SetProjectEnv(
+        pid,
+        switchboard::core::ProjectEnv {
+            vars: vec![switchboard::core::EnvVar {
+                name: "API_TOKEN".into(),
+                value: String::new(),
+                secret: true,
+            }],
+            ..Default::default()
+        },
+    ));
+    let got = events(&mut port, &sub);
+    let moved = resources(&got);
+    assert!(
+        moved.contains(&("changed".into(), "screen".into(), session.clone())),
+        "{moved:?}"
+    );
+    let (next, text) = screen(&mut port, &session, &token, None);
+    assert!(next > first);
+    assert_eq!(text, "$ env\nAPI_TOKEN=<API_TOKEN>");
+}
+
+/// Past the cap the least recently read key goes, silently; a read of
+/// an evicted key works and puts it back, at another's expense.
+#[test]
+fn the_watch_set_is_capped_and_a_read_of_an_evicted_key_puts_it_back() {
+    let mut port = port();
+    let (_, project, _) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let mut sessions = Vec::new();
+    for n in 0..(switchboard::content::WATCH_CAP + 2) {
+        // An op id of its own each: a repeated id is replayed.
+        let reply = control(
+            &mut port,
+            Request::new(
+                format!("se{n}"),
+                Body::SessionNew {
+                    project: project.clone(),
+                    name: format!("s{n}"),
+                    session_kind: SessionKind::Claude,
+                    cwd: PathBuf::from("/tmp"),
+                    launch: Launch::Shell,
+                    prompt: None,
+                    notes: String::new(),
+                    env: std::collections::BTreeMap::new(),
+                    env_sets: Vec::new(),
+                    replaces: None,
+                },
+            ),
+        );
+        let session = made_id(&reply, RecordKind::Session);
+        let record = pane_running(&mut port, &session, &format!("pane {n}\n"));
+        sessions.push((session, ContentKey::Screen(record)));
+    }
+    for (session, _) in &sessions {
+        screen(&mut port, session, &token, Some(1));
+    }
+    let watched = port.app.watched_keys();
+    assert_eq!(watched.len(), switchboard::content::WATCH_CAP);
+    assert!(!watched.contains(&sessions[0].1), "the first read went");
+    assert!(!watched.contains(&sessions[1].1), "and the second");
+    assert!(watched.contains(&sessions[2].1));
+
+    let (_, text) = screen(&mut port, &sessions[0].0, &token, Some(1));
+    assert_eq!(text, "pane 0");
+    let watched = port.app.watched_keys();
+    assert_eq!(watched.len(), switchboard::content::WATCH_CAP);
+    assert!(watched.contains(&sessions[0].1), "back in");
+    assert!(!watched.contains(&sessions[2].1), "the oldest went for it");
+}
+
+/// A key stays while any subscriber holds it: one device's `unwatch`
+/// leaves the other's watch, a closed socket drops its watches, and a
+/// revocation drops the device's at once. A watch of a pane that is
+/// not running is answered `watching` too; it is read when it runs.
+#[test]
+fn unwatch_a_closed_socket_and_a_revocation_each_drop_their_watches() {
+    let mut port = port();
+    let (_, _, session) = seed(&mut port, "");
+    let record = RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    let key = ContentKey::Screen(record);
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let a = subscribe(&mut port, &token);
+    let b = subscribe(&mut port, &token);
+    a.send("watch", "screen", &session);
+    b.send("watch", "screen", &session);
+    assert_eq!(resources(&events(&mut port, &a)).len(), 1, "watching");
+    assert_eq!(resources(&events(&mut port, &b)).len(), 1, "watching");
+    assert_eq!(port.app.watched_keys(), vec![key.clone()]);
+
+    a.send("unwatch", "screen", &session);
+    assert!(events(&mut port, &a).is_empty());
+    assert_eq!(
+        port.app.watched_keys(),
+        vec![key.clone()],
+        "b still holds it"
+    );
+
+    b.close();
+    assert!(
+        settle(&mut port, 5, |app| app.watched_keys().is_empty()),
+        "b's close dropped the watch"
+    );
+    assert_eq!(port.app.subscriber_count(), 1);
+
+    a.send("watch", "screen", &session);
+    assert!(settle(&mut port, 5, |app| !app.watched_keys().is_empty()));
+    let device = port.app.core().devices()[0].id;
+    port.app.dispatch(AppAction::RevokeDevice(device));
+    assert!(
+        port.app.watched_keys().is_empty(),
+        "revoked with its watches"
+    );
+    assert_eq!(port.app.subscriber_count(), 0);
+}
+
+/// Strangers that connect and say nothing fill the unauthenticated
+/// pool and no more: the fifth is closed at once, a paired subscriber
+/// keeps receiving meanwhile, and the slots are free once they hang up.
+#[test]
+fn stalled_strangers_fill_their_own_pool_and_never_a_paired_clients() {
+    let mut port = port();
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let sub = subscribe(&mut port, &token);
+    let strangers: Vec<TcpStream> = (0..MAX_UNAUTHENTICATED)
+        .map(|_| TcpStream::connect(port.addr).expect("connect"))
+        .collect();
+    // The listener has handed each to a thread before it accepts more.
+    std::thread::sleep(Duration::from_millis(100));
+    let mut fifth = TcpStream::connect(port.addr).expect("connect");
+    fifth
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut buf = [0u8; 1];
+    let closed = matches!(fifth.read(&mut buf), Ok(0) | Err(_));
+    assert!(closed, "the fifth stranger was closed at once");
+
+    let (_, _, session) = seed(&mut port, "");
+    let moved = resources(&events(&mut port, &sub));
+    assert!(
+        moved.contains(&("changed".into(), "session".into(), session.clone())),
+        "the paired subscriber kept receiving: {moved:?}"
+    );
+
+    drop(strangers);
+    std::thread::sleep(Duration::from_millis(100));
+    let (status, _) = get(&mut port, "/api/v1/waiting", Some(&token));
+    assert_eq!(status, 200, "the slots are free again");
+}
+
+// --- conversations and runs
+
+/// A Claude Code session's conversation pages by turn with `next` for
+/// the rest, `from=last` is its tail, the last response is the last
+/// turn's answer at the conversation's revision, and both are masked;
+/// a shell has no conversation.
+#[test]
+fn a_page_carries_the_head_of_a_tool_result_and_the_turn_alone_carries_it_whole() {
+    let mut port = port();
+    port.transcripts.set(Some(conversation(3)));
+    let (_, _, session) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    launched(&mut port, &session);
+    let (_, page) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation?from=3"),
+        t,
+    );
+    let activity = &page["body"]["turns"][0]["activity"][0];
+    assert_eq!(activity["more"], true, "{activity}");
+    assert_eq!(activity["detail"]["result"].as_str().unwrap().len(), 512);
+    let (status, whole) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation/3"),
+        t,
+    );
+    assert_eq!(status, 200, "{whole}");
+    assert_eq!(whole["body"]["total"], 3);
+    assert_eq!(whole["body"]["turn"]["n"], 3);
+    let activity = &whole["body"]["turn"]["activity"][0];
+    assert!(activity.get("more").is_none());
+    assert_eq!(
+        activity["detail"]["result"].as_str().unwrap().len(),
+        "# Switchboard\n".len() * 120
+    );
+    assert_eq!(whole["revision"], page["revision"]);
+    let (_, missing) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation/9"),
+        t,
+    );
+    assert_eq!(missing["body"]["turn"], serde_json::Value::Null);
+    let (status, _) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation/x"),
+        t,
+    );
+    assert_eq!(status, 400);
+}
+
+#[test]
+fn a_conversation_page_anchored_before_a_held_turn_ends_there() {
+    let mut port = port();
+    port.transcripts.set(Some(conversation(3)));
+    let (_, _, session) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    launched(&mut port, &session);
+    let (_, before) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation?before=3&limit=1"),
+        t,
+    );
+    assert_eq!(before["body"]["from"], 2, "the page ending before turn 3");
+    assert_eq!(before["body"]["next"], 3);
+    assert_eq!(before["body"]["turns"][0]["n"], 2);
+    let (status, _) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation?from=1&before=3"),
+        t,
+    );
+    assert_eq!(status, 400, "one anchor per page");
+}
+
+#[test]
+fn a_conversation_pages_by_turn_and_its_last_response_shares_the_revision() {
+    let mut port = port();
+    port.transcripts.set(Some(conversation(3)));
+    let (_, project, session) = seed(&mut port, "");
+    let pid = switchboard::core::ProjectId(uuid::Uuid::parse_str(&project).unwrap());
+    port.secrets.state().insert(
+        switchboard::core::SecretScope::Project(pid).account("API_TOKEN"),
+        "tok-5e3cr3t".into(),
+    );
+    port.app.dispatch(AppAction::SetProjectEnv(
+        pid,
+        switchboard::core::ProjectEnv {
+            vars: vec![switchboard::core::EnvVar {
+                name: "API_TOKEN".into(),
+                value: String::new(),
+                secret: true,
+            }],
+            ..Default::default()
+        },
+    ));
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+
+    launched(&mut port, &session);
+    let (status, page) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation?limit=2"),
+        t,
+    );
+    assert_eq!(status, 200, "{page}");
+    let body = &page["body"];
+    assert_eq!(body["title"], "explain-repo");
+    assert_eq!(body["total"], 3);
+    assert_eq!(body["from"], 1);
+    assert_eq!(body["next"], 3);
+    let turns = body["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0]["n"], 1);
+    assert_eq!(turns[0]["user"], "prompt 1");
+    assert_eq!(turns[1]["final_text"], "answer 2");
+    let revision = page["revision"].as_u64().unwrap();
+
+    let (_, rest) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation?from=3"),
+        t,
+    );
+    assert_eq!(rest["body"]["next"], serde_json::Value::Null);
+    assert_eq!(
+        rest["body"]["turns"][0]["final_text"],
+        "the token is <API_TOKEN>"
+    );
+    assert_eq!(rest["revision"], revision, "one conversation, one revision");
+    let (_, last_page) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/conversation?from=last&limit=1"),
+        t,
+    );
+    assert_eq!(last_page["body"]["from"], 3);
+
+    let (status, last) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/last-response"),
+        t,
+    );
+    assert_eq!(status, 200, "{last}");
+    assert_eq!(last["body"]["n"], 3);
+    assert_eq!(last["body"]["total"], 3);
+    assert_eq!(last["body"]["text"], "the token is <API_TOKEN>");
+    assert_eq!(
+        last["revision"], revision,
+        "a projection of the conversation"
+    );
+    assert!(last["body"]["resume_id"].is_string());
+
+    let reply = control(
+        &mut port,
+        Request::new(
+            "sh",
+            Body::SessionNew {
+                project: project.clone(),
+                name: "shell".into(),
+                session_kind: SessionKind::Shell,
+                cwd: PathBuf::from("/tmp"),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: String::new(),
+                env: std::collections::BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            },
+        ),
+    );
+    let shell = made_id(&reply, RecordKind::Session);
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{shell}/last-response"),
+        t,
+    );
+    assert_eq!(status, 400);
+    assert_eq!(code(&reply), "no_conversation");
+}
+
+/// A watched conversation moves when the transcript grows, with one
+/// `changed {conversation}` the last response follows, and nothing is
+/// said while it holds still.
+#[test]
+fn a_watched_conversation_moves_when_the_transcript_grows() {
+    let mut port = port();
+    port.transcripts.set(Some(conversation(2)));
+    let (_, _, session) = seed(&mut port, "");
+    let record = launched(&mut port, &session);
+    port.app.set_watch_poll(Duration::from_millis(50));
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let sub = subscribe(&mut port, &token);
+    sub.send("watch", "conversation", &session);
+    let got = events(&mut port, &sub);
+    let moved = resources(&got);
+    assert_eq!(
+        moved.first(),
+        Some(&("watching".into(), "conversation".into(), session.clone())),
+        "{moved:?}"
+    );
+    assert!(
+        moved.contains(&("changed".into(), "conversation".into(), session.clone())),
+        "{moved:?}"
+    );
+    assert_eq!(
+        port.app.watched_keys(),
+        vec![ContentKey::Conversation(record)]
+    );
+    let first = port
+        .app
+        .content_revision(&ContentKey::Conversation(record))
+        .unwrap();
+    let (_, last) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/last-response"),
+        Some(&token),
+    );
+    assert_eq!(
+        (
+            last["revision"].as_u64().unwrap(),
+            last["body"]["n"].as_u64().unwrap()
+        ),
+        (first, 2)
+    );
+    assert!(events(&mut port, &sub).is_empty(), "nothing moved");
+
+    port.transcripts.set(Some(conversation(3)));
+    let got = events(&mut port, &sub);
+    assert_eq!(
+        resources(&got),
+        vec![("changed".into(), "conversation".into(), session.clone())]
+    );
+    let next = got[0]["revision"].as_u64().unwrap();
+    assert!(next > first);
+    let (_, last) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/last-response"),
+        Some(&token),
+    );
+    assert_eq!(
+        (
+            last["revision"].as_u64().unwrap(),
+            last["body"]["n"].as_u64().unwrap()
+        ),
+        (next, 3)
+    );
+}
+
+/// A command's runs are listed from the record, a run's output is the
+/// tail of its log with the project's secret masked, a run that never
+/// was is refused, and a watched run output moves when the log grows.
+#[test]
+fn a_runs_output_is_the_logs_masked_tail_and_moves_when_the_log_grows() {
+    let mut port = port();
+    let (_, project, _) = seed(&mut port, "");
+    let pid = switchboard::core::ProjectId(uuid::Uuid::parse_str(&project).unwrap());
+    port.secrets.state().insert(
+        switchboard::core::SecretScope::Project(pid).account("API_TOKEN"),
+        "tok-5e3cr3t".into(),
+    );
+    port.app.dispatch(AppAction::SetProjectEnv(
+        pid,
+        switchboard::core::ProjectEnv {
+            vars: vec![switchboard::core::EnvVar {
+                name: "API_TOKEN".into(),
+                value: String::new(),
+                secret: true,
+            }],
+            ..Default::default()
+        },
+    ));
+    let (session, record) = command_with_run(
+        &mut port,
+        &project,
+        "$ make\nAPI_TOKEN=tok-5e3cr3t\nbuilding\n",
+    );
+    port.app.set_watch_poll(Duration::from_millis(50));
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let t = Some(token.as_str());
+
+    let (status, runs) = get(&mut port, &format!("/api/v1/sessions/{session}/runs"), t);
+    assert_eq!(status, 200, "{runs}");
+    let list = runs["body"]["runs"].as_array().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["n"], 1);
+    assert!(list[0]["started_ms"].is_u64());
+    // The fake host lists no pane, so the reconcile closed the run.
+    assert!(list[0]["ended_ms"].is_u64());
+    assert_eq!(list[0]["exit"], serde_json::Value::Null);
+
+    let (status, out) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/runs/1/output?lines=2"),
+        t,
+    );
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["body"]["n"], 1);
+    assert_eq!(out["body"]["text"], "API_TOKEN=<API_TOKEN>\nbuilding");
+    let first = out["revision"].as_u64().unwrap();
+    let (status, missing) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/runs/2/output"),
+        t,
+    );
+    assert_eq!(status, 404);
+    assert_eq!(code(&missing), "no_run");
+
+    let sub = subscribe(&mut port, &token);
+    let key = ContentKey::RunOutput(record, 1);
+    sub.send("watch", "run_output", &key.id());
+    let got = resources(&events(&mut port, &sub));
+    assert_eq!(
+        got.first(),
+        Some(&("watching".into(), "run_output".into(), key.id())),
+        "{got:?}"
+    );
+    assert!(events(&mut port, &sub).is_empty(), "the log held still");
+    let log = port.app.core().session(record).unwrap().runs[0].log.clone();
+    let dir =
+        switchboard::adapters::scrollback::scrollback_dir(&fakes::services().store.data_dir());
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join(log))
+        .unwrap();
+    writeln!(file, "done").unwrap();
+    let got = events(&mut port, &sub);
+    assert_eq!(
+        resources(&got),
+        vec![("changed".into(), "run_output".into(), key.id())]
+    );
+    assert!(got[0]["revision"].as_u64().unwrap() > first);
+    let (_, out) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/runs/1/output?lines=1"),
+        t,
+    );
+    assert_eq!(out["body"]["text"], "done");
+}

@@ -63,6 +63,13 @@ pub fn settings_menu(
                 cx.state.env_dialog = Some(super::env::EnvDraft::global(cx.core, cx.services));
                 ui.close();
             }
+            if theme::ghost(ui, "Remote devices…")
+                .on_hover_text("Pair a device, choose what it may do, revoke it")
+                .clicked()
+            {
+                cx.state.remote_dialog = Some(super::remote::RemoteDraft::open(cx.core));
+                ui.close();
+            }
             // `switchboard-env`'s setup commands are accepted only while
             // this is open, so an agent cannot grant itself credentials.
             let unlocked = cx.core.env_setup_until().is_some();

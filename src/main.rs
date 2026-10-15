@@ -56,12 +56,43 @@ fn listen(app: &mut SwitchboardApp, ctx: &egui::Context) {
     }
 }
 
+/// The remote port, loopback or the LAN as the identity says;
+/// `SWITCHBOARD_REMOTE_PORT` overrides the port so two instances can
+/// run on one machine. A read-only instance, or one whose key the
+/// Keychain would not give, is refused and says so in the log.
+fn listen_remote(app: &mut SwitchboardApp, ctx: &egui::Context) {
+    let port = std::env::var("SWITCHBOARD_REMOTE_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok());
+    app.set_remote_port_override(port);
+    let ctx = ctx.clone();
+    match app.listen_remote(move || ctx.request_repaint()) {
+        Ok(addr) => log::info!("remote port at {addr}"),
+        Err(e) => log::warn!("remote port: {e}"),
+    }
+}
+
 /// The nunchuk's port thread; a button press wakes the frame loop.
 fn controller(ctx: &egui::Context) -> SerialController {
     let ctx = ctx.clone();
     SerialController::spawn(std::env::var("SWITCHBOARD_CONTROLLER").ok(), move || {
         ctx.request_repaint();
     })
+}
+
+/// The private tmux server, on `SWITCHBOARD_TMUX_SOCKET` or the
+/// default socket, with the app's configuration written beside the
+/// data.
+fn tmux_host(data_dir: &std::path::Path) -> TmuxHost {
+    let tmux_conf = data_dir.join("tmux.conf");
+    TmuxHost::write_default_config(&tmux_conf).expect("write tmux config");
+    let socket = std::env::var("SWITCHBOARD_TMUX_SOCKET")
+        .unwrap_or_else(|_| TmuxHost::default_socket().to_owned());
+    let host = TmuxHost::new(&socket, Some(tmux_conf));
+    if let Err(e) = host.apply_options() {
+        log::warn!("tmux options: {e}");
+    }
+    host
 }
 
 fn main() -> eframe::Result {
@@ -82,14 +113,7 @@ fn main() -> eframe::Result {
     );
     std::fs::create_dir_all(&data_dir).expect("create data directory");
 
-    let tmux_conf = data_dir.join("tmux.conf");
-    TmuxHost::write_default_config(&tmux_conf).expect("write tmux config");
-    let socket = std::env::var("SWITCHBOARD_TMUX_SOCKET")
-        .unwrap_or_else(|_| TmuxHost::default_socket().to_owned());
-    let host = TmuxHost::new(&socket, Some(tmux_conf));
-    if let Err(e) = host.apply_options() {
-        log::warn!("tmux options: {e}");
-    }
+    let host = tmux_host(&data_dir);
 
     // The hook helper lives next to this binary.
     let hook_bin = std::env::current_exe()
@@ -161,11 +185,11 @@ fn main() -> eframe::Result {
             let operations = operations_log(&data_dir);
             let services = Services {
                 store: Box::new(store),
-                host: Box::new(host),
+                host: std::sync::Arc::new(host),
                 events: Box::new(HookLog::new(data_dir.clone())),
                 agents: Box::new(Agents::detect(data_dir.clone())),
                 opener: Box::new(MacOpener::detect()),
-                transcripts: Box::new(ClaudeTranscripts),
+                transcripts: std::sync::Arc::new(ClaudeTranscripts),
                 secrets: secret_store(),
                 project_config: Box::new(FileConfigReader::new()),
                 round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),
@@ -173,12 +197,17 @@ fn main() -> eframe::Result {
                 artifacts: Box::new(switchboard::adapters::artifacts::DiskArtifacts),
                 controller: Box::new(controller),
                 operations: Box::new(operations),
+                remote: Box::new(switchboard::adapters::remote::RemoteFiles::new(
+                    data_dir.clone(),
+                )),
+                advertiser: Box::new(switchboard::adapters::bonjour::Bonjour::default()),
                 dispatch: Some(Box::new(DispatchSocket::detect())),
                 wake,
             };
             let mut app = SwitchboardApp::with_services(services);
             app.start();
             listen(&mut app, &cc.egui_ctx);
+            listen_remote(&mut app, &cc.egui_ctx);
             // Dev aid: a script of actions to run at startup.
             if let Some(path) = std::env::var_os("SWITCHBOARD_SCRIPT") {
                 match std::fs::read_to_string(&path) {
@@ -193,13 +222,13 @@ fn main() -> eframe::Result {
 
 /// The Keychain on macOS. Elsewhere the app only has to build (CI runs
 /// on Linux), so secrets live in memory for the process.
-fn secret_store() -> Box<dyn switchboard::ports::secrets::SecretStore> {
+fn secret_store() -> std::sync::Arc<dyn switchboard::ports::secrets::SecretStore> {
     #[cfg(target_os = "macos")]
     {
-        Box::new(switchboard::adapters::keychain::KeychainStore::login())
+        std::sync::Arc::new(switchboard::adapters::keychain::KeychainStore::login())
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Box::new(switchboard::adapters::fakes::FakeSecrets::default())
+        std::sync::Arc::new(switchboard::adapters::fakes::FakeSecrets::default())
     }
 }

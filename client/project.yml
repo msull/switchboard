@@ -1,0 +1,46 @@
+# The Xcode project for the apps: `xcodegen generate` writes
+# SwitchboardClient.xcodeproj (git-ignored) from this file. The app
+# targets are thin entries over the Swift package beside them, which
+# `swift test` covers; see README.md for the simulator recipe.
+name: SwitchboardClient
+options:
+  bundleIdPrefix: com.sadburger
+  xcodeVersion: "26.2"
+  createIntermediateGroups: true
+  deploymentTarget:
+    visionOS: "26.0"
+packages:
+  SwitchboardClient:
+    path: .
+targets:
+  SwitchboardVision:
+    type: application
+    platform: visionOS
+    sources:
+      - path: Apps/SwitchboardVision
+        excludes:
+          - Info.plist
+    dependencies:
+      - package: SwitchboardClient
+        product: SwitchboardUI
+      - package: SwitchboardClient
+        product: SwitchboardClientCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sadburger.switchboard.vision
+        PRODUCT_NAME: Switchboard
+        INFOPLIST_FILE: Apps/SwitchboardVision/Info.plist
+        GENERATE_INFOPLIST_FILE: "NO"
+        CODE_SIGN_STYLE: Automatic
+        # The team signs device builds; it is read from the environment
+        # at generation (scripts/device.sh takes it from the repo's
+        # git-ignored .env), and the simulator needs none.
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+        SWIFT_VERSION: "5.10"
+        SWIFT_STRICT_CONCURRENCY: complete
+        TARGETED_DEVICE_FAMILY: "7"
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"
+        ENABLE_PREVIEWS: "YES"
+        # The layered icon in Apps/SwitchboardVision/Assets.xcassets,
+        # rendered from assets/vision/*.svg (see client/README.md).
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

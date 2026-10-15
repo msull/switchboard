@@ -24,8 +24,9 @@ use crate::ports::events::{EventSource, SessionEvent};
 use crate::ports::host::{HostId, HostInfo, HostStatus, ProcessHost, SpawnSpec};
 use crate::ports::opener::Opener;
 use crate::ports::project_config::{ProjectConfig, ProjectConfigReader};
+use crate::ports::remote::{Advertisement, Advertiser, Identity, PairedDevice, RemoteStore};
 use crate::ports::store::{Loaded, Store, StoreError};
-use crate::ports::transcript::{Conversation, TranscriptReader};
+use crate::ports::transcript::{Conversation, TranscriptReader, TranscriptVersion};
 
 /// Every port as its fake's default, Dispatch included, and no wake
 /// socket. Tests name the fields they script and take the rest from
@@ -34,12 +35,14 @@ use crate::ports::transcript::{Conversation, TranscriptReader};
 pub fn services() -> Services {
     Services {
         store: Box::new(MemoryStore::default()),
-        host: Box::new(FakeHost::default()),
+        host: Arc::new(FakeHost::default()),
         events: Box::new(FakeEvents),
         agents: Box::new(FakeAgents),
         opener: Box::new(FakeOpener::default()),
-        transcripts: Box::new(FakeTranscripts::default()),
-        secrets: Box::new(FakeSecrets::default()),
+        remote: Box::new(FakeRemoteStore::default()),
+        advertiser: Box::new(FakeAdvertiser::default()),
+        transcripts: Arc::new(FakeTranscripts::default()),
+        secrets: std::sync::Arc::new(FakeSecrets::default()),
         project_config: Box::new(FakeProjectConfig),
         round_files: Box::new(FakeRoundFiles),
         changes: Arc::new(FakeChanges::default()),
@@ -96,6 +99,9 @@ pub struct FakeHostState {
     pub spawned: Vec<SpawnSpec>,
     /// Every line `write_line` put in a pane, oldest first.
     pub written: Vec<(HostId, String)>,
+    /// Every raw `write` into a pane, oldest first: keys as well as
+    /// the bytes of each line.
+    pub keys: Vec<(HostId, Vec<u8>)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -132,10 +138,11 @@ impl ProcessHost for FakeHost {
     fn snapshot(&self, id: &HostId, _lines: Option<usize>) -> std::io::Result<String> {
         Ok(self.state().snapshots.get(id).cloned().unwrap_or_default())
     }
-    fn write(&self, _id: &HostId, _bytes: &[u8]) -> std::io::Result<()> {
+    fn write(&self, id: &HostId, bytes: &[u8]) -> std::io::Result<()> {
         if let Some(e) = &self.state().fail_write {
             return Err(std::io::Error::other(e.clone()));
         }
+        self.state().keys.push((id.clone(), bytes.to_vec()));
         Ok(())
     }
     fn write_line(&self, id: &HostId, text: &str) -> std::io::Result<()> {
@@ -323,10 +330,18 @@ impl DispatchPort for FakeDispatch {
 #[derive(Debug, Default, Clone)]
 pub struct FakeOperations {
     pub lines: Arc<Mutex<Vec<OpLine>>>,
+    /// Every reply line fails to append (the disk went away between a
+    /// command's run and its reply), request lines still land.
+    pub fail_replies: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Operations for FakeOperations {
     fn append(&mut self, line: &OpLine) -> std::io::Result<()> {
+        if matches!(line, OpLine::Replied { .. })
+            && self.fail_replies.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(std::io::Error::other("the log is not writable"));
+        }
         self.lines.lock().unwrap().push(line.clone());
         Ok(())
     }
@@ -459,18 +474,76 @@ impl Opener for FakeOpener {
     }
 }
 
+/// The identity and device files in memory, shared so a test can read
+/// back what the app saved or pre-fill what it loads.
+#[derive(Debug, Clone, Default)]
+pub struct FakeRemoteStore(pub Arc<Mutex<FakeRemoteState>>);
+
+#[derive(Debug, Default)]
+pub struct FakeRemoteState {
+    pub identity: Option<Identity>,
+    pub devices: Vec<PairedDevice>,
+    /// Every load and save fails with this message.
+    pub fail: Option<String>,
+}
+
+impl FakeRemoteStore {
+    pub fn state(&self) -> std::sync::MutexGuard<'_, FakeRemoteState> {
+        self.0.lock().expect("fake remote store lock")
+    }
+}
+
+impl RemoteStore for FakeRemoteStore {
+    fn load_identity(&self) -> Result<Option<Identity>, String> {
+        let state = self.state();
+        state.fail.clone().map_or(Ok(state.identity.clone()), Err)
+    }
+    fn save_identity(&self, identity: &Identity) -> Result<(), String> {
+        let mut state = self.state();
+        if let Some(e) = &state.fail {
+            return Err(e.clone());
+        }
+        state.identity = Some(identity.clone());
+        Ok(())
+    }
+    fn load_devices(&self) -> Result<Vec<PairedDevice>, String> {
+        let state = self.state();
+        state.fail.clone().map_or(Ok(state.devices.clone()), Err)
+    }
+    fn save_devices(&self, devices: &[PairedDevice]) -> Result<(), String> {
+        let mut state = self.state();
+        if let Some(e) = &state.fail {
+            return Err(e.clone());
+        }
+        state.devices = devices.to_vec();
+        Ok(())
+    }
+}
+
 /// Secrets in memory, shared so a test can read back what the app stored.
 #[derive(Debug, Clone, Default)]
-pub struct FakeSecrets(pub Arc<Mutex<HashMap<String, String>>>);
+pub struct FakeSecrets {
+    values: Arc<Mutex<HashMap<String, String>>>,
+    /// Every read fails while set, as a locked Keychain would.
+    pub failing: Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl FakeSecrets {
     pub fn state(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
-        self.0.lock().expect("fake secrets lock")
+        self.values.lock().expect("fake secrets lock")
+    }
+
+    pub fn set_failing(&self, failing: bool) {
+        self.failing
+            .store(failing, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 impl crate::ports::secrets::SecretStore for FakeSecrets {
     fn get(&self, account: &str) -> Result<Option<String>, String> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("the store is locked".into());
+        }
         Ok(self.state().get(account).cloned())
     }
     fn set(&self, account: &str, value: &str) -> Result<(), String> {
@@ -484,21 +557,56 @@ impl crate::ports::secrets::SecretStore for FakeSecrets {
 }
 
 /// Serves one scripted conversation for every handle; `None` reads as
-/// a missing transcript.
-#[derive(Debug, Default)]
+/// a missing transcript. Shared handles so a test can replace the
+/// conversation under a running app, which moves the version.
+#[derive(Debug, Default, Clone)]
 pub struct FakeTranscripts {
+    state: Arc<Mutex<FakeTranscriptState>>,
+}
+
+#[derive(Debug, Default)]
+pub struct FakeTranscriptState {
     pub conversation: Option<Conversation>,
+    /// Bumped by every `set`, so a version names each conversation.
+    pub version: u64,
+}
+
+impl FakeTranscripts {
+    #[must_use]
+    pub fn with(conversation: Conversation) -> Self {
+        let fake = Self::default();
+        fake.set(Some(conversation));
+        fake
+    }
+
+    /// Replace the conversation every handle reads; the version moves.
+    pub fn set(&self, conversation: Option<Conversation>) {
+        let mut state = self.state.lock().expect("fake transcripts");
+        state.conversation = conversation;
+        state.version += 1;
+    }
 }
 
 impl TranscriptReader for FakeTranscripts {
     fn read(&self, _handle: &ResumeHandle) -> Result<Conversation, String> {
-        self.conversation
+        self.state
+            .lock()
+            .expect("fake transcripts")
+            .conversation
             .clone()
             .ok_or_else(|| "no transcript".to_owned())
     }
-    fn modified(&self, _handle: &ResumeHandle) -> Option<SystemTime> {
-        // A fixed time: the fake never changes, so the app reads it once.
-        self.conversation.as_ref().map(|_| std::time::UNIX_EPOCH)
+    fn modified(&self, handle: &ResumeHandle) -> Option<SystemTime> {
+        self.version(handle)?.modified
+    }
+    fn version(&self, _handle: &ResumeHandle) -> Option<TranscriptVersion> {
+        let state = self.state.lock().expect("fake transcripts");
+        // A fixed time and the set count as the size: the app reads a
+        // conversation once per `set`.
+        state.conversation.as_ref().map(|_| TranscriptVersion {
+            size: state.version,
+            modified: Some(std::time::UNIX_EPOCH),
+        })
     }
     fn clone_all(&self, handle: &ResumeHandle) -> Result<ResumeHandle, String> {
         self.clone_before(handle, 0)
@@ -556,5 +664,32 @@ pub struct FakeArtifacts;
 impl crate::ports::artifacts::ArtifactFinder for FakeArtifacts {
     fn find(&self, _cwd: &Path, _patterns: &[String], _since: SystemTime) -> Vec<PathBuf> {
         Vec::new()
+    }
+}
+
+/// Bonjour as a log: `Some` for each advertisement, `None` for each
+/// withdrawal, in order.
+#[derive(Debug, Clone, Default)]
+pub struct FakeAdvertiser(pub Arc<Mutex<Vec<Option<Advertisement>>>>);
+
+impl FakeAdvertiser {
+    pub fn log(&self) -> std::sync::MutexGuard<'_, Vec<Option<Advertisement>>> {
+        self.0.lock().expect("fake advertiser lock")
+    }
+
+    /// The advertisement in force, if the last call was not a withdrawal.
+    #[must_use]
+    pub fn current(&self) -> Option<Advertisement> {
+        self.log().last().cloned().flatten()
+    }
+}
+
+impl Advertiser for FakeAdvertiser {
+    fn advertise(&mut self, ad: &Advertisement) -> Result<(), String> {
+        self.log().push(Some(ad.clone()));
+        Ok(())
+    }
+    fn withdraw(&mut self) {
+        self.log().push(None);
     }
 }

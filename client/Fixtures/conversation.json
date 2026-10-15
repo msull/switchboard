@@ -1,0 +1,53 @@
+{
+  "body": {
+    "branch": "main",
+    "context_tokens": null,
+    "end_ms": null,
+    "from": 1,
+    "model": "claude-fable-5-1",
+    "next": 2,
+    "resume_id": "7ae97137-c6ec-441d-a11c-2d3e5b2bd841",
+    "start_ms": null,
+    "title": "explain-repo",
+    "total": 2,
+    "turns": [
+      {
+        "activity": [
+          {
+            "at_ms": null,
+            "detail": {
+              "input": "{\"file_path\": \"README.md\"}",
+              "name": "Read",
+              "path": null,
+              "result": "# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switchboard\n# Switch"
+            },
+            "error": false,
+            "kind": "tool",
+            "line": "Read README.md",
+            "more": true
+          }
+        ],
+        "assistant_msgs": 1,
+        "at_ms": null,
+        "end_ms": null,
+        "errors": 0,
+        "final_text": "answer 1",
+        "n": 1,
+        "permission_mode": null,
+        "thinking": 0,
+        "tools": 1,
+        "truncated": false,
+        "user": "prompt 1"
+      }
+    ],
+    "usage": {
+      "cache_create": 0,
+      "cache_read": 0,
+      "input": 0,
+      "output": 0
+    },
+    "version": null
+  },
+  "epoch": "3bbab47a-9fef-4df7-8484-4a8c79a07518",
+  "revision": 12
+}

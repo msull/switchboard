@@ -1,0 +1,29 @@
+{
+  "body": {
+    "session": {
+      "card": "starting",
+      "cwd": "/tmp",
+      "held_until_ms": null,
+      "id": "26d7c1ae-06f0-422d-8d4b-0a6ce7d0eb62",
+      "kind": "claude",
+      "last_activity_ms": null,
+      "last_exit": null,
+      "last_stop_at_ms": null,
+      "liveness": "running",
+      "name": "investigator",
+      "notes": "ticket 1\nnotes with two lines",
+      "op": "se",
+      "pending": [],
+      "project": "eb93815c-b589-4c32-8662-b66954859c1e",
+      "prompt_refusal": "no turn reported yet",
+      "quiet_secs": null,
+      "resume_id": "7ae97137-c6ec-441d-a11c-2d3e5b2bd841",
+      "trust_question": false,
+      "waiting": false,
+      "waiting_reason": null,
+      "wakeup_at_ms": null
+    }
+  },
+  "epoch": "3bbab47a-9fef-4df7-8484-4a8c79a07518",
+  "revision": 10
+}

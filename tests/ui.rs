@@ -211,9 +211,9 @@ fn harness_sized(
 
 fn fake_services(opener: FakeOpener, secrets: FakeSecrets, host: FakeHost) -> Services {
     Services {
-        host: Box::new(host),
+        host: std::sync::Arc::new(host),
         opener: Box::new(opener),
-        secrets: Box::new(secrets),
+        secrets: std::sync::Arc::new(secrets),
         ..fakes::services()
     }
 }
@@ -1966,11 +1966,7 @@ fn claude_session_shows_the_conversation_and_message_box() {
     let (mut harness, ids) = harness();
     plain_message_box(&mut harness);
     let id = seed_claude(&mut harness, &ids);
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, two_turns()));
+    harness.state_mut().conversations.seed(id, two_turns());
     showing(&mut harness, View::Session(id));
     // Claude's own name for the conversation is shown only while it
     // differs from the record's name.
@@ -2008,11 +2004,7 @@ fn claude_session_shows_the_conversation_and_message_box() {
 fn terminal_panel_toggles_from_the_header() {
     let (mut harness, ids) = harness();
     let id = seed_claude(&mut harness, &ids);
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, two_turns()));
+    harness.state_mut().conversations.seed(id, two_turns());
     harness
         .state_mut()
         .ui_state
@@ -2049,11 +2041,7 @@ fn terminal_panel_toggles_from_the_header() {
 /// terminal panel from the header.
 fn open_terminal_panel(harness: &mut Harness<'static, SwitchboardApp>, ids: &Seeded) {
     let id = seed_claude(harness, ids);
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, two_turns()));
+    harness.state_mut().conversations.seed(id, two_turns());
     harness
         .state_mut()
         .ui_state
@@ -2120,11 +2108,7 @@ fn messages_before_the_answer_are_their_own_blocks_with_the_tools_between() {
         },
         later,
     ];
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, conversation));
+    harness.state_mut().conversations.seed(id, conversation);
     showing(&mut harness, View::Session(id));
     // The message reads in full without expanding anything; the tools
     // around it stay folded in two groups.
@@ -2168,11 +2152,7 @@ fn a_file_an_agent_names_is_a_link_that_opens_it_at_the_line() {
         },
         tool,
     ];
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, conversation));
+    harness.state_mut().conversations.seed(id, conversation);
     showing(&mut harness, View::Session(id));
     click(&mut harness, "Expand activity");
     // Only the message's path links: not the missing one, not the tool row.
@@ -2243,11 +2223,7 @@ fn long_activity_lines_wrap_instead_of_being_cut() {
         detail: None,
         text: Some(long.clone()),
     });
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, conversation));
+    harness.state_mut().conversations.seed(id, conversation);
     showing(&mut harness, View::Session(id));
     click(&mut harness, "Expand activity");
     let row = harness.get_by_label(long.as_str());
@@ -2621,11 +2597,7 @@ fn messages_have_a_context_menu_with_copy() {
     let (mut harness, ids) = harness();
     plain_message_box(&mut harness);
     let id = seed_claude(&mut harness, &ids);
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, two_turns()));
+    harness.state_mut().conversations.seed(id, two_turns());
     showing(&mut harness, View::Session(id));
     assert!(harness.query_by_label("Copy").is_none());
     // The prompt and the answer each get the menu.
@@ -2653,11 +2625,7 @@ fn messages_have_a_context_menu_with_copy() {
 fn discard_to_a_prompt_cuts_in_place_and_the_header_offers_undo() {
     let (mut harness, ids) = harness();
     let id = seed_claude(&mut harness, &ids);
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, two_turns()));
+    harness.state_mut().conversations.seed(id, two_turns());
     showing(&mut harness, View::Session(id));
     assert!(harness.query_by_label("Undo discard").is_none());
     let original = harness.state().core().session(id).unwrap().resume.clone();
@@ -2680,19 +2648,12 @@ fn discard_to_a_prompt_cuts_in_place_and_the_header_offers_undo() {
         assert_ne!(record.resume, original, "resumes through the cut copy");
         assert_eq!(record.discard.as_ref().map(|d| d.before), Some(2));
         assert_eq!(app.core().view(), View::Session(id), "same session");
-        assert!(
-            !app.ui_state.conversations.contains_key(&id),
-            "cache dropped"
-        );
+        assert!(!app.conversations.contains(id), "cache dropped");
     }
     // The cut conversation, as the next read would load it.
     let mut cut = two_turns();
     cut.turns.truncate(1);
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, cut));
+    harness.state_mut().conversations.seed(id, cut);
     harness.run_steps(2);
     assert_eq!(
         prompt_field(&mut harness).value().as_deref(),
@@ -2718,11 +2679,7 @@ fn discard_to_a_prompt_cuts_in_place_and_the_header_offers_undo() {
 fn clone_session_on_a_prompt_makes_a_new_session_with_that_prompt_primed() {
     let (mut harness, ids) = harness();
     let id = seed_claude(&mut harness, &ids);
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, two_turns()));
+    harness.state_mut().conversations.seed(id, two_turns());
     showing(&mut harness, View::Session(id));
     // The agent's answers only copy or show raw; the user's prompts fork.
     harness.get_by_label("pong").click_secondary();
@@ -2775,11 +2732,7 @@ fn view_links_lists_a_messages_urls_in_a_dialog() {
     let mut conversation = two_turns();
     conversation.turns[0].final_text =
         "Read https://docs.rs/egui and [the repo](https://github.com/emilk/egui).".into();
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, conversation));
+    harness.state_mut().conversations.seed(id, conversation);
     showing(&mut harness, View::Session(id));
     // A message without a link does not offer the item.
     harness
@@ -2828,11 +2781,7 @@ fn view_raw_shows_the_message_unformatted_in_a_dialog() {
     let (mut harness, ids) = harness();
     plain_message_box(&mut harness);
     let id = seed_claude(&mut harness, &ids);
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, two_turns()));
+    harness.state_mut().conversations.seed(id, two_turns());
     showing(&mut harness, View::Session(id));
     assert!(harness.query_by_label("Full message").is_none());
     harness.get_by_label("pong").click_secondary();
@@ -2885,9 +2834,8 @@ fn claude_session_without_a_conversation_falls_back_to_the_snapshot() {
     let id = seed_claude(&mut harness, &ids);
     harness
         .state_mut()
-        .ui_state
-        .conversation_errors
-        .insert(id, "no transcript".into());
+        .conversations
+        .fail(id, "no transcript".into());
     harness
         .state_mut()
         .ui_state
@@ -2903,9 +2851,7 @@ fn claude_session_without_a_conversation_falls_back_to_the_snapshot() {
 #[test]
 fn polling_reads_the_transcript_into_the_ui_state() {
     let services = Services {
-        transcripts: Box::new(FakeTranscripts {
-            conversation: Some(two_turns()),
-        }),
+        transcripts: Arc::new(FakeTranscripts::with(two_turns())),
         ..fakes::services()
     };
     let mut harness = Harness::builder()
@@ -2919,11 +2865,11 @@ fn polling_reads_the_transcript_into_the_ui_state() {
     showing(&mut harness, View::Session(id));
     harness.state_mut().poll_now();
     let app = harness.state();
-    assert_eq!(app.ui_state.conversations[&id].1.turns.len(), 2);
-    assert!(!app.ui_state.conversation_errors.contains_key(&id));
+    assert_eq!(app.conversations.get(id).expect("read").turns.len(), 2);
+    assert!(app.conversations.error(id).is_none());
     // A board reads the transcripts of its agent cards too: the card
     // excerpts the last answer, never the pane's own chrome.
-    harness.state_mut().ui_state.conversations.clear();
+    harness.state_mut().conversations.clear();
     harness
         .state_mut()
         .ui_state
@@ -2962,11 +2908,7 @@ fn rail_item_and_side_tab_open_and_close_the_side_and_the_text_reflows() {
     let id = seed_claude(&mut harness, &ids);
     let mut conversation = two_turns();
     conversation.turns[0].final_text = "word ".repeat(120).trim_end().to_owned();
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, conversation));
+    harness.state_mut().conversations.seed(id, conversation);
     showing(&mut harness, View::Session(id));
     let long_right = |h: &Harness<'static, SwitchboardApp>| {
         h.query_all_by_label_contains("word word")
@@ -3010,11 +2952,7 @@ fn a_word_that_cannot_break_does_not_widen_the_turns_after_it() {
     // Roughly 1400 px of one word in the first turn, prose in the second.
     conversation.turns[0].final_text = "x".repeat(200);
     conversation.turns[1].final_text = "word ".repeat(120).trim_end().to_owned();
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, conversation));
+    harness.state_mut().conversations.seed(id, conversation);
     showing(&mut harness, View::Session(id));
     let left = harness.get_by_label("Message").rect().left();
     let prose = harness
@@ -3059,11 +2997,7 @@ fn a_session_shrinks_to_the_width_a_wide_side_leaves_it() {
     let id = seed_claude(&mut harness, &ids);
     let mut conversation = two_turns();
     conversation.turns[0].final_text = "word ".repeat(120).trim_end().to_owned();
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, conversation));
+    harness.state_mut().conversations.seed(id, conversation);
     showing(&mut harness, View::Session(id));
     click(&mut harness, "Files ⌘B");
     click(&mut harness, "Expand activity");
@@ -3122,11 +3056,7 @@ fn a_long_excerpt_is_clamped_above_the_card_buttons() {
     let id = seed_claude(&mut harness, &ids);
     let mut conversation = two_turns();
     conversation.turns[1].final_text = "The answer is long ".repeat(20).trim_end().to_owned();
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, conversation));
+    harness.state_mut().conversations.seed(id, conversation);
     showing(&mut harness, View::Board(ids.beta));
     let excerpt = harness.get_by_label_contains("The answer is long").rect();
     assert!(
@@ -3227,11 +3157,7 @@ fn a_markdown_table_keeps_its_columns_apart_and_inside_the_answer() {
 | beta | Short | 22 |\n\
 \nAnd a line after it."
         .to_owned();
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, conversation));
+    harness.state_mut().conversations.seed(id, conversation);
     showing(&mut harness, View::Session(id));
     click(&mut harness, "Expand activity");
     harness.set_size(egui::vec2(900.0, 700.0));
@@ -3850,11 +3776,7 @@ fn the_microphone_on_a_working_set_card_binds_listening_to_that_session() {
 fn hovering_terminal_on_an_agent_card_shows_the_panes_tail() {
     let (mut harness, ids) = harness();
     let (id, _) = working_set_of_two(&mut harness, &ids);
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, two_turns()));
+    harness.state_mut().conversations.seed(id, two_turns());
     harness.run_steps(2);
     harness
         .ctx
@@ -3885,11 +3807,7 @@ fn a_rendered_answer_on_a_working_set_card_opens_in_the_message_dialog() {
     let (id, _) = working_set_of_two(&mut harness, &ids);
     let mut conversation = two_turns();
     conversation.turns[1].final_text = "A full answer **that is** the agent's latest.".into();
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, conversation));
+    harness.state_mut().conversations.seed(id, conversation);
     harness.run_steps(2);
     // View opens it in the message dialog, where Raw shows the source.
     click(&mut harness, "View");
@@ -3915,11 +3833,7 @@ fn working_set_cards_show_the_last_exchange_and_send_a_line() {
     let mut conversation = two_turns();
     conversation.turns[1].user = "second question, please".into();
     conversation.turns[1].final_text = "A full answer that is the agent's latest.".into();
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, conversation));
+    harness.state_mut().conversations.seed(id, conversation);
     harness.run_steps(2);
     harness.get_by_label("You: second question, please");
     harness.get_by_label("A full answer that is the agent's latest.");
@@ -3928,15 +3842,7 @@ fn working_set_cards_show_the_last_exchange_and_send_a_line() {
     let card_top = harness.get_by_label("claude-agent").rect().top();
     let field_top = harness.get_by_label("Line to send").rect().top();
     let long = "A long answer that goes on and on. ".repeat(60);
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .get_mut(&id)
-        .unwrap()
-        .1
-        .turns[1]
-        .final_text = long;
+    harness.state_mut().conversations.get_mut(id).unwrap().turns[1].final_text = long;
     harness.run_steps(2);
     let after = harness.get_by_label("Line to send").rect().top();
     assert!(
@@ -3950,15 +3856,8 @@ fn working_set_cards_show_the_last_exchange_and_send_a_line() {
         .find(|r| r.top() > card_top && r.top() < card_bottom)
         .expect("the card's Open button is inside the card");
     assert!(open.bottom() <= card_bottom, "{open:?} past {card_bottom}");
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .get_mut(&id)
-        .unwrap()
-        .1
-        .turns[1]
-        .final_text = "A full answer **that is** the agent's latest.".into();
+    harness.state_mut().conversations.get_mut(id).unwrap().turns[1].final_text =
+        "A full answer **that is** the agent's latest.".into();
     harness.run_steps(2);
     // The final answer is rendered: the emphasis marks are gone.
     harness.get_by_label_contains("that is");
@@ -3985,13 +3884,7 @@ fn working_set_cards_show_the_last_exchange_and_send_a_line() {
     );
     // An agent still working shows its activity line, which opens
     // unformatted on click.
-    let conversation = &mut harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .get_mut(&id)
-        .unwrap()
-        .1;
+    let conversation = harness.state_mut().conversations.get_mut(id).unwrap();
     conversation.turns[1].final_text.clear();
     conversation.turns[1].activity.push(TranscriptActivity {
         kind: ActivityKind::Text,
@@ -4345,11 +4238,7 @@ fn pop_out_moves_the_session_page_into_its_own_window() {
     let (mut harness, ids) = harness();
     plain_message_box(&mut harness);
     let id = seed_claude(&mut harness, &ids);
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, two_turns()));
+    harness.state_mut().conversations.seed(id, two_turns());
     showing(&mut harness, View::Board(ids.beta));
     showing(&mut harness, View::Session(id));
     click(&mut harness, "Pop out");
@@ -4540,11 +4429,7 @@ fn review_plan_starts_from_the_session_header_with_a_file_the_session_wrote() {
         }),
         text: None,
     });
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, conversation));
+    harness.state_mut().conversations.seed(id, conversation);
     showing(&mut harness, View::Session(id));
     click(&mut harness, "Review plan");
     harness.get_by_label("Review a plan");
@@ -4584,11 +4469,7 @@ fn seed_written_plans(harness: &mut Harness<'static, SwitchboardApp>, id: Record
             text: None,
         });
     }
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, conversation));
+    harness.state_mut().conversations.seed(id, conversation);
 }
 
 /// The review dialog, opened in a 600 px window on a session that wrote
@@ -4964,11 +4845,7 @@ fn the_radial_menus_view_opens_the_message_dialog() {
     let (id, _) = working_set_of_two(&mut harness, &ids);
     let mut conversation = two_turns();
     conversation.turns[1].final_text = "The latest answer.".into();
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, conversation));
+    harness.state_mut().conversations.seed(id, conversation);
     // While Z is held the menu is on the card; letting go on View asks
     // the UI for the answer, which opens the message dialog.
     controller(&mut harness, &["Z1", "SU"]);
@@ -5083,11 +4960,7 @@ fn an_editor_made_from_a_cards_microphone_can_send_into_its_running_pane() {
 fn a_flick_left_steps_back_through_the_users_messages_and_right_forward() {
     let (mut harness, ids) = harness();
     let id = seed_claude(&mut harness, &ids);
-    harness
-        .state_mut()
-        .ui_state
-        .conversations
-        .insert(id, (None, two_turns()));
+    harness.state_mut().conversations.seed(id, two_turns());
     showing(&mut harness, View::Session(id));
     let cursor = |h: &Harness<'static, SwitchboardApp>| h.state().ui_state.turn_cursor;
     assert_eq!(cursor(&harness), None);
@@ -7380,4 +7253,90 @@ fn dispatch_page_folds_a_pile_of_questions_behind_their_count() {
     click(&mut harness, "Waiting on you · 4");
     harness.get_by_label("Which lanes does #104 need?");
     harness.get_by_label("Question 4?");
+}
+
+/// The Remote devices dialog: opened from the settings menu, it shows
+/// the host, opens a pairing window whose code it then shows, and
+/// revokes a paired device; every change is an action.
+#[test]
+fn remote_devices_dialog_opens_pairing_and_revokes_a_device() {
+    use switchboard::ports::remote::{Identity, Listen, PairedDevice, Scope};
+    let (mut harness, _) = harness();
+    let device = PairedDevice {
+        id: uuid::Uuid::new_v4(),
+        name: "Vision Pro".into(),
+        scope: Scope::Read,
+        token_sha256: "ab".repeat(32),
+        created: at(0),
+        last_seen: None,
+    };
+    harness.state_mut().dispatch(AppAction::IdentityLoaded {
+        identity: Identity {
+            schema_version: 1,
+            server_id: uuid::Uuid::new_v4(),
+            server_name: "Studio".into(),
+            certificate: "MIIB".into(),
+            spki_sha256: "cd".repeat(32),
+            created: at(0),
+            listen: Listen::default(),
+        },
+        devices: vec![device.clone()],
+        rotated: false,
+    });
+    harness.state_mut().dispatched.clear();
+    click(&mut harness, "Settings");
+    click(&mut harness, "Remote devices…");
+    harness.get_by_label("Remote devices");
+    harness.get_by_label("Vision Pro");
+    assert!(harness.query_by_label("Stop pairing").is_none());
+    click(&mut harness, "Allow pairing for 5 minutes");
+    let code = actions(&harness)
+        .into_iter()
+        .find_map(|a| match a {
+            AppAction::OpenPairing { code, scope } => {
+                assert_eq!(scope, Scope::Read);
+                Some(code)
+            }
+            _ => None,
+        })
+        .expect("a pairing window was opened");
+    assert_eq!(code.len(), 8);
+    assert!(harness.state().core().pairing().is_some());
+    // The code shows in two halves, as it is read aloud.
+    let (a, b) = code.split_at(4);
+    harness.get_by_label(format!("{a} {b}").as_str());
+    // The window grew around the QR code; a frame settles its place
+    // before the next click.
+    harness.run_steps(2);
+    // The clipboard command is in the click's own frame.
+    harness.get_by_label("Copy invite").click();
+    harness.step();
+    let invite = harness
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        })
+        .expect("the invite went to the clipboard");
+    let invite: serde_json::Value = serde_json::from_str(&invite).unwrap();
+    assert_eq!(invite["code"], code);
+    assert_eq!(
+        invite["spki_sha256"],
+        harness.state().core().identity().unwrap().spki_sha256
+    );
+    assert!(invite["addresses"].is_array());
+    harness.run_steps(2);
+    click(&mut harness, "Stop pairing");
+    assert!(actions(&harness).contains(&AppAction::ClosePairing));
+    assert!(harness.state().core().pairing().is_none());
+    harness.run_steps(2);
+    click(&mut harness, "Revoke");
+    assert!(actions(&harness).contains(&AppAction::RevokeDevice(device.id)));
+    assert!(harness.state().core().devices().is_empty());
+    harness.get_by_label("No device is paired.");
+    click(&mut harness, "Close");
+    assert!(harness.state().ui_state.remote_dialog.is_none());
 }

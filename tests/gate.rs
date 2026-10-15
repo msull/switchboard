@@ -42,7 +42,8 @@ use std::time::{Duration, Instant, SystemTime};
 use switchboard::SwitchboardApp;
 use switchboard::adapters::agents::Agents;
 use switchboard::adapters::fakes::{
-    FakeController, FakeDispatch, FakeOpener, FakeOperations, FakeSecrets,
+    FakeAdvertiser, FakeController, FakeDispatch, FakeOpener, FakeOperations, FakeRemoteStore,
+    FakeSecrets,
 };
 use switchboard::adapters::hooks::{HookLog, unix_millis, write_hook_settings};
 use switchboard::adapters::project_config::FileConfigReader;
@@ -116,18 +117,20 @@ impl Gate {
     fn app(&self) -> SwitchboardApp {
         SwitchboardApp::with_services(Services {
             store: Box::new(JsonStore::new(self.data_dir.clone())),
-            host: Box::new(self.host.clone()),
+            host: std::sync::Arc::new(self.host.clone()),
             events: Box::new(HookLog::new(&self.data_dir)),
             agents: Box::new(Agents::detect(&self.data_dir)),
             opener: Box::new(self.opener.clone()),
-            transcripts: Box::new(ClaudeTranscripts),
-            secrets: Box::new(FakeSecrets::default()),
+            transcripts: std::sync::Arc::new(ClaudeTranscripts),
+            secrets: std::sync::Arc::new(FakeSecrets::default()),
             project_config: Box::new(FileConfigReader::new()),
             round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),
             changes: std::sync::Arc::new(switchboard::adapters::git::GitChanges),
             artifacts: Box::new(switchboard::adapters::artifacts::DiskArtifacts),
             controller: Box::new(FakeController),
             operations: Box::new(FakeOperations::default()),
+            remote: Box::new(FakeRemoteStore::default()),
+            advertiser: Box::new(FakeAdvertiser::default()),
             dispatch: Some(Box::new(FakeDispatch::default())),
             wake: None,
         })

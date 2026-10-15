@@ -26,6 +26,28 @@ pub struct Conversation {
 }
 
 impl Conversation {
+    /// The conversation with `mask` applied to every text a person or
+    /// the agent wrote: the user's prompts, the agent's answers and
+    /// notes, tool inputs and results, system lines. The default
+    /// `read_masked` builds on this; the adapter masks before its caps.
+    #[must_use]
+    pub fn masked(mut self, mask: &dyn Fn(&str) -> String) -> Self {
+        self.title = self.title.map(|t| mask(&t));
+        for turn in &mut self.turns {
+            turn.user = mask(&turn.user);
+            turn.final_text = mask(&turn.final_text);
+            for a in &mut turn.activity {
+                a.line = mask(&a.line);
+                a.text = a.text.as_deref().map(mask);
+                if let Some(d) = &mut a.detail {
+                    d.input = mask(&d.input);
+                    d.result = mask(&d.result);
+                }
+            }
+        }
+        self
+    }
+
     /// Tokens in the model's context right now: the last message's input
     /// plus what it read from and wrote to the cache. `None` before the
     /// first assistant message.
@@ -128,12 +150,39 @@ pub struct Usage {
     pub cache_create: u64,
 }
 
+/// What a transcript file was at a read: its size and modification
+/// time. The file only grows (Claude Code appends; a `/clear` rebinds
+/// the record to another file), so these name its content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TranscriptVersion {
+    pub size: u64,
+    pub modified: Option<SystemTime>,
+}
+
 pub trait TranscriptReader: Send + Sync {
     /// Parse the whole transcript behind `handle`.
     fn read(&self, handle: &ResumeHandle) -> Result<Conversation, String>;
     /// The transcript file's modification time, so callers can skip
     /// re-reading an unchanged file. `None` when there is no file.
     fn modified(&self, handle: &ResumeHandle) -> Option<SystemTime>;
+    /// The transcript file's size and time, for the remote port's
+    /// content version; `None` when there is no file.
+    fn version(&self, handle: &ResumeHandle) -> Option<TranscriptVersion> {
+        self.modified(handle).map(|modified| TranscriptVersion {
+            size: 0,
+            modified: Some(modified),
+        })
+    }
+    /// Parse the transcript with `mask` applied to every text before
+    /// any cap, so a masked value that crosses a cap is still found
+    /// whole. The default masks after parsing; the adapter does better.
+    fn read_masked(
+        &self,
+        handle: &ResumeHandle,
+        mask: &dyn Fn(&str) -> String,
+    ) -> Result<Conversation, String> {
+        self.read(handle).map(|c| c.masked(mask))
+    }
     /// Copy the conversation up to (not including) the `before`th human
     /// prompt into a new provider session, beside the original, and
     /// return its handle. The original is never touched. This is the one

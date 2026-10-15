@@ -24,6 +24,7 @@ pub mod palette;
 pub mod popout;
 pub mod prompt_box;
 mod rail;
+pub mod remote;
 mod run;
 mod runbar;
 pub mod runs;
@@ -43,11 +44,11 @@ use std::time::SystemTime;
 use egui::{Key, Modifiers, RichText, Ui};
 
 use crate::app::{Services, SwitchboardApp};
+use crate::content::ConversationCache;
 use crate::core::{
     AppAction, AppCore, Composer, PinTarget, ProjectId, RecordId, SessionKind, SetId, SideTab,
     ThemeMode, UiRequest, View, WindowFrame, WorkflowId,
 };
-use crate::ports::transcript::Conversation;
 
 pub use dialogs::{AddProjectDraft, NewSessionDraft};
 pub use session::EmbeddedTerminal;
@@ -75,14 +76,9 @@ pub struct UiState {
     /// Screen snapshots per session, filled by the app; shown read-only
     /// for agent sessions and for sessions that are not running.
     pub snapshots: HashMap<RecordId, String>,
-    /// Parsed transcripts per agent session with the file time they were
-    /// read at, filled by the app; the session view draws them.
-    pub conversations: HashMap<RecordId, (Option<SystemTime>, Conversation)>,
     /// Agent messages with the file paths they name made links, by
     /// record and message text; pruned when the conversation is re-read.
     pub file_links: crate::core::file_refs::Cache,
-    /// Why a session has no conversation (unsupported agent, no file).
-    pub conversation_errors: HashMap<RecordId, String>,
     /// Open every turn's activity list instead of just the summary line.
     pub expand_activity: bool,
     /// The last `expand_activity` value pushed into the collapsing
@@ -165,6 +161,8 @@ pub struct UiState {
     pub palette: Option<palette::PaletteDraft>,
     /// The Environment dialog, while open.
     pub env_dialog: Option<env::EnvDraft>,
+    /// The Remote devices dialog, while open.
+    pub remote_dialog: Option<remote::RemoteDraft>,
     /// The project config editor, while open.
     pub config_dialog: Option<config::ConfigDraft>,
     /// The "Review a plan" dialog while it is open.
@@ -303,8 +301,6 @@ impl Default for UiState {
             embed_terminals: true,
             captions: HashMap::new(),
             snapshots: HashMap::new(),
-            conversations: HashMap::new(),
-            conversation_errors: HashMap::new(),
             expand_activity: false,
             expand_applied: None,
             terminal_open: false,
@@ -339,6 +335,7 @@ impl Default for UiState {
             editor_draft: None,
             palette: None,
             env_dialog: None,
+            remote_dialog: None,
             config_dialog: None,
             review_dialog: None,
             review_views: HashMap::new(),
@@ -395,7 +392,12 @@ impl Default for UiState {
 pub struct DrawCtx<'a> {
     pub core: &'a AppCore,
     pub services: &'a Services,
+    /// The parsed transcripts the app holds.
+    pub conversations: &'a ConversationCache,
     pub state: &'a mut UiState,
+    /// The port the remote port is bound on, while it is: the one a
+    /// pairing invite names (a dev instance overrides the identity's).
+    pub remote_port: Option<u16>,
     actions: Vec<AppAction>,
 }
 
@@ -412,7 +414,9 @@ pub fn draw(app: &mut SwitchboardApp, ui: &mut Ui) {
         let mut cx = DrawCtx {
             core: app.core(),
             services: app.services(),
+            conversations: &app.conversations,
             state: &mut state,
+            remote_port: app.remote_addr().map(|a| a.port()),
             actions: Vec::new(),
         };
         draw_frame(&mut cx, ui);
@@ -536,6 +540,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     dialogs::show(cx, ui.ctx());
     palette::show(cx, ui.ctx());
     env::show(cx, ui.ctx());
+    remote::show(cx, ui.ctx());
     config::show(cx, ui.ctx());
     workflow::dialog_show(cx, ui.ctx());
     zoom::end_frame(cx, ui.ctx());
@@ -750,6 +755,7 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
         || cx.state.new_session.is_some()
         || cx.state.palette.is_some()
         || cx.state.env_dialog.is_some()
+        || cx.state.remote_dialog.is_some()
         || cx.state.config_dialog.is_some()
         || cx.state.review_dialog.is_some()
         || cx.state.confirm_cleanup.is_some()

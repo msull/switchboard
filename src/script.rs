@@ -437,10 +437,9 @@ fn turn_of(
     let id = session(app, name)?;
     let before: usize = turn.parse().map_err(|_| "bad turn number")?;
     let prompt = app
-        .ui_state
         .conversations
-        .get(&id)
-        .and_then(|(_, c)| c.turns.iter().find(|t| t.n == before))
+        .get(id)
+        .and_then(|c| c.turns.iter().find(|t| t.n == before))
         .map(|t| t.user.clone())
         .unwrap_or_default();
     Ok((id, before, prompt))
@@ -618,7 +617,8 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             app.ui_state.files.entry(id).or_default().selected = Some(root.join(rel));
         }
         [
-            "set-env" | "set-secret" | "dotenv" | "environment" | "config" | "env-setup",
+            "set-env" | "set-secret" | "dotenv" | "environment" | "config" | "env-setup"
+            | "pairing" | "remote-devices" | "remote-listen",
             ..,
         ] => {
             env_step(app, w)?;
@@ -725,6 +725,26 @@ fn env_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
             app.dispatch(AppAction::SetEnvSetup {
                 open: *verb == "unlock",
             });
+        }
+        ["pairing", "close"] => app.dispatch(AppAction::ClosePairing),
+        ["pairing", code] => app.dispatch(AppAction::OpenPairing {
+            code: (*code).to_owned(),
+            scope: crate::ports::remote::Scope::Read,
+        }),
+        ["remote-devices"] => {
+            app.ui_state.remote_dialog = Some(crate::ui::remote::RemoteDraft::open(app.core()));
+        }
+        // `remote-listen lan 43187` puts the port on the local network.
+        ["remote-listen", place, port] => {
+            let lan = match *place {
+                "lan" => true,
+                "loopback" => false,
+                other => return Err(format!("remote-listen: {other} is not lan or loopback")),
+            };
+            let port = port
+                .parse()
+                .map_err(|e| format!("remote-listen: port {port}: {e}"))?;
+            app.dispatch(AppAction::SetRemoteListen { lan, port });
         }
         _ => return Err(format!("unknown environment line: {}", w.join(" "))),
     }

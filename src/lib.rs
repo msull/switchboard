@@ -8,6 +8,8 @@
 //!   the process, one module per port.
 //! - `adapters`: real implementations, plus fakes for tests.
 //! - `app`: owns core and adapters; runs effects; drains workers.
+//! - `content`: what the app read from outside and keeps between
+//!   frames, with its version (parsed transcripts); shared by the views.
 //! - `ui`: egui drawing and input -> actions.
 
 // Tests assert emptiness with `assert!` throughout; the rest of the
@@ -16,6 +18,7 @@
 
 pub mod adapters;
 pub mod app;
+pub mod content;
 pub mod core;
 pub mod ports;
 pub mod script;

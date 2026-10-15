@@ -378,10 +378,9 @@ fn header_actions(
     // message sent from Switchboard clears it in the record, one typed
     // in the terminal shows as a turn past the cut.
     let undo = record.discard.as_ref().is_some_and(|d| {
-        cx.state
-            .conversations
-            .get(&record.id)
-            .is_none_or(|(_, c)| c.turns.len() < d.before)
+        cx.conversations
+            .get(record.id)
+            .is_none_or(|c| c.turns.len() < d.before)
     });
     if undo {
         order.insert(1, "Undo discard");
@@ -598,9 +597,8 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
     // Drawing needs several fields of the UI state at once; taking
     // them apart borrows each on its own, which the borrow checker
     // allows where `cx.state.x` next to `cx.state.y` would not.
+    let conversations = cx.conversations;
     let UiState {
-        conversations,
-        conversation_errors,
         expand_activity,
         expand_applied,
         markdown,
@@ -624,8 +622,8 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
     };
     conversation_now.insert(window, record.id);
     let snapshot = snapshots.get(&record.id);
-    let Some((_, conversation)) = conversations.get(&record.id) else {
-        no_conversation(ui, conversation_errors.get(&record.id), snapshot);
+    let Some(conversation) = conversations.get(record.id) else {
+        no_conversation(ui, conversations.error(record.id), snapshot);
         return;
     };
     conversation_view(
@@ -691,7 +689,7 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
 
 /// What shows when the transcript cannot be read: the pointer to the
 /// terminal, why, and the pane snapshot.
-fn no_conversation(ui: &mut Ui, error: Option<&String>, snapshot: Option<&String>) {
+fn no_conversation(ui: &mut Ui, error: Option<&str>, snapshot: Option<&String>) {
     let p = theme::palette(ui);
     ui.label(
         RichText::new("This session runs in Ghostty. Use Open in terminal to bring its window up.")
@@ -837,7 +835,7 @@ pub(super) fn append_path(draft: &mut String, path: &std::path::Path) {
 /// which is where a page opens, so the first flick back lands on the
 /// latest message.
 pub fn jump_message(cx: &mut DrawCtx<'_>, id: RecordId, back: bool) {
-    let Some((_, conversation)) = cx.state.conversations.get(&id) else {
+    let Some(conversation) = cx.conversations.get(id) else {
         return;
     };
     let count = conversation.turns.len();

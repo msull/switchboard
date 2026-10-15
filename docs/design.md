@@ -247,7 +247,11 @@ never run anything on its own.
   record), so a session resolves only its own grants; the token is as
   private as the pane's environment. The same token gates
   `session.ask`, which marks only its holder's own record as asking the
-  owner something.
+  owner something. The one other way a secret's surroundings leave the
+  app is as redacted text on the remote port: a paired device reads a
+  pane's screen with every value Switchboard holds for the project
+  replaced by its name, and the port's key and tokens never reach a
+  record or a log.
   The writes (`env.set.upsert`, `env.secret.store`, `env.grant`) are
   accepted only inside a five-minute setup window the owner opens from
   the app's settings menu, so an agent cannot grant itself a set. What a
@@ -3099,6 +3103,421 @@ built-in. Dispatch's install and start are two requests, so a second
 `dispatch` process installing between them can prune the first
 definition; the start then fails with "no workflow definition called …"
 and Dispatch fails the attempt, which a retry recovers.
+
+## Remote client (2026-10-12)
+
+A native visionOS and iPadOS client that browses the sessions and
+working sets of several running Switchboard installations and sends
+prompts to them is specified in `docs/remote-client.md`: a port over
+the control port's wire contract, pairing with a pinned host key, one
+revision counter and `changed` events, and content work off the frame
+thread. The plan is Spike 22 and then Milestone A as five commits.
+
+Built so far:
+
+- **A0, the conversation cache in the app.** Parsed transcripts moved
+  from `UiState` to `SwitchboardApp::conversations`
+  (`content::ConversationCache`): each entry keeps the handle and file
+  time it was read through, `is_current` answers the refresh without a
+  read, and the views reach the cache through `DrawCtx::conversations`.
+  A seeded conversation (tests, the script) has no handle and no file
+  time and is never read over. Behaviour is unchanged; the UI tests
+  seed the new place.
+- **Spike 22** (`spikes/22-remote-port`). A pinned-TLS HTTP and
+  WebSocket port on std threads with the frame as the executor works
+  as specified: the frame's share is under 0.25 ms per pass, a
+  request's latency is one frame interval (a client that sends on the
+  reply synchronizes with the frame), the connection pools, the
+  handshake timeout and the subscriber overflow hold under a stall and
+  an unread socket, a wrong pin fails at the handshake, and `mdns-sd`
+  advertises a service `dns-sd` sees. The largest transcript on this
+  machine (146 MB) reads and parses in 290 ms at 575 MB peak, which
+  settles that content work runs off the frame and argues for one
+  content worker rather than one per connection. ctime and inode see
+  the same-size rewrite, the rename and the regrown log that mtime,
+  size and length miss. Not measured: the visionOS pinning delegate
+  and the read-model diff.
+- **A1, identity and an authenticated read-only host.** `identity.json`
+  holds the server id, the display name, the self-signed certificate
+  (made with `rcgen` on first start) and its SPKI hash, and where the
+  port binds (loopback until the owner allows the local network, port
+  43187 or `SWITCHBOARD_REMOTE_PORT`); the private key is a Keychain
+  item under `remote-key:<server id>`. A certificate whose key is gone
+  is remade over a new key under the same id, `devices.json` is cleared
+  and the dialog says so; a Keychain error keeps the identity and the
+  port does not listen. `adapters/remote.rs` is the TLS listener in the
+  control socket's shape, with the pools, deadlines, body cap and rate
+  limits of the spec's §4.1, handing at most eight requests per pass
+  to the frame; `app.rs` authenticates the bearer, routes the
+  allowlist (`/info`, `/pair`, projects, spaces, sets, one set,
+  sessions, one session, waiting, screen) onto the control port's
+  `answer`, bounds every string in a reply (4 KiB, notes 64 KiB alone,
+  each cut named in `truncated`), caps the body at 1 MiB and wraps it
+  in `{epoch, revision, body}`; everything else is refused by name,
+  before translation. Pairing: the Remote devices dialog (settings
+  menu) opens a five-minute window with an eight-character Crockford
+  code shown as a QR carrying the server id, key hash, code and
+  address; `/pair` must carry the host's own key hash and the code,
+  three failures from any connection close the window, the first
+  success spends it, and the device gets a 43-character bearer token
+  whose SHA-256 is what `devices.json` keeps. The dialog lists devices
+  with scope (read or control, changed there and nowhere else), last
+  seen and Revoke. Not in A1: events, the content worker (the screen
+  is answered on the frame as the control port answers it, until the
+  screen cache of A4), Bonjour (A2), and `server_name` lives in
+  `identity.json` rather than `Settings`, which the spec now says.
+- **A2, two hosts and the first client.** The host advertises
+  `_switchboard._tcp` through `mdns-sd` (`adapters/bonjour.rs`, a stub
+  off macOS) while the port is on the local network, under the display
+  name with a short id suffix and TXT `v`, `name` and `id`; a rename
+  re-advertises, loopback withdraws. The Swift package under `client/`
+  is the protocol (the wire views as `Codable`, decoded against
+  fixtures the Rust port writes and checks), the transport (`URLSession`
+  with a delegate that accepts only a certificate over the pinned
+  P-256 key, and `Network.framework` browsing), the core (known servers
+  apart from discovery, credentials in the Keychain for the apps and an
+  owner-only file for the command-line browser, one `ServerConnection`
+  actor per host with the §6.2 states, the per-key revision rule, the
+  epoch check, a key change dropping the token and keeping the entry,
+  and the unified store with source labels and offline marks) and a
+  SwiftUI browser. Measured on this Mac with two throwaway instances:
+  discovery finds both, the command-line browser pairs with each and
+  shows both hosts' sessions under distinct labels, a killed host's
+  items stay visible marked offline while the other keeps refreshing,
+  and the host back on another port is reconnected under the same pin
+  within one refresh, because a host that is not connected is resolved
+  again from its Bonjour record on every tick (a killed process sends
+  no goodbye). Not in A2: the visionOS and iPadOS app targets (an
+  Xcode project; the package builds for both), events (A3), and the
+  Swift tests are not in the pre-commit hook or CI.
+- **A3, synchronization.** The revision moves from a read-model diff:
+  `core::revision::Fingerprints` hashes every exported view (sessions
+  with `quiet_secs` held still, sets, projects, spaces, and each
+  collection's membership) and the app compares two passes, once per
+  pass that dispatched something while the port is bound, before
+  requests are served and again at the end of the frame; one `changed`
+  or `removed` per resource that moved, the counter bumped once. The
+  diff is the gate rather than the effect list, so a set rename, a
+  trust question and a quiet Codex pane all surface with no save, and
+  ten passes over a running pane emit nothing. Measured: 0.4 ms per
+  pass over three hundred sessions in a release build (3.3 ms debug),
+  against the spec's 1 ms; the first cut hashed each view's JSON with
+  SHA-256 and took 1.1 ms, so the wire views derive `Hash` and are
+  hashed directly. `GET /api/v1/events` with an upgrade is the events
+  socket: `hello` with the revision goes into the subscriber's queue
+  on the frame before anything later can move the counter, so a
+  snapshot taken after it reconciles against everything that follows;
+  the connection thread runs the socket non-blocking (an earlier cut
+  blocked up to 100 ms in a read between events, and any burst past
+  the queue inside that window dropped every subscriber), writes with
+  the 10 s deadline, drops a subscriber that fell 256 events behind
+  with `resync_required` and the close, and closes on Revoke. The
+  control port's `serve` logs a non-replayable command's request line
+  before it runs and refuses to append nothing; an op with a request
+  line and no reply is answered `interrupted` and never run again;
+  `/api/v1/ops/{op}` reads the status. `SessionView` gains the
+  additive `last_activity_ms`. The Swift client opens the socket
+  through the same session and pin, waits for `hello`, buffers frames
+  while it fetches the collections, applies the buffer against each
+  resource's held revision (a member falls back to its collection's),
+  refetches only past the held revision, drops on `removed`, starts
+  over on a new epoch, and reconnects on `resync_required` or a closed
+  socket under its backoff; the timer refresh is gone, the manager's
+  loop retries only hosts that are not connected. Not in A3: watched
+  content (A4) and the `runs` collection, which has no endpoint yet.
+- **A4, watched content.** A screen read is the spec's two-step
+  handoff: the frame checks the record and resolves the redaction
+  policy (the project's secret values and its granted sets', with a
+  fingerprint), one content worker thread (`content::ContentWorker`,
+  over the same `Arc<dyn ProcessHost>`) snapshots the pane's whole
+  window, hashes it as the source version, masks and trims it, and
+  reports back; the frame assigns the key a new revision and emits
+  `changed {screen, id}` only when the source or the policy moved, and
+  stamps the reply with the key's revision, so two reads of one text
+  carry one revision however many lines each asked for, and a secret
+  added to the project moves a watched screen though the pane did not.
+  A policy that fails to resolve refuses the read; nothing is served
+  unmasked. The worker polls the watch set every two seconds: every key
+  a subscriber sent `watch` for (answered `watching`, never refused)
+  plus every key read in the last minute, capped at 128 with the least
+  recently read evicted and re-entered by its next read; `unwatch`, a
+  closed socket and a revocation each drop their watches. The policy
+  is resolved and cached on the frame, cleared by any save or secret
+  change, which is the one Keychain read left there until Milestone C.
+  The control port's `session.screen` shares the policy and refuses
+  the same way. The Swift client counts holders per screen, sends
+  `watch` at the first and `unwatch` at the last, reads the screen on
+  `changed` past its held revision, resends every watch after `hello`
+  on a reconnect before it snapshots, and the command-line browser's
+  `screen <session id>` shows a pane live. Measured with the real
+  adapter: five tests in `tests/remote.rs`, including four stalled
+  strangers filling only their pool and a fifth closed at once while a
+  paired subscriber keeps receiving. Not in A4: the conversation, file
+  and run-output content kinds (Milestone C), which take the same
+  worker and cache.
+- **B1, the app shell.** The visionOS app is an xcodegen project
+  (`client/project.yml`, the `.xcodeproj` git-ignored) with one thin
+  target over the package: the entry declares the main window and
+  where the registry lives, and `RootView` in `SwitchboardUI` draws
+  the sessions and hosts tabs, so the iPad shell will reuse it.
+  Bonjour on visionOS needs the service and the local-network reason
+  in `Info.plist`. `scripts/sim.sh` builds, installs, launches and
+  screenshots the app on the simulator from the terminal, and a
+  launch-time `SWITCHBOARD_INVITE` pairs it with a host without
+  typing. Measured: the simulator paired with a throwaway host on this
+  Mac and listed its sessions under the source label.
+- **B2, card windows.** A session in the browser opens as a window of
+  its own through `WindowGroup(for: CardWindowRequest.self)`: a
+  request is the qualified session plus a window id, so two requests
+  on one session are two windows, while opening a request again brings
+  its window forward: a click on a listed session goes to the window
+  it already has, and "Open another window" in its context menu makes
+  a second. The window offers the modes its
+  kind can take, draws `compact` and `screen`, and greys the rest with
+  the note that they arrive with Milestone C; the screen mode holds a
+  watch for as long as it is on screen (the model counts holders, so
+  two windows on one pane send one `watch`) and the pane's text
+  follows the host's `changed` events. The browser model now mirrors
+  the manager's store when the manager says it changed rather than on
+  a timer. A host that is not connected leaves the window on what it
+  last showed with the mode row disabled; a session a connected host
+  no longer lists is marked removed; closing a window releases the
+  watch and nothing else. Each window's mode is kept in
+  `presentation.json` in the app's container by window id, because
+  visionOS restores an app's windows on relaunch and a restored card
+  came up in the default mode before this. A launch-time
+  `SWITCHBOARD_OPEN` opens card windows for the simulator run. Seen
+  on the simulator: a line typed into the watched pane on the host
+  showed in the window within the poll interval; the system restored
+  the previous run's card windows on one relaunch and not on another
+  forced termination, which is its call.
+- **B3, browsing and persistence.** The main window lays the sessions
+  out as a list, a grid, or one session in focus with previous and
+  next (the cursor is kept by ref, so a session moving in the order
+  stays focused), with the §8 filters as toggles over hosts, kinds and
+  the states in view (an empty set admits everything, so turning one
+  member off selects the rest first); working sets are grouped by
+  source. The layout, the filters, the focused session, each card
+  window's mode and the card windows open at the last save live in
+  `presentation.json`; a launch waits a moment for the system's own
+  window restoration and then reopens the saved windows it did not
+  bring back, under their ids, so each keeps its mode. Seen on the
+  simulator with two throwaway hosts: both hosts' sessions under
+  labels told apart by the short id, a window from each host open at
+  once, a screen window surviving the host's restart (the offline
+  banner with the mode row disabled, then the pane refilled live once
+  the watch was resent after `hello`), and a screen window reopened
+  with its mode and content after the app was terminated. On the
+  headset the first run showed a gap the simulator could not: a run
+  that ends with only card windows is restored without the browser,
+  and nothing started the connections either, since the boot lived in
+  the main window's view. Every scene now boots the model (the first
+  call does the work), the first card window to find the main window
+  missing after the restoration grace opens it, and the card header
+  carries a Sessions button that brings the main window forward (it
+  is a value-keyed window group, so this never makes a second one).
+  From the first hours with it: the card header is small (a short
+  host pill, the Sessions button an icon) so a tall narrow card, the
+  shape the conversation and document modes will want, holds
+  together, and the mode pills are mini and become icons when the
+  titles would wrap; the text of every mode but the card (the screen,
+  the run output, the last response and the conversation, through an
+  environment value the prose views size their fonts from) scales
+  through a readout at the end of the mode row that opens a slider
+  and snap sizes (50 to 200 percent), kept per window while it is open
+  and starting over in
+  a new one, since the comfortable size depends on where the window
+  sits in the room. A pinch on the pane was tried first and did
+  nothing on the headset, and a slider along the window's bottom edge
+  was hard to take hold of next to the system's own bar, so the
+  control moved up; the pinch may come back later.
+  Milestone B runs on the headset, installed from the terminal with
+  `client/scripts/device.sh` once the one-time Xcode setup was done
+  (Developer Mode, the device paired in Xcode's Devices window, one
+  run from Xcode with a development team on the target). Not in B: the
+  conversation, last-response and run-output modes (Milestone C), the
+  QR scanner (the invite is pasted or passed at launch), and the
+  Xcode project is generated, not checked in.
+- **C1 and C2, content on the wire and the conversation.** The port
+  serves `session.conversation` (a page of turns from a number,
+  stopping at `limit`, 100 at most, or the page's byte cap, with
+  `next`; or anchored at its end with `from=last` or `before=n`,
+  filling backward so the anchor is always in it, since a page of
+  large turns walked forward from a count stopped short of the end and
+  showed a stale tail; a page carries the first 512 bytes of each
+  tool call's input and result, marked `more`, and
+  `session.turn` reads one turn whole for a client that opened its
+  activity, which cut a page of this project's own transcript from
+  half a megabyte for six turns to a page of twenty; a client follows
+  a change page after page to the end; a turn over 256 KiB loses its tool detail and
+  notes first, then its prompt is shortened, then its answer is cut
+  from the front, and says `truncated`), `session.last_response` (the
+  last turn's answer, a projection of the conversation key at its
+  revision), `session.runs` (from the record, artifacts by name) and
+  `session.run_output` (the log's tail, 500 lines at most). The
+  content worker reads them all: a transcript is parsed through the
+  reader's new `read_masked`, which runs the mask over every text
+  before the parser's caps, and the parsed, masked conversation stays
+  on the worker by handle, file version and policy, so a poll is a
+  stat and a page is served from memory; a run's log is read through
+  `scrollback::tail_masked`, which starts the longest secret's length
+  before the tail window so a value on the window's edge is masked
+  whole, and is versioned by inode, change time and size. The key for
+  a run is `record/n`, and the diff pass fingerprints a record's runs
+  as the `runs` collection. Only a Claude Code session has a
+  conversation; the rest are refused `no_conversation`. The client
+  holds a conversation as pages merged by turn number (`ConversationState`):
+  a `changed {conversation}` refetches from the last turn held, which
+  replaces that turn and everything after, a page reaching the end
+  drops anything after it, and another `resume_id` drops it all; the
+  card windows draw Last response (the answer with its inline
+  Markdown), Conversation (each turn's prompt, its activity folded
+  under a line with the tool calls' input and result one level deeper,
+  its answer; "Earlier turns" loads the page ending before the first held;
+  the end follows the host) and Run output (a run picker with its
+  status and the tail, scaled like the screen). Seen on the simulator
+  against a throwaway host: a real transcript's last page scrolled to
+  its end, and a service's run with its exit code and log. Not yet in
+  C: `file.read` (no view asks for a file before Milestone D) and the
+  policy reads off the frame.
+- **C3, the control scope.** `POST sessions/{id}/send|resume|trust`
+  for a device whose scope is `control` (a read device is refused
+  `scope`, by name, with nothing run). The body carries the device's
+  own operation id, `op`, and for a send the text (16 KiB at most).
+  The request becomes the wire request the control socket would carry
+  and goes through the same `serve`, so nothing new runs or logs: a
+  send or a resume is written to `operations.log` before it runs, a
+  repeat of the op is answered from the log without typing or
+  launching again, and an op that was started and never answered is
+  refused `interrupted` (409) rather than run twice. `/info` lists
+  `control` among the capabilities and the send and op caps among the
+  limits. The client makes a UUID per command and follows the spec's
+  rule on a timeout: a status query, never a blind resend; `done`
+  takes the logged reply (its failure reason included), `interrupted`
+  is shown as started with the outcome unknown, `unknown` resends once
+  with the same op. A `scope` refusal names the reason and keeps the
+  pairing (only an unauthorized or revoked token drops it), and a
+  timeout on a command does not count against the connection. The
+  card window of a Claude session ends in a control bar: a message
+  field with a microphone button that starts dictation at once
+  through the Speech framework, on-device where the device has it,
+  the words revised in place after what was typed (the keyboard's own
+  mic still works; "look to dictate" is a system affordance of search
+  fields only, and an app gets no gaze event, so the button is a tap),
+  Send, "Trust this folder" when the session view
+  carries the question, and Resume for a not-running session with a
+  handle, behind "Resume spends a turn". The bar is disabled unless
+  the session is live, and a read device sees why instead of the
+  controls. Tests cover a read device refused, a send typed once for
+  one op, a resume launching once, a running one launching nothing,
+  trust answering the question once, the bad bodies, and the scope
+  lowered again; on the client the op per command, the three status
+  outcomes after a timeout, the one resend and the give-up, and the
+  refusals.
+- **C3, the draft.** An agent session's prompt as a device reads and
+  works on it is its Prompt Box editor on the host, made on demand as
+  the card's microphone makes one (`prompt_box::ensure_editor`).
+  `GET sessions/{id}/draft` answers the editor's rendered text, the
+  live utterance's range, its status and what undo, redo and the AI
+  pass can do (`DraftView`); `POST` with `action` applies replace,
+  undo, redo, clear, clean_up, delete_sentence or delete_paragraph,
+  or `send` with the device's `op`, which takes the draft to the pane
+  through `serve` as the plain send does and clears the editor (a
+  repeat of a send that went is answered from the log; an empty draft
+  is refused); `POST sessions/{id}/dictation` feeds a device's speech
+  events (`started`, `voice_started`, `partial`, `final`,
+  `voice_ended`, `stopped`, with the device's own recognizer session
+  number) to the editor as `SpeechEventReceived`, so the device
+  recognizes and the editor keeps the document. The drafts are
+  fingerprinted every 150 ms while a subscriber is connected and an
+  editor that moved emits `changed {draft, id}`; the device holding it
+  re-reads. `/info` lists the `draft` capability. The client's
+  control bar on such a host is a view of the editor: typing replaces
+  the text once it pauses, dictation goes as speech events in order
+  with a recognizer session per run, the tools sit above the field,
+  Send goes through the draft under an op, and `changed {draft}`
+  re-reads what a bar holds. The prompt window on the headset
+  (`PromptWindowView`, one per app) shows the whole draft of the
+  session whose input is active, the live utterance in amber, with a
+  microphone, the tools and Send, the desktop preview's role for the
+  Working Set. Known gaps: the AI
+  pass runs in the editor's worker, pumped by the host's frame, so a
+  host whose window is occluded finishes it on its next frame; the
+  Mac's own voice runtime and a device dictate into the same editor
+  under different session numbers, and nothing stops both at once.
+- **C3, restoration.** A card window keeps its place in a
+  conversation (`ConversationPlace`): the turn at the top of the view,
+  or the end it follows, and the folds open per turn and per activity,
+  keyed by the transcript's `resume_id`. The scroll view is positioned
+  by turn number, so a page merging under the view keeps the turn at
+  the top where it is, and "Earlier turns" pins the turn that was
+  first; the end is followed only while the end marker is on screen,
+  so reading an old turn while the agent works no longer jumps. The
+  folds live in the window rather than the rows, so a turn replaced by
+  a refetch, or the whole conversation dropped and re-read on a
+  reconnect, comes back with the same folds open. The place is saved
+  beside the window's mode in `presentation.json` (an older file reads
+  with no place), so a relaunch restores it; a turn no longer held
+  after a reconnect, or another transcript, falls back to the end.
+- **C4, the policy off the frame and `file.read`.** The frame no
+  longer resolves a redaction policy: a content job carries a
+  `PolicySpec` (the project's environment, the sets it and the session
+  may use, and `policy_epoch`, moved by every save and secret change)
+  and the content worker reads the dotenv files and the secret store,
+  caching the policy per spec for a minute, so a slow Keychain call
+  costs the worker, never a frame; `Services.secrets` is an `Arc` for
+  that. A store that fails refuses with `policy` (503) rather than
+  answering unmasked. `GET projects/{id}/files/{path}` reads a file
+  some working set pins (`PinTarget::File`), through
+  `adapters::files::open_pinned`: the path checked before the disk,
+  the root opened as a directory descriptor and every component
+  opened from the previous one with `NOFOLLOW` (no symlink is followed,
+  parent or leaf; macOS says `ENOTDIR` where Linux says `ELOOP`), the
+  leaf non-blocking so a FIFO does not park the thread and checked to
+  be a regular file, dotenv names refused whatever is pinned, the read
+  one byte past the 768 KiB limit so growth cannot pass it, the version
+  the inode, change time and size. The worker caches the masked file
+  per key and re-reads only when the version or the policy moved; a
+  watched file emits `changed {file, project/path}` on the poll.
+  Refusals: `not_pinned` (404), `too_large` (413, with the size),
+  `failed` (400) for a dotenv file, a symlink, a FIFO or a non-text
+  file. The client holds files as content (`FileBody`, `watch(file:)`,
+  re-read on `changed`); no window shows one yet, which the working set
+  view brings. Milestone C is complete.
+- **Scope on the listings.** A listing over the remote port leaves
+  out the records Dispatch made for its own use (a ticket's project
+  and its sessions, a worker session anywhere), told by the
+  `<ticket>-<nonce>` op they were made under
+  (`switchboard_control::is_dispatch_worker_op`); a supervisor's
+  (`sup-…`) and the owner's own stay. `?scope=all` on `projects`,
+  `sessions`, `waiting` and the `events` subscription lists and
+  announces them, and a worker record is still read by its id, for
+  the ticket view to come. Frames for a worker record go to `scope=all`
+  subscribers alone. The control socket is untouched, so Dispatch sees
+  everything as before.
+- **On the headset (2026-10-14).** Scene restoration is ruled out: a
+  launch opens the Sessions window and nothing else (the card and
+  prompt window groups have `restorationBehavior(.disabled)`), after a
+  restored window kept the process alive out of view so that an icon
+  tap presented nothing. A launch log in the app's container
+  (`launch.log`: launches, window appearances, scene phases) stands in
+  for a device syslog the Mac cannot read. The conversation's end
+  marker lives outside the lazy stack, so the follow button and
+  opening at the end hold on the device. Markdown tables in an answer
+  are laid out as grids. A Bonjour resolve that gets no answer is
+  given up after 5 s, and each offline host resolves on its own task,
+  after the retry loop hung on one resolve left waiting by the system.
+- **Known gaps at the first merge.** Milestone D, the iPad shell, is
+  not started. The Codex transcript parser, so a Codex session's
+  conversation is empty on a device. The Dispatch ticket view
+  (`scope=all` is served; no view asks for it). Removing dead sessions
+  from a device. The Recent sessions set counts worker sessions. The
+  screen and run-output modes follow the end without the
+  conversation's end marker. The draft path makes the editor on the
+  frame (`prompt_box::ensure_editor` reads the voice key there), so an
+  unsigned host freezes on the Keychain prompt while a device asks for
+  a draft; the signed bundle never prompts. Remote access off the LAN
+  is §9 of the spec, deferred.
 
 ## Open questions
 

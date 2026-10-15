@@ -18,7 +18,8 @@ use serde_json::Value;
 
 use crate::core::ResumeHandle;
 use crate::ports::transcript::{
-    Activity, ActivityKind, Conversation, DETAIL_CAP, ToolDetail, TranscriptReader, Turn, Usage,
+    Activity, ActivityKind, Conversation, DETAIL_CAP, ToolDetail, TranscriptReader,
+    TranscriptVersion, Turn, Usage,
 };
 
 /// Reads Claude Code transcripts from the path in the resume handle.
@@ -47,31 +48,52 @@ fn locate(path: &Path) -> PathBuf {
     }
 }
 
+/// The transcript file's text behind `handle`.
+fn transcript_text(handle: &ResumeHandle) -> Result<String, String> {
+    match handle {
+        ResumeHandle::Codex { .. } => Err("Codex transcripts are not supported yet".into()),
+        ResumeHandle::ClaudeCode {
+            transcript: None, ..
+        } => Err("no transcript path for this session".into()),
+        ResumeHandle::ClaudeCode {
+            transcript: Some(path),
+            ..
+        } => {
+            let path = locate(path);
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
+        }
+    }
+}
+
 impl TranscriptReader for ClaudeTranscripts {
     fn read(&self, handle: &ResumeHandle) -> Result<Conversation, String> {
+        transcript_text(handle).map(|text| parse(&text))
+    }
+
+    fn read_masked(
+        &self,
+        handle: &ResumeHandle,
+        mask: &dyn Fn(&str) -> String,
+    ) -> Result<Conversation, String> {
+        transcript_text(handle).map(|text| parse_with(&text, mask))
+    }
+
+    fn modified(&self, handle: &ResumeHandle) -> Option<SystemTime> {
+        self.version(handle)?.modified
+    }
+
+    fn version(&self, handle: &ResumeHandle) -> Option<TranscriptVersion> {
         match handle {
-            ResumeHandle::Codex { .. } => Err("Codex transcripts are not supported yet".into()),
-            ResumeHandle::ClaudeCode {
-                transcript: None, ..
-            } => Err("no transcript path for this session".into()),
             ResumeHandle::ClaudeCode {
                 transcript: Some(path),
                 ..
             } => {
-                let path = locate(path);
-                let text = std::fs::read_to_string(&path)
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
-                Ok(parse(&text))
+                let meta = std::fs::metadata(locate(path)).ok()?;
+                Some(TranscriptVersion {
+                    size: meta.len(),
+                    modified: meta.modified().ok(),
+                })
             }
-        }
-    }
-
-    fn modified(&self, handle: &ResumeHandle) -> Option<SystemTime> {
-        match handle {
-            ResumeHandle::ClaudeCode {
-                transcript: Some(path),
-                ..
-            } => std::fs::metadata(locate(path)).ok()?.modified().ok(),
             ResumeHandle::ClaudeCode { .. } | ResumeHandle::Codex { .. } => None,
         }
     }
@@ -239,17 +261,24 @@ struct ToolResult {
 /// Parse a whole transcript. Public so tests can feed it text directly.
 #[must_use]
 fn parse(text: &str) -> Conversation {
+    parse_with(text, &|s| s.to_owned())
+}
+
+/// The transcript with `mask` over every text before it is cut to a
+/// cap or shortened to a line, so a masked value crossing a cut is
+/// still found whole (the remote port's rule: mask the complete source
+/// text, then cut).
+fn parse_with(text: &str, mask: &dyn Fn(&str) -> String) -> Conversation {
     let recs: Vec<Value> = text
         .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
 
-    let results = index_tool_results(&recs);
+    let results = index_tool_results(&recs, mask);
 
     let mut conv = Conversation::default();
-    let mut usage = Usage::default();
-    let mut last_usage = None;
+    let mut totals = Totals::default();
     let mut cwd_seen = false;
     for r in &recs {
         let kind = str_field(r, "type");
@@ -257,7 +286,7 @@ fn parse(text: &str) -> Conversation {
         if kind == Some("custom-title")
             && let Some(title) = str_field(r, "customTitle")
         {
-            conv.title = Some(title.to_owned());
+            conv.title = Some(mask(title));
         }
         if r.get("isSidechain").and_then(Value::as_bool) == Some(true) {
             continue;
@@ -282,7 +311,7 @@ fn parse(text: &str) -> Conversation {
         if is_human_prompt(r) {
             let content = r
                 .pointer("/message/content")
-                .map_or_else(String::new, text_of);
+                .map_or_else(String::new, |c| mask(&text_of(c)));
             if systemish(&content) {
                 if let Some(cur) = conv.turns.last_mut() {
                     cur.activity
@@ -306,27 +335,20 @@ fn parse(text: &str) -> Conversation {
         };
         match kind {
             Some("assistant") => {
-                assistant_record(
-                    cur,
-                    &mut conv.model,
-                    &mut usage,
-                    &mut last_usage,
-                    r,
-                    &results,
-                    at,
-                );
+                assistant_record(cur, &mut totals, r, &results, at, mask);
             }
             Some("system") if str_field(r, "subtype") != Some("bridge_status") => {
                 if let Some(c) = str_field(r, "content").filter(|c| !c.trim().is_empty()) {
                     cur.activity
-                        .push(activity(ActivityKind::System, short(c, 120), at));
+                        .push(activity(ActivityKind::System, short(&mask(c), 120), at));
                 }
             }
             _ => {}
         }
     }
-    conv.usage = usage;
-    conv.last_usage = last_usage;
+    conv.model = totals.model;
+    conv.usage = totals.usage;
+    conv.last_usage = totals.last_usage;
 
     // The final response is also the last text activity: show it once.
     // (The viewer only drops it when it is the very last line; a hook
@@ -345,7 +367,10 @@ fn parse(text: &str) -> Conversation {
 
 /// Tool results arrive as later `user` records, but they are shown on
 /// the tool call that produced them, so index them first.
-fn index_tool_results(recs: &[Value]) -> HashMap<String, ToolResult> {
+fn index_tool_results(
+    recs: &[Value],
+    mask: &dyn Fn(&str) -> String,
+) -> HashMap<String, ToolResult> {
     let mut results: HashMap<String, ToolResult> = HashMap::new();
     for r in recs {
         if str_field(r, "type") != Some("user") {
@@ -366,7 +391,7 @@ fn index_tool_results(recs: &[Value]) -> HashMap<String, ToolResult> {
                 id.to_owned(),
                 ToolResult {
                     error: b.get("is_error").and_then(Value::as_bool).unwrap_or(false),
-                    text: cap(&content, DETAIL_CAP),
+                    text: cap(&mask(&content), DETAIL_CAP),
                 },
             );
         }
@@ -374,16 +399,23 @@ fn index_tool_results(recs: &[Value]) -> HashMap<String, ToolResult> {
     results
 }
 
+/// What the assistant messages add up to over a conversation.
+#[derive(Default)]
+struct Totals {
+    model: Option<String>,
+    usage: Usage,
+    last_usage: Option<Usage>,
+}
+
 /// One assistant message: token usage, the model name, and its blocks
 /// (thinking, text, tool calls) applied to the current turn.
 fn assistant_record(
     cur: &mut Turn,
-    model: &mut Option<String>,
-    usage: &mut Usage,
-    last_usage: &mut Option<Usage>,
+    totals: &mut Totals,
     r: &Value,
     results: &HashMap<String, ToolResult>,
     at: Option<SystemTime>,
+    mask: &dyn Fn(&str) -> String,
 ) {
     let msg = r.get("message").cloned().unwrap_or(Value::Null);
     if let Some(u) = msg.get("usage") {
@@ -393,16 +425,16 @@ fn assistant_record(
             cache_read: num(u, "cache_read_input_tokens"),
             cache_create: num(u, "cache_creation_input_tokens"),
         };
-        usage.input += this.input;
-        usage.output += this.output;
-        usage.cache_read += this.cache_read;
-        usage.cache_create += this.cache_create;
+        totals.usage.input += this.input;
+        totals.usage.output += this.output;
+        totals.usage.cache_read += this.cache_read;
+        totals.usage.cache_create += this.cache_create;
         // A multi-block turn is several records with the same usage, so
         // the last one seen is the current context.
-        *last_usage = Some(this);
+        totals.last_usage = Some(this);
     }
-    if model.is_none() {
-        *model = str_field(&msg, "model").map(str::to_owned);
+    if totals.model.is_none() {
+        totals.model = str_field(&msg, "model").map(str::to_owned);
     }
     cur.assistant_msgs += 1;
     cur.end = at.or(cur.end);
@@ -421,7 +453,7 @@ fn assistant_record(
             Some("text") => {
                 if let Some(t) = str_field(b, "text").filter(|t| !t.trim().is_empty()) {
                     text_at.get_or_insert(cur.activity.len());
-                    texts.push(t.to_owned());
+                    texts.push(mask(t));
                 }
             }
             Some("tool_use") => {
@@ -433,7 +465,7 @@ fn assistant_record(
                 }
                 let name = str_field(b, "name").unwrap_or("?");
                 let input = b.get("input").map_or_else(String::new, |i| {
-                    serde_json::to_string_pretty(i).unwrap_or_default()
+                    mask(&serde_json::to_string_pretty(i).unwrap_or_default())
                 });
                 let path = b.get("input").and_then(|i| {
                     if name == "Bash" {
@@ -449,7 +481,7 @@ fn assistant_record(
                 });
                 cur.activity.push(Activity {
                     kind: ActivityKind::Tool,
-                    line: tool_line(b),
+                    line: mask(&tool_line(b)),
                     at,
                     error,
                     detail: Some(ToolDetail {
@@ -934,6 +966,40 @@ mod tests {
             "Custom: hello"
         );
         assert_eq!(line(serde_json::json!({"name":"Bare"})), "Bare");
+    }
+
+    /// Spike 22: what the largest transcript costs to read and parse,
+    /// which bounds what the remote port can serve. Run with
+    /// `SWITCHBOARD_SPIKE_TRANSCRIPT=<path> cargo test --release --lib
+    /// parse_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement against a transcript named in the environment"]
+    fn parse_timing() {
+        let path = std::env::var("SWITCHBOARD_SPIKE_TRANSCRIPT").expect("a transcript path");
+        let t0 = std::time::Instant::now();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let read = t0.elapsed();
+        let t1 = std::time::Instant::now();
+        let conversation = parse(&text);
+        let parsed = t1.elapsed();
+        let turn_text: usize = conversation
+            .turns
+            .iter()
+            .map(|t| {
+                t.user.len()
+                    + t.final_text.len()
+                    + t.activity
+                        .iter()
+                        .map(|a| a.text.as_deref().map_or(0, str::len) + a.line.len())
+                        .sum::<usize>()
+            })
+            .sum();
+        println!(
+            "parse_timing: {} bytes read in {read:?}, parsed in {parsed:?}: {} turns, {} bytes of turn text kept",
+            text.len(),
+            conversation.turns.len(),
+            turn_text
+        );
     }
 
     #[test]

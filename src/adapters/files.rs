@@ -1,9 +1,11 @@
 //! Project file index: a recursive listing that honors `.gitignore`, a
 //! lazily loaded directory view, and fuzzy path matching over the listing.
 //!
-//! Everything here reads directory metadata only; file contents are never
-//! opened. The walk is delegated to the `ignore` crate (ripgrep's walker) so
-//! ignore semantics match what users expect from `rg` and `git`.
+//! The index reads directory metadata only; the one thing here that
+//! opens a file is [`open_pinned`], the remote port's read of a pinned
+//! file, confined by descriptors. The walk is delegated to the `ignore`
+//! crate (ripgrep's walker) so ignore semantics match what users expect
+//! from `rg` and `git`.
 
 use std::cmp::Ordering;
 use std::io;
@@ -593,5 +595,263 @@ mod tests {
         let abs = cwd.path().join("cwd.rs");
         assert_eq!(at(&abs.display().to_string()), Some(abs));
         assert_eq!(at("/nonexistent/x.rs"), None);
+    }
+}
+
+/// Why a pinned file could not be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileError {
+    /// The path is absolute, empty, or has a `.` or `..` component.
+    BadPath,
+    /// A dotenv file: those hold the project's secrets.
+    Dotenv,
+    /// A component is a symlink, or the leaf is not a regular file.
+    NotFile(String),
+    /// More source bytes than the limit; the size.
+    TooLarge(u64),
+    /// Not UTF-8.
+    NotText,
+    Io(String),
+}
+
+impl std::fmt::Display for FileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadPath => write!(f, "the path must be relative, with no . or .. component"),
+            Self::Dotenv => write!(f, "dotenv files are never served"),
+            Self::NotFile(why) => write!(f, "not a regular file: {why}"),
+            Self::TooLarge(size) => write!(f, "the file is {size} bytes, over the limit"),
+            Self::NotText => write!(f, "the file is not UTF-8 text"),
+            Self::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// A pinned file opened for the remote port: its version, size and
+/// modification time from the descriptor the walk ended on, and the
+/// descriptor itself for the read.
+#[derive(Debug)]
+pub struct PinnedFile {
+    /// Inode, change time and size hashed: moved by an edit in place,
+    /// a same-size rewrite and a replace by rename alike.
+    pub version: u64,
+    pub size: u64,
+    pub modified_ms: Option<u64>,
+    fd: std::os::fd::OwnedFd,
+}
+
+/// Opens `relative` under `root` one component at a time with `openat`
+/// from the previous directory's descriptor, never following a
+/// symlink anywhere in the path, so a swap of a directory for a link
+/// between two hops is refused at the next hop and a swap after it
+/// cannot move the descriptor already held. The leaf is opened
+/// non-blocking, so a FIFO with no writer does not park the thread,
+/// and must be a regular file. Dotenv names are refused whatever is
+/// pinned. The path is checked before anything touches the disk.
+pub fn open_pinned(root: &Path, relative: &Path) -> Result<PinnedFile, FileError> {
+    use std::hash::{Hash, Hasher};
+
+    use rustix::fs::{Mode, OFlags, openat};
+    let components: Vec<&std::ffi::OsStr> = relative
+        .components()
+        .map(|c| match c {
+            Component::Normal(name) if !name.is_empty() => Ok(name),
+            _ => Err(FileError::BadPath),
+        })
+        .collect::<Result<_, _>>()?;
+    let Some((leaf, dirs)) = components.split_last() else {
+        return Err(FileError::BadPath);
+    };
+    let leaf_name = leaf.to_string_lossy();
+    if leaf_name == ".env" || leaf_name.starts_with(".env.") {
+        return Err(FileError::Dotenv);
+    }
+    let io = |e: rustix::io::Errno| FileError::Io(e.to_string());
+    let dir_flags = OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let mut dir = rustix::fs::open(root, dir_flags, Mode::empty()).map_err(io)?;
+    for name in dirs {
+        // A symlink fails `NOFOLLOW` with `ELOOP` on Linux; with
+        // `DIRECTORY` beside it, macOS says `ENOTDIR`.
+        dir = openat(&dir, *name, dir_flags, Mode::empty()).map_err(|e| match e {
+            rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => {
+                FileError::NotFile("a symlink or a file in the path".into())
+            }
+            other => io(other),
+        })?;
+    }
+    let leaf_flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let fd = openat(&dir, *leaf, leaf_flags, Mode::empty()).map_err(|e| match e {
+        rustix::io::Errno::LOOP => FileError::NotFile("a symlink".into()),
+        other => io(other),
+    })?;
+    let stat = rustix::fs::fstat(&fd).map_err(io)?;
+    if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file() {
+        return Err(FileError::NotFile(
+            "a FIFO, socket, device or directory".into(),
+        ));
+    }
+    let size = u64::try_from(stat.st_size).unwrap_or(0);
+    // `st_mtime_nsec` is `i64` on macOS and `u64` on Linux, where the
+    // conversion is the identity and clippy calls it useless.
+    #[allow(clippy::useless_conversion)]
+    let modified_ms = u64::try_from(stat.st_mtime)
+        .ok()
+        .map(|s| s * 1000 + u64::try_from(stat.st_mtime_nsec).unwrap_or(0) / 1_000_000);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (stat.st_ino, stat.st_ctime, stat.st_ctime_nsec, stat.st_size).hash(&mut h);
+    Ok(PinnedFile {
+        version: h.finish(),
+        size,
+        modified_ms,
+        fd,
+    })
+}
+
+impl PinnedFile {
+    /// The text, whole, if no more than `limit` bytes: the read takes
+    /// one byte past the limit, so growth after the stat cannot pass
+    /// it. The non-blocking flag is cleared first.
+    pub fn read(self, limit: u64) -> Result<String, FileError> {
+        use std::io::Read;
+        if self.size > limit {
+            return Err(FileError::TooLarge(self.size));
+        }
+        rustix::fs::fcntl_setfl(&self.fd, rustix::fs::OFlags::empty())
+            .map_err(|e| FileError::Io(e.to_string()))?;
+        let mut file = std::fs::File::from(self.fd);
+        let mut bytes = Vec::with_capacity(usize::try_from(self.size).unwrap_or(0));
+        file.by_ref()
+            .take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| FileError::Io(e.to_string()))?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+            return Err(FileError::TooLarge(self.size.max(limit + 1)));
+        }
+        String::from_utf8(bytes).map_err(|_| FileError::NotText)
+    }
+}
+
+#[cfg(test)]
+mod pinned_tests {
+    use super::*;
+
+    fn root() -> tempfile::TempDir {
+        let dir = tempfile::Builder::new()
+            .prefix("sbpin")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::create_dir(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs/plan.md"), "# Plan\ntoken=abc\n").unwrap();
+        std::fs::write(dir.path().join(".env"), "SECRET=1\n").unwrap();
+        std::fs::write(dir.path().join(".env.local"), "SECRET=1\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_pinned_file_is_read_whole_with_its_version_and_size() {
+        let dir = root();
+        let opened = open_pinned(dir.path(), Path::new("docs/plan.md")).unwrap();
+        assert_eq!(opened.size, 17);
+        assert!(opened.modified_ms.is_some());
+        let first = opened.version;
+        assert_eq!(opened.read(1024).unwrap(), "# Plan\ntoken=abc\n");
+        // A same-size rewrite in place moves the version (ctime).
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.path().join("docs/plan.md"), "# Plan\ntoken=xyz\n").unwrap();
+        let again = open_pinned(dir.path(), Path::new("docs/plan.md")).unwrap();
+        assert_ne!(again.version, first);
+        // A replace by rename is a new inode.
+        std::fs::write(dir.path().join("docs/plan.new"), "# Plan\ntoken=xyz\n").unwrap();
+        std::fs::rename(
+            dir.path().join("docs/plan.new"),
+            dir.path().join("docs/plan.md"),
+        )
+        .unwrap();
+        let renamed = open_pinned(dir.path(), Path::new("docs/plan.md")).unwrap();
+        assert_ne!(renamed.version, again.version);
+    }
+
+    #[test]
+    fn the_path_is_checked_before_the_disk_and_dotenv_is_refused() {
+        let dir = root();
+        for bad in [
+            "",
+            "/etc/passwd",
+            "../x",
+            "docs/../plan.md",
+            "./docs/plan.md",
+        ] {
+            assert_eq!(
+                open_pinned(dir.path(), Path::new(bad)).err(),
+                Some(FileError::BadPath),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            open_pinned(dir.path(), Path::new(".env")).err(),
+            Some(FileError::Dotenv)
+        );
+        assert_eq!(
+            open_pinned(dir.path(), Path::new(".env.local")).err(),
+            Some(FileError::Dotenv)
+        );
+        assert!(matches!(
+            open_pinned(dir.path(), Path::new("docs/missing.md")).err(),
+            Some(FileError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn no_symlink_is_followed_and_only_a_regular_file_is_read() {
+        let dir = root();
+        let outside = tempfile::Builder::new()
+            .prefix("sbout")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "no").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("docs"), dir.path().join("inside")).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("docs/plan.md"),
+            dir.path().join("docs/leaf.md"),
+        )
+        .unwrap();
+        for linked in ["link/secret.txt", "inside/plan.md", "docs/leaf.md"] {
+            assert!(
+                matches!(
+                    open_pinned(dir.path(), Path::new(linked)).err(),
+                    Some(FileError::NotFile(_))
+                ),
+                "{linked}"
+            );
+        }
+        assert!(matches!(
+            open_pinned(dir.path(), Path::new("docs")).err(),
+            Some(FileError::NotFile(_) | FileError::Io(_))
+        ));
+        let fifo = dir.path().join("docs/pipe");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if made.is_ok_and(|s| s.success()) {
+            let start = std::time::Instant::now();
+            assert!(matches!(
+                open_pinned(dir.path(), Path::new("docs/pipe")).err(),
+                Some(FileError::NotFile(_))
+            ));
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(1),
+                "the open returned at once"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_over_the_limit_is_refused_whole() {
+        let dir = root();
+        std::fs::write(dir.path().join("docs/big.txt"), "x".repeat(2000)).unwrap();
+        let opened = open_pinned(dir.path(), Path::new("docs/big.txt")).unwrap();
+        assert_eq!(opened.read(1000).err(), Some(FileError::TooLarge(2000)));
+        std::fs::write(dir.path().join("docs/bin"), [0xff, 0xfe, 0x00]).unwrap();
+        let opened = open_pinned(dir.path(), Path::new("docs/bin")).unwrap();
+        assert_eq!(opened.read(1000).err(), Some(FileError::NotText));
     }
 }

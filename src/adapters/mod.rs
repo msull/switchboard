@@ -3,6 +3,7 @@
 
 pub mod agents;
 pub mod artifacts;
+pub mod bonjour;
 pub mod control;
 pub mod controller;
 pub mod diff;
@@ -17,6 +18,7 @@ pub mod hooks;
 #[cfg(target_os = "macos")]
 pub mod keychain;
 pub mod project_config;
+pub mod remote;
 pub mod round_files;
 pub mod scrollback;
 pub mod store;

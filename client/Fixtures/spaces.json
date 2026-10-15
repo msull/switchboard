@@ -1,0 +1,26 @@
+{
+  "body": {
+    "spaces": [
+      {
+        "id": "00000000-0000-0000-0000-000000000001",
+        "name": "Default",
+        "op": null,
+        "view": false
+      },
+      {
+        "id": "05f8dc1d-9a4f-44e5-8fa0-df3244191a1a",
+        "name": "D",
+        "op": "sp",
+        "view": false
+      },
+      {
+        "id": "00000000-0000-0000-0000-000000000002",
+        "name": "Everywhere",
+        "op": null,
+        "view": true
+      }
+    ]
+  },
+  "epoch": "3bbab47a-9fef-4df7-8484-4a8c79a07518",
+  "revision": 10
+}

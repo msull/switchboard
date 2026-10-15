@@ -15,9 +15,10 @@ use promptbox::ports::saver::FileSaver;
 use promptbox::ports::sink::PromptSink;
 use promptbox::{Editor, Voice};
 
-use super::{DrawCtx, theme};
+use super::{DrawCtx, UiState, theme};
+use crate::app::Services;
 use crate::core::{
-    AppAction, RecordId, SessionRecord, VOICE_KEY_ACCOUNT, VoiceSettings, WindowFrame,
+    AppAction, AppCore, RecordId, SessionRecord, VOICE_KEY_ACCOUNT, VoiceSettings, WindowFrame,
 };
 
 /// Prompts sent from editors, waiting for the frame to end so they can
@@ -337,13 +338,24 @@ fn preview_frame(cx: &mut DrawCtx<'_>, ctx: &egui::Context, open: bool, settings
 /// The session's editor, made on first sight with the session's own
 /// sink, save directory, and the shared key and settings.
 fn editor_for<'a>(cx: &'a mut DrawCtx<'_>, record: &SessionRecord) -> &'a mut Editor {
-    let settings = cx.core.settings().voice.clone();
-    let root = cx
-        .core
+    ensure_editor(cx.core, cx.services, cx.state, record)
+}
+
+/// The session's editor, outside a frame: a device's dictation lands
+/// in an editor whether or not the session is drawn, as the card's
+/// microphone does.
+pub fn ensure_editor<'a>(
+    core: &AppCore,
+    services: &Services,
+    state: &'a mut UiState,
+    record: &SessionRecord,
+) -> &'a mut Editor {
+    let settings = core.settings().voice.clone();
+    let root = core
         .workspace(record.project)
         .map(|w| w.project.root.clone());
-    let key_source = cx.services;
-    let boxes = &mut cx.state.prompt_boxes;
+    let key_source = services;
+    let boxes = &mut state.prompt_boxes;
     if matches!(boxes.key, KeyState::Unread) {
         let key = match key_source.secrets.get(VOICE_KEY_ACCOUNT) {
             Ok(key) => key,
@@ -365,8 +377,8 @@ fn editor_for<'a>(cx: &'a mut DrawCtx<'_>, record: &SessionRecord) -> &'a mut Ed
     let test_save_path = boxes.test_save_path.clone();
     // A primed draft (a cloned session's prompt, or the one a discard
     // cut back to) becomes the editor's text, first or replacing.
-    let primed = cx.state.primed.remove(&record.id);
-    let boxes = &mut cx.state.prompt_boxes;
+    let primed = state.primed.remove(&record.id);
+    let boxes = &mut state.prompt_boxes;
     if let Some(text) = &primed
         && let Some(editor) = boxes.editors.get_mut(&record.id)
     {
@@ -660,4 +672,177 @@ pub fn mic_button(ui: &mut Ui, listening: bool) -> egui::Response {
         egui::Stroke::new(1.2, color),
     );
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A session's prompt as a device reads it: the editor's text with the
+/// live utterance marked, its status, and what the editor's tools can
+/// do now. The text is the editor's own, so a device's edits and the
+/// Mac's dictation meet in one document.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[allow(clippy::struct_excessive_bools)] // independent facts about the editor
+pub struct DraftView {
+    pub text: String,
+    /// The byte range of the utterance still being recognized, if one.
+    pub live: Option<(usize, usize)>,
+    /// `idle`, `listening`, `finishing`, `degraded` or `error`.
+    pub status: &'static str,
+    /// Why, for `degraded` and `error`.
+    pub status_text: Option<String>,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    /// The AI pass is possible: the host has an `OpenAI` key.
+    pub ai: bool,
+    /// An AI pass is running.
+    pub busy: bool,
+}
+
+#[must_use]
+pub fn draft_view(editor: &Editor) -> DraftView {
+    use promptbox::core::SessionStatus;
+    let core = editor.core();
+    let doc = core.doc();
+    let (status, status_text) = match core.status() {
+        SessionStatus::Idle => ("idle", None),
+        SessionStatus::Listening => ("listening", None),
+        SessionStatus::Finishing => ("finishing", None),
+        SessionStatus::Degraded(why) => ("degraded", Some(why.clone())),
+        SessionStatus::Error(why) => ("error", Some(why.clone())),
+    };
+    DraftView {
+        text: doc.rendered(),
+        live: doc
+            .provisional()
+            .map(|p| (p.anchor, p.anchor + p.text.len())),
+        status,
+        status_text,
+        can_undo: !doc.history().is_empty() || doc.provisional().is_some(),
+        can_redo: doc.can_redo(),
+        ai: editor.ai_available(),
+        busy: core.ai_busy(),
+    }
+}
+
+/// A fingerprint of the draft as a device sees it, for `changed`.
+#[must_use]
+pub fn draft_mark(editor: &Editor) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    draft_view(editor).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// What a device may do to a draft besides dictating into it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DraftAction {
+    Replace(String),
+    Undo,
+    Redo,
+    Clear,
+    CleanUp,
+    DeleteSentence,
+    DeleteParagraph,
+}
+
+impl DraftAction {
+    /// The action named on the wire, with its text where it takes one.
+    #[must_use]
+    pub fn parse(name: &str, text: Option<&str>) -> Option<Self> {
+        Some(match name {
+            "replace" => Self::Replace(text?.to_owned()),
+            "undo" => Self::Undo,
+            "redo" => Self::Redo,
+            "clear" => Self::Clear,
+            "clean_up" => Self::CleanUp,
+            "delete_sentence" => Self::DeleteSentence,
+            "delete_paragraph" => Self::DeleteParagraph,
+            _ => return None,
+        })
+    }
+
+    /// Applies the action to the editor. The AI pass needs a key, and
+    /// says so rather than silently doing nothing.
+    pub fn apply(self, editor: &mut Editor) -> Result<(), String> {
+        use promptbox::core::AppAction as A;
+        match self {
+            Self::Replace(text) => editor.set_text(&text),
+            Self::Undo => editor.dispatch(A::Undo),
+            Self::Redo => editor.dispatch(A::Redo),
+            Self::Clear => editor.dispatch(A::ClearPrompt),
+            Self::CleanUp => {
+                if !editor.ai_available() {
+                    return Err("the host has no OpenAI key for the AI pass".into());
+                }
+                editor.dispatch(A::AiCleanUp);
+            }
+            Self::DeleteSentence => editor.dispatch(A::DeleteSentence),
+            Self::DeleteParagraph => editor.dispatch(A::DeleteParagraph),
+        }
+        Ok(())
+    }
+}
+
+/// One speech event as a device sends it: the recognizer's session
+/// (a number the device picks, apart from the host's own), the
+/// utterance within it, and what moved.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct DictationEvent {
+    pub sequence: u64,
+    /// `started`, `voice_started`, `partial`, `final`, `voice_ended`
+    /// or `stopped`.
+    pub kind: String,
+    #[serde(default)]
+    pub utterance: u64,
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub text: String,
+}
+
+/// Feeds a device's speech events into the editor as the host's own
+/// recognizer would: a start opens the recognizer session on the
+/// editor (its status goes to listening), the utterances land as
+/// provisional text and commit on their final, a stop closes it.
+/// Unknown kinds are skipped, so an older host tolerates a newer
+/// device.
+pub fn apply_dictation(editor: &mut Editor, session: u64, events: &[DictationEvent]) {
+    use promptbox::core::AppAction as A;
+    use promptbox::ports::speech::{SpeechEvent, SpeechEventKind};
+    let mut actions = Vec::with_capacity(events.len());
+    for event in events {
+        let kind = match event.kind.as_str() {
+            "started" => {
+                actions.push(A::SessionStarted(session));
+                continue;
+            }
+            "stopped" => {
+                actions.push(A::SessionStopping);
+                actions.push(A::SessionStopped);
+                continue;
+            }
+            "voice_started" => SpeechEventKind::VoiceStarted {
+                utterance: event.utterance,
+            },
+            "voice_ended" => SpeechEventKind::VoiceEnded {
+                utterance: event.utterance,
+            },
+            "partial" => SpeechEventKind::Partial {
+                utterance: event.utterance,
+                revision: event.revision,
+                text: event.text.clone(),
+            },
+            "final" => SpeechEventKind::Final {
+                utterance: event.utterance,
+                text: event.text.clone(),
+                confidence: None,
+            },
+            _ => continue,
+        };
+        actions.push(A::SpeechEventReceived(SpeechEvent {
+            session,
+            sequence: event.sequence,
+            audio_range: 0..0,
+            kind,
+        }));
+    }
+    editor.apply(actions);
 }

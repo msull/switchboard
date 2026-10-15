@@ -11645,3 +11645,381 @@ fn evidence_opens_documents_and_images_and_refuses_what_would_run() {
     assert!(evidence_inline(Path::new("steps.MD")));
     assert!(!evidence_inline(Path::new("shot.png")));
 }
+
+mod remote {
+    //! The remote port's state: identity, devices, the pairing window.
+    use super::*;
+    use crate::core::{PAIRING_ATTEMPTS, PAIRING_WINDOW};
+    use crate::ports::remote::{Identity, Listen, PairedDevice, Scope};
+    use crate::ports::store::Loaded;
+
+    fn identity() -> Identity {
+        Identity {
+            schema_version: 1,
+            server_id: uuid::Uuid::new_v4(),
+            server_name: "Studio".into(),
+            certificate: "MIIB".into(),
+            spki_sha256: "ab".repeat(32),
+            created: Clock::at(0).wall,
+            listen: Listen::default(),
+        }
+    }
+
+    fn device(name: &str, hash: &str) -> PairedDevice {
+        PairedDevice {
+            id: uuid::Uuid::new_v4(),
+            name: name.into(),
+            scope: Scope::Read,
+            token_sha256: hash.into(),
+            created: Clock::at(0).wall,
+            last_seen: None,
+        }
+    }
+
+    fn loaded_core() -> AppCore {
+        let mut core = AppCore::new();
+        core.dispatch(AppAction::StoreLoaded(Ok(Loaded::default())), Clock::at(0));
+        core.dispatch(
+            AppAction::IdentityLoaded {
+                identity: identity(),
+                devices: vec![device("Vision Pro", "h1")],
+                rotated: false,
+            },
+            Clock::at(0),
+        );
+        core
+    }
+
+    #[test]
+    fn the_identity_loads_and_a_rename_or_an_address_change_saves_it() {
+        let mut core = loaded_core();
+        assert_eq!(core.identity().unwrap().server_name, "Studio");
+        assert_eq!(core.devices().len(), 1);
+        assert!(!core.identity_rotated());
+        let e = core.dispatch(AppAction::SetServerName("  Desk  ".into()), Clock::at(1));
+        assert_eq!(core.identity().unwrap().server_name, "Desk");
+        assert!(
+            matches!(e.as_slice(), [Effect::SaveIdentity(i)] if i.server_name == "Desk"),
+            "{e:?}"
+        );
+        let e = core.dispatch(AppAction::SetServerName("   ".into()), Clock::at(2));
+        assert_eq!(
+            core.identity().unwrap().server_name,
+            "Desk",
+            "a blank name is ignored"
+        );
+        assert!(e.is_empty(), "{e:?}");
+        let e = core.dispatch(AppAction::SetServerName("Desk".into()), Clock::at(3));
+        assert!(e.is_empty(), "an unchanged name saves nothing: {e:?}");
+        let e = core.dispatch(
+            AppAction::SetRemoteListen {
+                lan: true,
+                port: 5000,
+            },
+            Clock::at(4),
+        );
+        let listen = &core.identity().unwrap().listen;
+        assert!(listen.lan);
+        assert_eq!(listen.port, 5000);
+        assert!(matches!(e.as_slice(), [Effect::SaveIdentity(_)]), "{e:?}");
+        let e = core.dispatch(
+            AppAction::SetRemoteListen { lan: true, port: 0 },
+            Clock::at(5),
+        );
+        assert_eq!(
+            core.identity().unwrap().listen.port,
+            5000,
+            "port 0 is refused"
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn a_rotated_identity_says_so_and_a_read_only_core_saves_nothing() {
+        let mut core = AppCore::new();
+        core.dispatch(
+            AppAction::StoreLoaded(Err(crate::ports::store::StoreError::Locked)),
+            Clock::at(0),
+        );
+        core.dispatch(
+            AppAction::IdentityLoaded {
+                identity: identity(),
+                devices: Vec::new(),
+                rotated: true,
+            },
+            Clock::at(0),
+        );
+        assert!(core.identity_rotated());
+        let e = core.dispatch(AppAction::SetServerName("Desk".into()), Clock::at(1));
+        assert_eq!(core.identity().unwrap().server_name, "Desk");
+        assert!(e.is_empty(), "read-only: {e:?}");
+        let e = core.dispatch(AppAction::Paired(device("Pad", "h2")), Clock::at(2));
+        assert_eq!(core.devices().len(), 1);
+        assert!(e.is_empty(), "read-only: {e:?}");
+    }
+
+    #[test]
+    fn the_pairing_window_opens_with_its_code_closes_on_time_and_after_three_failures() {
+        let mut core = loaded_core();
+        assert!(core.pairing().is_none());
+        let e = core.dispatch(
+            AppAction::OpenPairing {
+                code: "ABCD2345".into(),
+                scope: Scope::Control,
+            },
+            Clock::at(1_000),
+        );
+        assert!(e.is_empty(), "the window is never saved: {e:?}");
+        let window = core.pairing_at(Clock::at(1_000)).unwrap();
+        assert_eq!(window.code, "ABCD2345");
+        assert_eq!(window.scope, Scope::Control);
+        assert_eq!(window.failures, 0);
+        let end = 1_000 + u64::try_from(PAIRING_WINDOW.as_millis()).unwrap();
+        assert!(core.pairing_at(Clock::at(end - 1)).is_some());
+        assert!(
+            core.pairing_at(Clock::at(end)).is_none(),
+            "passed between ticks"
+        );
+        core.dispatch(AppAction::Tick, Clock::at(end));
+        assert!(core.pairing().is_none(), "the tick clears it");
+
+        core.dispatch(
+            AppAction::OpenPairing {
+                code: "ABCD2345".into(),
+                scope: Scope::Read,
+            },
+            Clock::at(2_000),
+        );
+        for n in 1..PAIRING_ATTEMPTS {
+            core.dispatch(AppAction::PairingFailed, Clock::at(2_000 + u64::from(n)));
+            assert_eq!(core.pairing().unwrap().failures, n);
+        }
+        core.dispatch(AppAction::PairingFailed, Clock::at(2_100));
+        assert!(core.pairing().is_none(), "the third failure closes it");
+        assert!(
+            core.notice()
+                .is_some_and(|n| n.text.contains("Pairing closed"))
+        );
+        core.dispatch(AppAction::PairingFailed, Clock::at(2_200));
+        assert!(
+            core.pairing().is_none(),
+            "a failure with no window is nothing"
+        );
+
+        core.dispatch(
+            AppAction::OpenPairing {
+                code: "ZZZZ2345".into(),
+                scope: Scope::Read,
+            },
+            Clock::at(3_000),
+        );
+        core.dispatch(AppAction::ClosePairing, Clock::at(3_001));
+        assert!(core.pairing().is_none());
+    }
+
+    #[test]
+    fn a_pairing_spends_the_code_keeps_the_device_and_saves_the_file() {
+        let mut core = loaded_core();
+        core.dispatch(
+            AppAction::OpenPairing {
+                code: "ABCD2345".into(),
+                scope: Scope::Control,
+            },
+            Clock::at(1_000),
+        );
+        let made = core.new_device("  iPad  ", "h2".into(), Clock::at(1_001).wall);
+        assert_eq!(made.name, "iPad");
+        assert_eq!(made.scope, Scope::Control, "the window's scope");
+        assert_eq!(made.token_sha256, "h2");
+        let e = core.dispatch(AppAction::Paired(made.clone()), Clock::at(1_001));
+        assert!(core.pairing().is_none(), "single use");
+        assert_eq!(core.devices().len(), 2);
+        assert_eq!(core.device_by_token("h2"), Some(&made));
+        assert!(
+            matches!(e.as_slice(), [Effect::SaveDevices(d)] if d.len() == 2),
+            "{e:?}"
+        );
+        assert_eq!(
+            core.new_device("x", "h3".into(), Clock::at(0).wall).scope,
+            Scope::Read
+        );
+    }
+
+    #[test]
+    fn revoke_removes_a_scope_change_saves_and_a_seen_device_saves_rarely() {
+        let mut core = loaded_core();
+        let id = core.devices()[0].id;
+        let e = core.dispatch(
+            AppAction::SetDeviceScope {
+                device: id,
+                scope: Scope::Control,
+            },
+            Clock::at(1),
+        );
+        assert_eq!(core.devices()[0].scope, Scope::Control);
+        assert!(matches!(e.as_slice(), [Effect::SaveDevices(_)]), "{e:?}");
+        let e = core.dispatch(
+            AppAction::SetDeviceScope {
+                device: id,
+                scope: Scope::Control,
+            },
+            Clock::at(2),
+        );
+        assert!(e.is_empty(), "unchanged: {e:?}");
+
+        let e = core.dispatch(AppAction::DeviceSeen(id), Clock::at(10_000));
+        assert_eq!(core.devices()[0].last_seen, Some(Clock::at(10_000).wall));
+        assert!(
+            matches!(e.as_slice(), [Effect::SaveDevices(_)]),
+            "first sight: {e:?}"
+        );
+        let e = core.dispatch(AppAction::DeviceSeen(id), Clock::at(20_000));
+        assert_eq!(core.devices()[0].last_seen, Some(Clock::at(20_000).wall));
+        assert!(e.is_empty(), "ten seconds later: {e:?}");
+        let e = core.dispatch(AppAction::DeviceSeen(id), Clock::at(400_000));
+        assert!(
+            matches!(e.as_slice(), [Effect::SaveDevices(_)]),
+            "minutes later: {e:?}"
+        );
+        let e = core.dispatch(
+            AppAction::DeviceSeen(uuid::Uuid::new_v4()),
+            Clock::at(400_001),
+        );
+        assert!(e.is_empty(), "unknown: {e:?}");
+
+        let e = core.dispatch(AppAction::RevokeDevice(id), Clock::at(3));
+        assert!(core.devices().is_empty());
+        assert!(
+            matches!(e.as_slice(), [Effect::SaveDevices(d)] if d.is_empty()),
+            "{e:?}"
+        );
+        let e = core.dispatch(AppAction::RevokeDevice(id), Clock::at(4));
+        assert!(e.is_empty(), "already gone: {e:?}");
+    }
+}
+
+mod revision {
+    //! The read-model fingerprints behind the remote port's revision.
+
+    use super::*;
+    use crate::core::revision::{Fingerprints, ResourceKind};
+
+    fn changed(fp: &Fingerprints, next: &Fingerprints) -> Vec<(ResourceKind, String, bool)> {
+        fp.changes(next)
+            .into_iter()
+            .map(|c| (c.resource.kind, c.resource.id, c.removed))
+            .collect()
+    }
+
+    #[test]
+    fn age_alone_changes_nothing_but_the_quiet_transition_does() {
+        let p = project("p");
+        let mut w = Workspace::new(p.clone());
+        let r = record(p.id, codex(), 0);
+        let id = r.id;
+        w.sessions.push(r);
+        let (mut core, _) = loaded(vec![w], vec![]);
+        let now = Clock::at(60_000);
+        let mut status = running(id);
+        status.last_activity = Some(now.wall - Duration::from_secs(5));
+        core.dispatch(AppAction::HostListed(vec![status.clone()]), now);
+        let first = Fingerprints::of(&core, now.wall);
+        assert!(
+            first.len() > 4,
+            "projects, spaces, the session, its collections"
+        );
+        // Ten seconds later with nothing listed again: `quiet_secs`
+        // moved on every session view and nothing else did.
+        let later = Fingerprints::of(&core, now.wall + Duration::from_secs(10));
+        assert_eq!(changed(&first, &later), vec![]);
+        // The pane passes the quiet interval: the card's word moves.
+        status.last_activity = Some(now.wall - Duration::from_secs(30));
+        core.dispatch(AppAction::HostListed(vec![status]), now);
+        let quiet = Fingerprints::of(&core, now.wall);
+        assert_eq!(
+            changed(&later, &quiet),
+            vec![(ResourceKind::Session, id.0.to_string(), false)]
+        );
+    }
+
+    #[test]
+    fn a_removed_session_is_removed_and_its_collection_changed() {
+        let (mut core, pid, ids) =
+            with_records(&[SessionKind::Shell, SessionKind::Shell], |_| None);
+        let before = Fingerprints::of(&core, Clock::at(1).wall);
+        core.dispatch(AppAction::RemoveSession(ids[0]), Clock::at(2));
+        let after = Fingerprints::of(&core, Clock::at(2).wall);
+        let mut moved = changed(&before, &after);
+        moved.sort();
+        assert_eq!(
+            moved,
+            vec![
+                (ResourceKind::Session, ids[0].0.to_string(), true),
+                (ResourceKind::Sessions, pid.0.to_string(), false),
+            ]
+        );
+        assert_eq!(
+            changed(&after, &after),
+            vec![],
+            "a pass with nothing moving"
+        );
+    }
+
+    #[test]
+    fn a_set_rename_and_a_trust_question_move_only_their_resource() {
+        let (mut core, _pid, ids) =
+            with_records(&[SessionKind::Agent(AgentKind::ClaudeCode)], |s| {
+                Some(running(s.id))
+            });
+        core.dispatch(
+            AppAction::NewWorkingSet {
+                name: Some("Desk".into()),
+                clone_of: None,
+                with: None,
+                columns: 4,
+            },
+            Clock::at(1),
+        );
+        let set = core
+            .set_views(SpaceId::GLOBAL)
+            .into_iter()
+            .chain(
+                core.space_views()
+                    .iter()
+                    .filter_map(|s| Uuid::parse_str(&s.id).ok())
+                    .flat_map(|s| core.set_views(SpaceId(s))),
+            )
+            .find(|s| s.name == "Desk")
+            .expect("the set");
+        let before = Fingerprints::of(&core, Clock::at(2).wall);
+        core.dispatch(
+            AppAction::RenameWorkingSet {
+                set: SetId(Uuid::parse_str(&set.id).unwrap()),
+                name: "Bench".into(),
+            },
+            Clock::at(3),
+        );
+        let renamed = Fingerprints::of(&core, Clock::at(3).wall);
+        assert_eq!(
+            changed(&before, &renamed),
+            vec![(ResourceKind::Set, set.id.clone(), false)]
+        );
+        core.dispatch(
+            AppAction::PromptSeen {
+                id: ids[0],
+                seen: true,
+            },
+            Clock::at(4),
+        );
+        let asked = Fingerprints::of(&core, Clock::at(4).wall);
+        let moved = changed(&renamed, &asked);
+        assert!(
+            moved.contains(&(ResourceKind::Session, ids[0].0.to_string(), false)),
+            "{moved:?}"
+        );
+        assert!(
+            moved.contains(&(ResourceKind::Waiting, String::new(), false)),
+            "the trust question waits on the owner: {moved:?}"
+        );
+    }
+}
