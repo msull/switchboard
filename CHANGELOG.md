@@ -8,6 +8,8 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-15
+
 ### Fixed
 
 - A first launch on a display macOS reports at an odd scale (a Sidecar
