@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use eframe::egui_wgpu::{self, wgpu};
+
 use switchboard::SwitchboardApp;
 use switchboard::adapters::agents::Agents;
 use switchboard::adapters::control::OperationsLog;
@@ -95,6 +97,41 @@ fn tmux_host(data_dir: &std::path::Path) -> TmuxHost {
     host
 }
 
+/// The GPU device's limits. egui asks for a surface of at most 8192
+/// pixels a side, enough for a 4K display, but a display macOS reports
+/// at an odd scale (a Sidecar screen counted at 5120 points and doubled
+/// again) asks for more, and a surface over the limit aborts the
+/// process inside the launch callback before any window shows. The
+/// GPU's own limit is asked for instead; every Mac's exceeds 8192.
+fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
+    wgpu::DeviceDescriptor {
+        label: Some("switchboard wgpu device"),
+        required_limits: wgpu::Limits {
+            max_texture_dimension_2d: adapter.limits().max_texture_dimension_2d,
+            ..wgpu::Limits::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// The window's options: egui's wgpu setup with the device limits
+/// above, and transparency, decided once here for every viewport (the
+/// caption overlay of the embedded Prompt Box needs it; the window's
+/// own panels paint opaque backgrounds regardless).
+fn native_options(viewport: egui::ViewportBuilder) -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        viewport: viewport.with_transparent(true),
+        wgpu_options: egui_wgpu::WgpuConfiguration {
+            wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
+                device_descriptor: std::sync::Arc::new(device_descriptor),
+                ..egui_wgpu::WgpuSetupCreateNew::without_display_handle()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("switchboard=info"))
         .init();
@@ -161,15 +198,7 @@ fn main() -> eframe::Result {
             .with_inner_size([1100.0, 720.0])
             .with_maximized(true),
     };
-    let options = eframe::NativeOptions {
-        viewport: viewport
-            .with_icon(icon)
-            // Transparency is decided once, here, for every viewport: the
-            // caption overlay of the embedded Prompt Box needs it. The
-            // window's own panels paint opaque backgrounds regardless.
-            .with_transparent(true),
-        ..Default::default()
-    };
+    let options = native_options(viewport.with_icon(icon));
 
     eframe::run_native(
         "Switchboard",

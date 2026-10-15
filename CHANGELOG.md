@@ -8,6 +8,14 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-15
+
+### Fixed
+
+- A first launch on a display macOS reports at an odd scale (a Sidecar
+  screen) no longer aborts before the window shows: the GPU's own
+  texture limit is asked for instead of egui's 8192 (#185).
+
 ## [0.2.0] - 2026-10-15
 
 ### Added
