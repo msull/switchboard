@@ -51,6 +51,45 @@ pub fn services() -> Services {
         operations: Box::new(FakeOperations::default()),
         dispatch: Some(Box::new(FakeDispatch::default())),
         wake: None,
+        updates: Arc::new(FakeUpdates::default()),
+    }
+}
+
+/// A release source that answers what the test put in it and records
+/// what was fetched and installed.
+#[derive(Debug)]
+pub struct FakeUpdates {
+    pub latest: Mutex<Result<Option<crate::ports::updates::Release>, String>>,
+    /// What `download` answers; the release fetched is recorded.
+    pub staged: Mutex<Result<PathBuf, String>>,
+    pub downloaded: Mutex<Vec<crate::ports::updates::Release>>,
+    pub installed: Mutex<Vec<PathBuf>>,
+}
+
+impl Default for FakeUpdates {
+    fn default() -> Self {
+        Self {
+            latest: Mutex::new(Ok(None)),
+            staged: Mutex::new(Ok(PathBuf::from("/tmp/staged/Switchboard.app"))),
+            downloaded: Mutex::new(Vec::new()),
+            installed: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl crate::ports::updates::UpdateSource for FakeUpdates {
+    fn latest(&self) -> Result<Option<crate::ports::updates::Release>, String> {
+        self.latest.lock().unwrap().clone()
+    }
+
+    fn download(&self, release: &crate::ports::updates::Release) -> Result<PathBuf, String> {
+        self.downloaded.lock().unwrap().push(release.clone());
+        self.staged.lock().unwrap().clone()
+    }
+
+    fn install(&self, staged: &Path) -> Result<(), String> {
+        self.installed.lock().unwrap().push(staged.to_path_buf());
+        Ok(())
     }
 }
 

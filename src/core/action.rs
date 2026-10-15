@@ -699,6 +699,20 @@ pub enum AppAction {
     PopOutDispatch,
     CloseDispatchWindow,
     DispatchWindowMoved(WindowFrame),
+
+    /// Ask the release source for the newest release now; the tick
+    /// does this on its own schedule.
+    CheckForUpdate,
+    /// What the source answered: the newest release, nothing
+    /// published, or why it could not say.
+    UpdateChecked(Result<Option<crate::ports::updates::Release>, String>),
+    /// Fetch and check the release on offer.
+    DownloadUpdate,
+    /// The staged bundle's path, or why the download failed.
+    UpdateDownloaded(Result<PathBuf, String>),
+    /// Put the staged bundle in place and relaunch.
+    InstallUpdate,
+    UpdateInstallFailed(String),
 }
 
 /// Work the shell performs on the core's behalf.
@@ -878,6 +892,15 @@ pub enum Effect {
         old_path: Option<String>,
         range: crate::core::diff::DiffRange,
     },
+    /// Ask the release source for the newest release, on a thread;
+    /// the answer returns as `AppAction::UpdateChecked`.
+    CheckForUpdate,
+    /// Fetch and check a release's bundle, on a thread; the answer
+    /// returns as `AppAction::UpdateDownloaded`.
+    DownloadUpdate(crate::ports::updates::Release),
+    /// Arrange the swap of the running bundle for the staged one, then
+    /// quit; a failure returns as `AppAction::UpdateInstallFailed`.
+    InstallUpdate(PathBuf),
 }
 
 /// What a record is waiting on. A record with a flight is "in flight":
@@ -1109,6 +1132,14 @@ pub struct AppCore {
     pub(super) document_line: Option<(PathBuf, u32, u64)>,
     /// Requests to scroll to a line so far; numbers `document_line`.
     pub(super) line_requests: u64,
+    /// The version the app claims, when a test sets one; the crate's
+    /// otherwise.
+    pub(super) version_override: Option<String>,
+    /// Where an update of the app stands. Transient.
+    pub(super) update: super::updates::UpdateState,
+    /// When the last check for an update started, on the monotonic
+    /// clock; `None` before the first.
+    pub(super) last_update_check: Option<Duration>,
 }
 
 impl AppCore {
@@ -1225,6 +1256,12 @@ impl AppCore {
             AppAction::ActivateCard { set, target } => self.activate_card(set, target),
             AppAction::StepCard(direction) => self.step_card(direction),
             AppAction::ViewColumns(columns) => self.view_columns = Some(columns),
+            AppAction::CheckForUpdate
+            | AppAction::UpdateChecked(_)
+            | AppAction::DownloadUpdate
+            | AppAction::UpdateDownloaded(_)
+            | AppAction::InstallUpdate
+            | AppAction::UpdateInstallFailed(_) => self.update_action(action, now, &mut out),
 
             AppAction::StartWorkflow { .. }
             | AppAction::ShowWorkflow(_)
@@ -1961,6 +1998,7 @@ impl AppCore {
     /// workflows probe.
     fn tick(&mut self, now: Clock, out: &mut Out) {
         self.expire_notices(now);
+        self.update_tick(now, out);
         if self.env_setup_until.is_some_and(|t| t <= now.mono) {
             self.env_setup_until = None;
         }

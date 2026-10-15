@@ -34,6 +34,12 @@ cargo run --locked                                   # launch the app
 ./scripts/bundle.sh                                  # ~/Applications/Switchboard.app
 ```
 
+A user-visible change adds a line under Unreleased in `CHANGELOG.md` in
+the same commit. A release is `./scripts/bump.sh patch|minor|major`, a
+commit "Release X.Y.Z", then `./scripts/release.sh`; the version in
+`Cargo.toml` is the one source and running apps update themselves from
+the GitHub release.
+
 The pre-commit hook runs the first four. Enable it with
 `git config core.hooksPath .githooks` on a fresh clone. Never commit with
 `--no-verify`. Commit messages carry no tool attribution: no

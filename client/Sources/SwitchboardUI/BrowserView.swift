@@ -679,6 +679,9 @@ public struct ServersView: View {
                     VStack(alignment: .leading) {
                         HStack {
                             Text(host.server.name).font(.headline)
+                            if let version = host.version {
+                                Text(version).font(.caption).foregroundStyle(.secondary)
+                            }
                             Spacer()
                             Text(stateWord(host)).font(.caption).foregroundStyle(.secondary)
                         }

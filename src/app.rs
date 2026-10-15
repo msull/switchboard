@@ -91,6 +91,9 @@ pub struct Services {
     pub remote: Box<dyn RemoteStore>,
     /// Bonjour, for the remote port while it is on the local network.
     pub advertiser: Box<dyn Advertiser>,
+    /// Where the app's own updates come from. An `Arc`: the check and
+    /// the download run on threads of their own.
+    pub updates: Arc<dyn crate::ports::updates::UpdateSource>,
     /// Dispatch's port: tickets as views, decisions answered. The app
     /// takes it into a worker of its own when it starts, so it is
     /// `None` after `SwitchboardApp::with_services`; `None` before it
@@ -209,6 +212,24 @@ pub struct SwitchboardApp {
     policy_epoch: u64,
     /// File diffs being read on threads of their own.
     diff_reads: DiffReads,
+    /// What the update threads answer, each one an action for the
+    /// next frame.
+    update_results: UpdateResults,
+    /// The staged bundle whose swap helper is waiting for this process
+    /// to exit; the next frame closes the window.
+    pending_update: Option<PathBuf>,
+}
+
+struct UpdateResults {
+    tx: std::sync::mpsc::Sender<AppAction>,
+    rx: std::sync::mpsc::Receiver<AppAction>,
+}
+
+impl Default for UpdateResults {
+    fn default() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self { tx, rx }
+    }
 }
 
 /// One WebSocket subscriber as the frame holds it.
@@ -331,6 +352,8 @@ impl SwitchboardApp {
             last_watch_sweep: None,
             policy_epoch: 0,
             diff_reads: DiffReads::default(),
+            update_results: UpdateResults::default(),
+            pending_update: None,
         }
     }
 
@@ -611,6 +634,8 @@ impl SwitchboardApp {
 
     /// Performs one effect; returns the action reporting its result, or
     /// `None` when the result arrives later (discovery) or has no report.
+    // One arm per effect: the table is long because the contract is.
+    #[allow(clippy::too_many_lines)]
     fn run_effect(&mut self, effect: Effect) -> Option<AppAction> {
         let s = &self.services;
         match effect {
@@ -626,6 +651,9 @@ impl SwitchboardApp {
                 self.run_store_effect(effect)
             }
             Effect::SaveIdentity(_) | Effect::SaveDevices(_) => self.run_remote_effect(effect),
+            Effect::CheckForUpdate | Effect::DownloadUpdate(_) | Effect::InstallUpdate(_) => {
+                self.run_update_effect(effect)
+            }
             Effect::PrepareLaunch { .. }
             | Effect::PrepareResume { .. }
             | Effect::CheckTranscript { .. }
@@ -1282,6 +1310,36 @@ impl SwitchboardApp {
         None
     }
 
+    /// The update's steps: the check and the download on threads of
+    /// their own, answering through `update_results`; the install on
+    /// the frame, since it only arranges the swap.
+    fn run_update_effect(&mut self, effect: Effect) -> Option<AppAction> {
+        let source = Arc::clone(&self.services.updates);
+        let tx = self.update_results.tx.clone();
+        match effect {
+            Effect::CheckForUpdate => {
+                std::thread::spawn(move || {
+                    let _ = tx.send(AppAction::UpdateChecked(source.latest()));
+                });
+                None
+            }
+            Effect::DownloadUpdate(release) => {
+                std::thread::spawn(move || {
+                    let _ = tx.send(AppAction::UpdateDownloaded(source.download(&release)));
+                });
+                None
+            }
+            Effect::InstallUpdate(staged) => match source.install(&staged) {
+                Ok(()) => {
+                    self.pending_update = Some(staged);
+                    None
+                }
+                Err(reason) => Some(AppAction::UpdateInstallFailed(reason)),
+            },
+            _ => unreachable!("not an update effect"),
+        }
+    }
+
     /// File diffs whose threads answered since the last frame, each one
     /// an action.
     fn drain_diffs(&mut self) {
@@ -1327,6 +1385,15 @@ impl eframe::App for SwitchboardApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.dispatch(AppAction::Tick);
         self.drain_diffs();
+        let answered: Vec<AppAction> = self.update_results.rx.try_iter().collect();
+        for action in answered {
+            self.dispatch(action);
+        }
+        if self.pending_update.is_some() {
+            // The helper waits for this process to go, then swaps the
+            // bundles and relaunches; a normal close saves the windows.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         if self.diff_reads.out > 0 {
             // The read threads have no context to wake the frame with.
             ctx.request_repaint_after(Duration::from_millis(50));
@@ -2881,6 +2948,7 @@ impl SwitchboardApp {
             "protocol": REMOTE_PROTOCOL,
             "capabilities": ["read", "control", "draft", "scope"],
             "spki_sha256": identity.spki_sha256,
+            "version": self.core.version(),
             "limits": {
                 "body_bytes": BODY_CAP,
                 "string_bytes": STRING_CAP,

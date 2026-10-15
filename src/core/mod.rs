@@ -15,6 +15,7 @@ pub mod reconcile;
 mod remote;
 pub mod revision;
 mod sessions;
+pub mod updates;
 mod workflow;
 
 #[cfg(test)]

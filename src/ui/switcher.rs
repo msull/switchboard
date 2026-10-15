@@ -108,6 +108,9 @@ pub fn settings_menu(
             }
             ui.add_space(6.0);
             prompt_box_settings(cx, ui, settings);
+            ui.add_space(6.0);
+            theme::kicker(ui, "Version", p.n600);
+            super::updates::settings_rows(cx, ui);
     });
 }
 

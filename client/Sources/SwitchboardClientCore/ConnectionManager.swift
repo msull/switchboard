@@ -37,6 +37,8 @@ public struct HostStatus: Identifiable, Sendable, Equatable {
     public let identityChanged: Bool
     public let lastError: String?
     public let fetchedAt: Date?
+    /// The host app's version as its `/info` said, once read.
+    public let version: String?
 
     public var id: ServerID { server.id }
 }
@@ -80,9 +82,10 @@ public struct UnifiedStore: Sendable, Equatable {
 
     public init() {}
 
-    public static func build(from parts: [(KnownServer, ConnectionState, HostSnapshot?, Bool, String?)])
-        -> UnifiedStore
-    {
+    public static func build(
+        from parts: [(KnownServer, ConnectionState, HostSnapshot?, Bool, String?)],
+        versions: [ServerID: String] = [:]
+    ) -> UnifiedStore {
         var store = UnifiedStore()
         // Two hosts with one display name (two installations on one
         // Mac, say) are told apart by the short id on the label.
@@ -94,7 +97,7 @@ public struct UnifiedStore: Sendable, Equatable {
             store.hosts.append(
                 HostStatus(
                     server: server, state: state, identityChanged: changed, lastError: error,
-                    fetchedAt: snapshot?.fetchedAt))
+                    fetchedAt: snapshot?.fetchedAt, version: versions[server.id]))
             guard let snapshot else { continue }
             let stale = !state.isConnected
             for session in snapshot.sessions {
@@ -527,6 +530,7 @@ public actor ConnectionManager {
     /// Rebuild the unified store from every connection.
     public func rebuild() async {
         var parts: [(KnownServer, ConnectionState, HostSnapshot?, Bool, String?)] = []
+        var versions: [ServerID: String] = [:]
         for server in servers {
             guard let connection = connections[server.id] else { continue }
             parts.append(
@@ -534,8 +538,9 @@ public actor ConnectionManager {
                     await connection.server, await connection.state, await connection.snapshot,
                     await connection.identityChanged, await connection.lastError
                 ))
+            versions[server.id] = await connection.info?.version
         }
-        store = UnifiedStore.build(from: parts)
+        store = UnifiedStore.build(from: parts, versions: versions)
         // Merge by id: a server added while this rebuild awaited the
         // connections is not in `parts` and must not be dropped.
         for (server, _, _, _, _) in parts {

@@ -33,6 +33,7 @@ mod switchboard;
 mod switcher;
 pub mod theme;
 pub mod ticket;
+pub mod updates;
 pub mod workflow;
 pub mod working_set;
 pub mod zoom;

@@ -3530,6 +3530,25 @@ Built so far:
   a draft; the signed bundle never prompts. Remote access off the LAN
   is §9 of the spec, deferred.
 
+## Versioning and updates (2026-10-15)
+
+The version in `Cargo.toml` is the one source, by semantic versioning,
+and reaches the binary, the bundle's `Info.plist` and the host's
+`/info` reply; `CHANGELOG.md` lists every user-visible change under
+Unreleased until `scripts/bump.sh` dates it under the next version, and
+`scripts/release.sh` publishes that version as a GitHub release tagged
+`v<version>` with the signed bundle, its SHA-256 and the changelog
+section as notes. The app updates itself from there: `core::updates`
+checks twenty seconds after launch and hourly through the
+`UpdateSource` port (`adapters::updates::GitHubReleases`, the fake in
+tests), offers a newer release as a notice and a rail item, downloads
+it on a click to a staging directory, checks the zip against its
+published SHA-256 and the bundle with `codesign` against the running
+app's Team ID, and on "Restart to update" arranges a helper that swaps
+the bundle after the process exits, keeps the old one aside for a
+failed copy, and relaunches. A pre-release or unparsable tag is never
+offered; a bare binary or an unsigned bundle refuses to install.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

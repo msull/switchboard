@@ -133,6 +133,7 @@ impl Gate {
             advertiser: Box::new(FakeAdvertiser::default()),
             dispatch: Some(Box::new(FakeDispatch::default())),
             wake: None,
+            updates: std::sync::Arc::new(switchboard::adapters::fakes::FakeUpdates::default()),
         })
     }
 

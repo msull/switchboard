@@ -201,6 +201,9 @@ fn main() -> eframe::Result {
                     data_dir.clone(),
                 )),
                 advertiser: Box::new(switchboard::adapters::bonjour::Bonjour::default()),
+                updates: std::sync::Arc::new(switchboard::adapters::updates::GitHubReleases::new(
+                    "msull/switchboard",
+                )),
                 dispatch: Some(Box::new(DispatchSocket::detect())),
                 wake,
             };
