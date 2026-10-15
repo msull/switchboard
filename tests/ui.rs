@@ -289,6 +289,31 @@ fn settings_menu_sets_the_theme() {
 }
 
 #[test]
+fn the_rail_offers_a_newer_release_and_the_settings_menu_names_the_version() {
+    let (mut harness, _) = harness();
+    assert_eq!(harness.query_all_by_label("Update ↑").count(), 0);
+    let release = switchboard::ports::updates::Release {
+        version: "9.9.9".into(),
+        notes: String::new(),
+        asset_url: "https://x/Switchboard.zip".into(),
+        asset_name: "Switchboard.zip".into(),
+        digest_url: None,
+    };
+    harness
+        .state_mut()
+        .dispatch(AppAction::UpdateChecked(Ok(Some(release))));
+    harness.run_steps(2);
+    click(&mut harness, "Update ↑");
+    assert!(actions(&harness).contains(&AppAction::DownloadUpdate));
+    assert!(matches!(
+        harness.state().core().update(),
+        switchboard::core::updates::UpdateState::Downloading(r) if r.version == "9.9.9"
+    ));
+    click(&mut harness, "Settings");
+    harness.get_by_label(format!("Switchboard {}", env!("CARGO_PKG_VERSION")).as_str());
+}
+
+#[test]
 fn a_new_workspace_shows_nothing_of_the_others_until_the_selector_opens() {
     let (mut harness, _) = harness();
     assert!(harness.query_all_by_label("beta").count() > 0);

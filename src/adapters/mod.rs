@@ -24,6 +24,7 @@ pub mod scrollback;
 pub mod store;
 pub mod tmux;
 pub mod transcript;
+pub mod updates;
 
 use std::path::{Path, PathBuf};
 

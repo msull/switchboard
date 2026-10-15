@@ -9,6 +9,8 @@ public struct ServerInfo: Decodable, Sendable, Equatable {
     public let spkiSha256: String
     public let limits: Limits
     public let pairingOpen: Bool
+    /// The host app's version; a host older than this field has none.
+    public let version: String?
 
     public struct Limits: Decodable, Sendable, Equatable {
         public let bodyBytes: Int
@@ -32,6 +34,7 @@ public struct ServerInfo: Decodable, Sendable, Equatable {
         case spkiSha256 = "spki_sha256"
         case limits
         case pairingOpen = "pairing_open"
+        case version
     }
 }
 

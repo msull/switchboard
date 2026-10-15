@@ -571,6 +571,13 @@ fn bottom(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View, compact: bool) {
         .on_hover_text("Another Switchboard holds the store lock; changes are not saved");
     }
     super::switcher::settings_menu(cx, ui, &settings, compact);
+    if let Some((label, hover, action)) = super::updates::rail_item(cx.core)
+        && bottom_item(ui, label, "↑", compact)
+            .on_hover_text(hover)
+            .clicked()
+    {
+        cx.dispatch(action);
+    }
     if bottom_item(ui, "Go to", "⌘K", compact)
         .on_hover_text("Find a project or session (Cmd+K)")
         .clicked()

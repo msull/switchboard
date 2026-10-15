@@ -12023,3 +12023,178 @@ mod revision {
         );
     }
 }
+
+mod updates {
+    use super::*;
+    use crate::core::updates::{UPDATE_CHECK_INTERVAL, UPDATE_FIRST_CHECK, UpdateState, is_newer};
+    use crate::ports::updates::Release;
+
+    fn release(version: &str) -> Release {
+        Release {
+            version: version.into(),
+            notes: "notes".into(),
+            asset_url: "https://x/Switchboard.zip".into(),
+            asset_name: "Switchboard.zip".into(),
+            digest_url: Some("https://x/Switchboard.zip.sha256".into()),
+        }
+    }
+
+    fn core() -> AppCore {
+        let mut core = AppCore::new();
+        core.set_version("0.2.0");
+        core
+    }
+
+    fn ms(d: Duration) -> u64 {
+        u64::try_from(d.as_millis()).unwrap()
+    }
+
+    #[test]
+    fn only_a_parsed_higher_version_without_a_prerelease_is_newer() {
+        assert!(is_newer("0.2.1", "0.2.0"));
+        assert!(is_newer("v1.0.0", "0.9.9"));
+        assert!(!is_newer("0.2.0", "0.2.0"));
+        assert!(!is_newer("0.1.9", "0.2.0"));
+        assert!(
+            !is_newer("0.3.0-rc1", "0.2.0"),
+            "a pre-release is never offered"
+        );
+        assert!(!is_newer("0.1.0-20261014-1d8f4e8", "0.1.0"));
+        assert!(
+            !is_newer("latest", "0.2.0"),
+            "a malformed tag pulls nothing"
+        );
+        assert!(!is_newer("0.3.0", "junk"));
+    }
+
+    #[test]
+    fn the_tick_checks_once_the_app_has_settled_and_then_hourly() {
+        let mut core = core();
+        let first = ms(UPDATE_FIRST_CHECK);
+        let e = core.dispatch(AppAction::Tick, Clock::at(first - 1));
+        assert!(!e.contains(&Effect::CheckForUpdate));
+        assert_eq!(*core.update(), UpdateState::Idle);
+        let e = core.dispatch(AppAction::Tick, Clock::at(first));
+        assert!(e.contains(&Effect::CheckForUpdate));
+        assert_eq!(*core.update(), UpdateState::Checking);
+        let e = core.dispatch(AppAction::Tick, Clock::at(first + 1));
+        assert!(!e.contains(&Effect::CheckForUpdate), "one check at a time");
+
+        core.dispatch(AppAction::UpdateChecked(Ok(None)), Clock::at(first + 2));
+        assert_eq!(*core.update(), UpdateState::UpToDate);
+        let again = first + ms(UPDATE_CHECK_INTERVAL);
+        let e = core.dispatch(AppAction::Tick, Clock::at(again - 1));
+        assert!(!e.contains(&Effect::CheckForUpdate));
+        let e = core.dispatch(AppAction::Tick, Clock::at(again));
+        assert!(e.contains(&Effect::CheckForUpdate));
+    }
+
+    #[test]
+    fn a_newer_release_is_offered_once_and_the_rest_leave_the_app_up_to_date() {
+        let mut core = core();
+        core.dispatch(AppAction::CheckForUpdate, Clock::at(1));
+        core.dispatch(
+            AppAction::UpdateChecked(Ok(Some(release("0.2.0")))),
+            Clock::at(2),
+        );
+        assert_eq!(*core.update(), UpdateState::UpToDate);
+        core.dispatch(AppAction::CheckForUpdate, Clock::at(3));
+        core.dispatch(
+            AppAction::UpdateChecked(Err("offline".into())),
+            Clock::at(4),
+        );
+        assert_eq!(
+            *core.update(),
+            UpdateState::Failed {
+                reason: "offline".into(),
+                release: None
+            }
+        );
+        assert!(core.notices().is_empty(), "a failed check is quiet");
+
+        core.dispatch(AppAction::CheckForUpdate, Clock::at(5));
+        core.dispatch(
+            AppAction::UpdateChecked(Ok(Some(release("0.3.0")))),
+            Clock::at(6),
+        );
+        assert_eq!(*core.update(), UpdateState::Available(release("0.3.0")));
+        assert_eq!(core.notices().len(), 1);
+        assert!(core.notices()[0].text.contains("0.3.0"));
+        assert!(!core.notices()[0].is_error);
+
+        // The hourly check finds the same release: nothing new to say.
+        core.dispatch(AppAction::CheckForUpdate, Clock::at(7));
+        core.dispatch(
+            AppAction::UpdateChecked(Ok(Some(release("0.3.0")))),
+            Clock::at(8),
+        );
+        assert_eq!(*core.update(), UpdateState::Available(release("0.3.0")));
+        assert_eq!(core.notices().len(), 1);
+    }
+
+    #[test]
+    fn the_download_and_the_install_are_two_clicks_and_a_failure_keeps_the_release() {
+        let mut core = core();
+        core.dispatch(AppAction::CheckForUpdate, Clock::at(1));
+        core.dispatch(
+            AppAction::UpdateChecked(Ok(Some(release("0.3.0")))),
+            Clock::at(2),
+        );
+        let e = core.dispatch(AppAction::DownloadUpdate, Clock::at(3));
+        assert!(e.contains(&Effect::DownloadUpdate(release("0.3.0"))));
+        assert_eq!(*core.update(), UpdateState::Downloading(release("0.3.0")));
+        let e = core.dispatch(AppAction::Tick, Clock::at(3 + ms(UPDATE_CHECK_INTERVAL)));
+        assert!(
+            !e.contains(&Effect::CheckForUpdate),
+            "no check under a download"
+        );
+
+        core.dispatch(
+            AppAction::UpdateDownloaded(Err("checksum".into())),
+            Clock::at(4),
+        );
+        assert_eq!(
+            *core.update(),
+            UpdateState::Failed {
+                reason: "checksum".into(),
+                release: Some(release("0.3.0"))
+            }
+        );
+        assert!(core.notices().last().unwrap().is_error);
+        let e = core.dispatch(AppAction::DownloadUpdate, Clock::at(5));
+        assert!(
+            e.contains(&Effect::DownloadUpdate(release("0.3.0"))),
+            "tried again"
+        );
+
+        let staged = PathBuf::from("/tmp/staged/Switchboard.app");
+        core.dispatch(
+            AppAction::UpdateDownloaded(Ok(staged.clone())),
+            Clock::at(6),
+        );
+        assert_eq!(
+            *core.update(),
+            UpdateState::Ready {
+                release: release("0.3.0"),
+                staged: staged.clone()
+            }
+        );
+        assert!(
+            !core
+                .dispatch(AppAction::Tick, Clock::at(6 + ms(UPDATE_CHECK_INTERVAL)))
+                .contains(&Effect::CheckForUpdate),
+            "a ready update is not checked over"
+        );
+        let e = core.dispatch(AppAction::InstallUpdate, Clock::at(7));
+        assert!(e.contains(&Effect::InstallUpdate(staged)));
+        core.dispatch(
+            AppAction::UpdateInstallFailed("read-only".into()),
+            Clock::at(8),
+        );
+        assert!(matches!(
+            core.update(),
+            UpdateState::Failed { release: Some(r), .. } if r.version == "0.3.0"
+        ));
+        assert!(core.notices().last().unwrap().text.contains("read-only"));
+    }
+}

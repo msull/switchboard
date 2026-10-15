@@ -167,7 +167,8 @@ as you type; Save is the only time Switchboard writes into
 
 ```sh
 ./scripts/bundle.sh          # installs ~/Applications/Switchboard.app
-./scripts/release.sh         # publishes the signed bundle as a GitHub release of HEAD (--dry-run: build and zip only)
+./scripts/bump.sh minor      # the next version into Cargo.toml, Cargo.lock and CHANGELOG.md
+./scripts/release.sh         # publishes the committed version as a GitHub release (--dry-run: build and zip only)
 ./scripts/icon.sh            # regenerates the icons from assets/Switchboard.svg and assets/vision/*.svg
 ```
 
@@ -189,27 +190,59 @@ three layers of the visionOS icon (`assets/vision/*.svg`, the same
 drawing split for the headset's parallax and circular mask) into the
 client's asset catalog.
 
-Another Mac runs a release rather than a build. `scripts/release.sh`
-builds the bundle through `bundle.sh` into a staging directory, stamps
-`CFBundleVersion` with the version and the date, zips it with `ditto`
-(a plain `zip` would lose the signature), tags the commit
-`v<version>-<date>-<commit>` and attaches the zip to a GitHub release
-with install notes and the zip's SHA-256. On the other Mac, with `tmux`,
-Ghostty and `gh` installed:
+Releases are numbered by [semantic versioning](https://semver.org) and
+listed in `CHANGELOG.md`; the version in `Cargo.toml` is the one source,
+and it reaches the binary (`env!("CARGO_PKG_VERSION")`, shown at the
+bottom of the Settings menu), the bundle's `Info.plist` and the host's
+`/info` reply (the headset shows it beside each host). A release is
+three steps:
 
 ```sh
-gh release download <tag> -R msull/switchboard -p 'Switchboard-*.zip' -D ~/Downloads
-ditto -x -k ~/Downloads/Switchboard-<tag>.zip ~/Applications
+./scripts/bump.sh minor          # or patch, major, or X.Y.Z: Cargo.toml, Cargo.lock, CHANGELOG.md
+git commit -am "Release 0.3.0"   # after a look at the diff
+./scripts/release.sh             # builds, signs, zips, tags v0.3.0, publishes with the changelog section
+```
+
+Every user-visible change adds a line under Unreleased in
+`CHANGELOG.md` as it lands, so the bump has something to move.
+`scripts/release.sh` builds the bundle through `bundle.sh` into a
+staging directory, zips it with `ditto` (a plain `zip` would lose the
+signature), writes the zip's SHA-256 as a file of its own, tags the
+commit `v<version>` and attaches both to a GitHub release whose notes
+are the changelog's section. It refuses a dirty tree, a version without
+a changelog section, and a tag that exists.
+
+A running Switchboard checks the repository's latest release twenty
+seconds after launch and hourly (`core::updates`, the
+`adapters::updates::GitHubReleases` source over `ureq`). A newer version
+is a notice and an "Update" item on the rail: the click downloads the
+zip to `$TMPDIR/switchboard-update`, checks it against the published
+SHA-256, unpacks it with `ditto`, verifies the bundle's signature with
+`codesign` and requires its Team ID to equal the running app's (so the
+Accessibility and Keychain grants keyed on the signature survive), and
+then offers "Restart to update": a helper script waits for the process
+to exit, moves the old bundle to `.Switchboard.app.previous` beside it,
+copies the new one in and relaunches it, putting the old one back if the
+copy fails (its output is in `$TMPDIR/switchboard-update/swap.log`). A
+bare `cargo run` binary, an unsigned bundle or one outside a writable
+directory refuses to install and says so. A pre-release tag or one that
+does not parse is never offered.
+
+Another Mac installs a release by hand, with `tmux`, Ghostty and `gh`
+installed:
+
+```sh
+gh release download v0.2.0 -R msull/switchboard -p 'Switchboard-*.zip' -D ~/Downloads
+ditto -x -k ~/Downloads/Switchboard-0.2.0.zip ~/Applications
 open ~/Applications/Switchboard.app
 ```
 
 `gh` and `curl` set no quarantine flag, so Gatekeeper asks nothing of
 the bundle, which is signed but not notarized; a browser download
 carries the flag, and `xattr -dr com.apple.quarantine <app>` clears
-it. The release is signed with the same Developer ID every time, so the
-other Mac's Accessibility grant and Keychain allowances survive an
-update. That Mac makes its own identity and key on first launch, so it
-is a second host to the remote client, never a copy of this one.
+it. From then on the app updates itself. That Mac makes its own
+identity and key on first launch, so it is a second host to the remote
+client, never a copy of this one.
 
 Dev aids, all environment variables:
 
@@ -329,13 +362,15 @@ src/core/
   workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records
   control.rs             the control port's commands run quietly under an operation id; read models in the wire's shapes; `ready_for_prompt`, the one verdict `session.prompt` and a view's `prompt_refusal` share
   remote.rs              the remote port's state: the host's identity and paired devices as loaded, the pairing window with its code, scope and failure count, a device's scope and revocation
+  updates.rs             the app's version and its update: the scheduled check, a newer release offered, downloaded on a click and installed on another; semantic versions, pre-releases never offered
   revision.rs            the read-model fingerprints behind the remote port's revision: every exported view hashed with its time-derived fields held still, and the `changed`/`removed` diff between two passes (and a record's runs as the `runs` collection)
   diff.rs                a changed file's diff as held per ticket, lane and path, when a re-read is due, which unchanged runs fold
   dispatch.rs            Dispatch as the app shows it: the runner's last status as views, decisions answered as calls, a ticket's events and full view read once per change and its timeline, a project's supervisor chip, the console session
   tests.rs               state-transition tests for the core
-src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, changes (a branch's commits and files over its base, one file's diff), controller, control (the operations log), dispatch (Dispatch's port), remote (the identity and paired-device files, and the Bonjour advertisement)
+src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, changes (a branch's commits and files over its base, one file's diff), controller, control (the operations log), dispatch (Dispatch's port), remote (the identity and paired-device files, and the Bonjour advertisement), updates (the release source: the newest release, its bundle fetched and checked, the swap arranged)
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
+  updates.rs             GitHub Releases over `ureq`: the latest release parsed from the API, the zip staged under `$TMPDIR/switchboard-update` and checked against its `.sha256` asset, unpacked with `ditto`, verified with `codesign` and pinned to the running app's Team ID; the swap helper that replaces the bundle after exit and relaunches, keeping the old one aside
   tmux.rs                tmux process host on the private socket
   hooks.rs               append-first event log + socket wake-up + hook settings JSON
   control.rs             the control port: operations.log (append-only, synced) and control.sock (one thread per connection, requests handed to the frame)
@@ -366,6 +401,7 @@ src/ui/
   theme.rs               the look: color tokens per theme, Source Serif 4, type scale, shared widgets (dot, kicker, buttons)
   rail.rs                left project rail (brand, All sessions, Dispatch with its pending decisions, projects with dots, Go to, Settings); a session's neighbours beside it; its list scrolls between a fixed head and Go to / Settings
   switcher.rs            Settings menu and the toasts (notice, host error)
+  updates.rs             the version and the update's state in the Settings menu, and the rail's item while a release waits on a click
   board.rs               one project's board: run bar, agent and shell cards, command and service rows, pinned documents, notes
   files.rs               Files tab of the side panel: lazy tree (from the project root or a directory chosen as its top), fuzzy finder, bottom preview pane, right-click hand-offs
   run.rs                 Run tab of the side panel: commands and services, definitions, approval, last run
@@ -398,7 +434,9 @@ tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
 scripts/test-times.sh    every test's time, serially, through libtest's `--report-time`; the slowest ten, each binary's total, the 5 s budget
 scripts/ci-test.sh       CI's test step: the workspace, then one retry of the failed tests, warning `flaky:` for each that passes on it
-scripts/release.sh       the signed bundle zipped and attached to a GitHub release of HEAD under `v<version>-<date>-<commit>`, for another Mac to install without building
+scripts/bump.sh          the next version into Cargo.toml and Cargo.lock, and the changelog's Unreleased section dated under it
+scripts/release.sh       the signed bundle and its SHA-256 attached to a GitHub release tagged `v<version>`, with the changelog section as notes; what the app updates itself from
+CHANGELOG.md             every user-visible change, under Unreleased until a bump
 client/                  the Swift client (docs/remote-client.md §7): `SwitchboardProtocol` (the wire views as Codable, qualified refs, the envelope, the event frame and resource keys), `SwitchboardTransport` (HTTPS and the events WebSocket with the SPKI-pinning delegate, Bonjour browsing), `SwitchboardClientCore` (known servers, credentials, one connection actor per host that subscribes before it snapshots and reconciles events by revision, holds reference-counted screen watches that are resent after a reconnect, the unified store), `SwitchboardUI` (SwiftUI browser and server views), the `switchboard-remote` command-line browser, tests, `Fixtures/` shared with `tests/remote.rs`, and the apps: `project.yml` (xcodegen writes the git-ignored Xcode project from it), `Apps/SwitchboardVision/` (the visionOS entry, thin over `SwitchboardUI`: the main window with list, grid and focus layouts and the filters, and the card window group), `scripts/sim.sh` (build, run and screenshot on the simulator), `scripts/device.sh` (build, install and launch on a paired headset)
 control/                 switchboard-control: the control port's wire contract (requests, replies, views; `session.resume` resumes an agent without a terminal and never launches fresh; `session.prompt` types a prompt only into a Claude Code agent between turns, else fails naming why) and a blocking client; std + serde only
 dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, a ticket's events after a cursor, decide, queue, take, resume, close, worktrees, a project's supervisor and `supervisor-fresh`), how a bring-up reads, and a blocking client; std + serde only
