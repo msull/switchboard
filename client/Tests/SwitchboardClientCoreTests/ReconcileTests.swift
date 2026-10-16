@@ -239,6 +239,41 @@ final class ReconcileTests: XCTestCase {
         XCTAssertEqual(sorted.filter(filters.admits).map(\.ref.recordID), ["c"])
     }
 
+    /// The filter menu's choices are the hosts by name and the card
+    /// words present, and a poll that moves only the fetch time or the
+    /// order of sessions leaves them equal, so the open menu stands.
+    func testFilterChoicesAreUnmovedByAPollThatChangesNothingShown() throws {
+        let desk = KnownServer(id: a, name: "Desk", addresses: [addrA])
+        let laptop = KnownServer(id: b, name: "Laptop", addresses: [addrB])
+        func snapshot(at seconds: TimeInterval, cards: [String]) -> HostSnapshot {
+            var snapshot = HostSnapshot(epoch: "e", revision: 1, fetchedAt: Date(timeIntervalSince1970: seconds))
+            snapshot.sessions = cards.enumerated().map { i, card in
+                SessionView(id: "r\(i)", project: "p", name: "s\(i)", card: card, lastStopAtMs: UInt64(100 - i))
+            }
+            return snapshot
+        }
+        let first = UnifiedStore.build(from: [
+            (desk, .connected, snapshot(at: 1, cards: ["working", "idle"]), false, nil),
+            (laptop, .connected, snapshot(at: 1, cards: ["idle"]), false, nil),
+        ])
+        let choices = FilterChoices(store: first)
+        XCTAssertEqual(choices.hosts.map(\.name), ["Desk", "Laptop"])
+        XCTAssertEqual(choices.states, ["idle", "working"])
+
+        let later = UnifiedStore.build(from: [
+            (desk, .connected, snapshot(at: 2, cards: ["idle", "working"]), false, nil),
+            (laptop, .connected, snapshot(at: 2, cards: ["idle"]), false, nil),
+        ])
+        XCTAssertNotEqual(first, later, "the store itself moved")
+        XCTAssertEqual(FilterChoices(store: later), choices, "the choices did not")
+
+        let changed = UnifiedStore.build(from: [
+            (desk, .connected, snapshot(at: 3, cards: ["waiting on you", "idle"]), false, nil),
+            (laptop, .connected, snapshot(at: 3, cards: ["idle"]), false, nil),
+        ])
+        XCTAssertEqual(FilterChoices(store: changed).states, ["idle", "waiting on you"])
+    }
+
     func testTheFileStoresRoundTripAndKeepCredentialsOwnerOnly() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let registry = FileRegistry(url: dir.appendingPathComponent("servers.json"))

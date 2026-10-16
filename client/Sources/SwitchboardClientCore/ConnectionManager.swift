@@ -58,6 +58,32 @@ public struct Filters: Sendable, Equatable, Codable {
     }
 }
 
+/// What the filter menu offers: the hosts by name and the card words
+/// the listed sessions are in. A value of its own, equal across polls
+/// that change nothing the menu shows, so an open menu is not rebuilt
+/// by every refresh of the store (a rebuild sends it back to the top).
+public struct FilterChoices: Sendable, Equatable {
+    public struct Host: Identifiable, Sendable, Equatable {
+        public let id: ServerID
+        public let name: String
+
+        public init(id: ServerID, name: String) {
+            self.id = id
+            self.name = name
+        }
+    }
+
+    public var hosts: [Host] = []
+    public var states: [String] = []
+
+    public init() {}
+
+    public init(store: UnifiedStore) {
+        hosts = store.hosts.map { Host(id: $0.id, name: $0.server.name) }
+        states = Array(Set(store.sessions.map(\.session.card))).sorted()
+    }
+}
+
 /// The cross-host order: the host's own rank, then last activity,
 /// then the record id.
 public enum UnifiedOrder {

@@ -11,6 +11,9 @@ public final class BrowserModel {
     public let manager: ConnectionManager
     public private(set) var store = UnifiedStore()
     public private(set) var discovered: [DiscoveredServerRow] = []
+    /// The filter menu's choices, replaced only when they differ, so
+    /// the menu's body is not re-evaluated by the two-second pull.
+    public private(set) var filterChoices = FilterChoices()
     /// The card windows on screen, by window id, so a click on a listed
     /// session reaches its window. Nothing here outlives the process:
     /// a launch brings back the main window and no other.
@@ -117,6 +120,8 @@ public final class BrowserModel {
 
     public func pull() async {
         store = await manager.store
+        let choices = FilterChoices(store: store)
+        if choices != filterChoices { filterChoices = choices }
         discovered = await manager.discovered.map {
             DiscoveredServerRow(instance: $0.instance, serverID: $0.serverID, name: $0.name)
         }.sorted { $0.instance < $1.instance }
@@ -445,7 +450,7 @@ public struct BrowserView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                FilterMenu(model: model)
+                FilterMenu(model: model).equatable()
             }
         }
     }
@@ -548,15 +553,23 @@ public struct BrowserView: View {
 }
 
 /// The filters of §8 as toggles: hosts, kinds, and the states the
-/// listed sessions are in.
-struct FilterMenu: View {
+/// listed sessions are in. It reads only the choices and the filters,
+/// never the store: a menu whose body is re-evaluated while open
+/// scrolls back to its top, and the store changes on every pull.
+struct FilterMenu: View, Equatable {
     @Bindable var model: BrowserModel
+
+    /// The parent redraws on every pull; this says when the menu has
+    /// nothing new to draw, so SwiftUI leaves it as it stands.
+    static func == (lhs: FilterMenu, rhs: FilterMenu) -> Bool {
+        lhs.model.filterChoices == rhs.model.filterChoices && lhs.model.filters == rhs.model.filters
+    }
 
     var body: some View {
         Menu {
             Section("Hosts") {
-                ForEach(model.store.hosts) { host in
-                    Toggle(host.server.name, isOn: binding(\.servers, host.id, all: model.store.hosts.map(\.id)))
+                ForEach(model.filterChoices.hosts) { host in
+                    Toggle(host.name, isOn: binding(\.servers, host.id, all: model.filterChoices.hosts.map(\.id)))
                 }
             }
             Section("Kinds") {
@@ -565,7 +578,7 @@ struct FilterMenu: View {
                 }
             }
             Section("States") {
-                let states = Array(Set(model.store.sessions.map(\.session.card))).sorted()
+                let states = model.filterChoices.states
                 ForEach(states, id: \.self) { state in
                     Toggle(state, isOn: binding(\.cards, state, all: states))
                 }
