@@ -8,6 +8,10 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+
+- The headset's filter menu no longer jumps back to its top every couple of seconds while open: it is rebuilt only when a host or a session state it lists changes, not on every refresh.
+
 ## [0.2.1] - 2026-10-15
 
 ### Fixed
