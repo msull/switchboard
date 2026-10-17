@@ -619,18 +619,17 @@ struct ConversationView: View {
     /// The window, whose place in the conversation is kept.
     let window: UUID
     @State private var loading = false
-    /// Where the view stands: the turn at the top, or the end it
-    /// follows, and the folds open. Seeded from the window's saved
-    /// place and kept across merges and reconnects; a turn's id is its
-    /// number, so a page replacing the turns under the view keeps the
-    /// one at the top in place.
+    /// Where the view stands: following the end, or released with a
+    /// turn at the top, and the folds open. Seeded from the window's
+    /// saved place and kept across merges and reconnects; a turn's id
+    /// is its number, so a page replacing the turns under the view
+    /// keeps the one at the top in place.
     @State private var place: ConversationPlace?
-    /// The turn at the top of the view, as the scroll view reports it.
+    /// The turn at the top of the view, read from the turns the scroll
+    /// view reports on screen. Read only: a position bound to the
+    /// scroll view would be re-applied as the content grows, moving the
+    /// view up to the turn it last held there.
     @State private var top: Int?
-    /// The end was asked for and the view is not there yet: a scroll
-    /// still decelerating overrides the first scroll, so the end is
-    /// asked for again when it settles.
-    @State private var pulling = false
     /// The end marker is on screen, as the scroll view reports it.
     @State private var atEnd = true
 
@@ -653,7 +652,7 @@ struct ConversationView: View {
                                             await model.loadEarlier(ref)
                                             // The turns go in above; the one that was
                                             // at the top stays there.
-                                            if let keep { top = keep }
+                                            if let keep { proxy.scrollTo(keep, anchor: .top) }
                                             loading = false
                                         }
                                     } label: {
@@ -674,38 +673,71 @@ struct ConversationView: View {
                                 }
                             }
                             .scrollTargetLayout()
-                            // The end: following is any of this marker on
-                            // screen, so a bounce or a finger lifted a hair
-                            // early still follows, and whatever the view's
-                            // insets are, a scroll to it reaches it. It sits
-                            // outside the lazy stack, which would make and
-                            // drop it as the view moves and lose its reports.
+                            // The end: a tall marker, so that whatever the
+                            // view's insets are, a scroll to it reaches it.
+                            // It sits outside the lazy stack, which would
+                            // make and drop it as the view moves and lose
+                            // its reports.
                             Color.clear.frame(height: ConversationPlace.endSlack)
                                 .id(Self.endID)
                                 .onScrollVisibilityChange(threshold: 0.02) { visible in atEnd = visible }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .scrollPosition(id: $top, anchor: .top)
+                    .onScrollTargetVisibilityChange(idType: Int.self, threshold: 0.01) { ids in
+                        top = ids.filter { $0 != Self.earlierID }.min()
+                    }
+                    // Following is a mode, not a position: the view is held
+                    // at the end and cannot be dragged off it, so a row
+                    // growing under the finger or a glance that lands on
+                    // the content never leaves it behind. The button at
+                    // the right edge releases it.
+                    .scrollDisabled(following)
                     // The view opens at the end, laid out from the bottom
                     // rather than scrolled there across rows not yet
                     // measured; and the field under the view growing
                     // shrinks the view, where the end stays in view.
                     .defaultScrollAnchor(.bottom)
                     .defaultScrollAnchor(.bottom, for: .sizeChanges)
+                    // Following, the end is kept on screen whatever grows
+                    // after a scroll landed: a new turn's row laid out
+                    // late, a tool call added to it, a fold opened.
                     .onChange(of: atEnd) { _, visible in
-                        place?.following = visible
-                        if visible { pulling = false }
+                        if following, !visible {
+                            note("pull")
+                            proxy.scrollTo(Self.endID, anchor: .bottom)
+                        }
+                    }
+                    .onChange(of: conversation) { _, _ in
+                        if following { proxy.scrollTo(Self.endID, anchor: .bottom) }
                     }
                     .onScrollPhaseChange { _, phase in
-                        if phase == .idle, pulling {
-                            withAnimation { proxy.scrollTo(Self.endID, anchor: .bottom) }
+                        // A scroll still decelerating when the end was asked
+                        // for overrides it; it is asked for again at rest.
+                        if phase == .idle, following, !atEnd {
+                            proxy.scrollTo(Self.endID, anchor: .bottom)
+                        }
+                    }
+                    .overlay(alignment: .trailing) {
+                        if following {
+                            Button {
+                                note("release")
+                                place?.following = false
+                            } label: {
+                                Image(systemName: "arrow.up.and.down")
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.circle)
+                            .controlSize(.small)
+                            .accessibilityLabel("Scroll the conversation")
+                            .padding(.trailing, 6)
                         }
                     }
                     .overlay(alignment: .bottom) {
-                        if !atEnd {
+                        if !following {
                             Button {
-                                pulling = true
+                                note("follow")
+                                place?.following = true
                                 withAnimation { proxy.scrollTo(Self.endID, anchor: .bottom) }
                             } label: {
                                 Image(systemName: "ellipsis")
@@ -719,10 +751,8 @@ struct ConversationView: View {
                     }
                     .onAppear { restore(conversation, proxy) }
                     .onChange(of: conversation.resumeID) { _, _ in restore(conversation, proxy) }
-                    .onChange(of: conversation.lastHeld) { _, _ in follow(proxy) }
-                    .onChange(of: conversation.turns.last?.finalText) { _, _ in follow(proxy) }
                     .onChange(of: top) { _, new in
-                        if let new, new != Self.earlierID, new != Self.endID { place?.turn = new }
+                        if let new { place?.turn = new }
                     }
                 }
             } else {
@@ -733,6 +763,7 @@ struct ConversationView: View {
                     Spacer()
                 }
                 .frame(maxWidth: .infinity)
+                .onAppear { note("no conversation") }
             }
         }
         .task(id: ref) {
@@ -747,29 +778,32 @@ struct ConversationView: View {
         .onDisappear { remember() }
     }
 
+    /// The mode: at the end, moving with the host, until released.
+    private var following: Bool { place?.following ?? true }
+
     /// Put the view where the window stood: the end it follows, or
     /// the turn it had at the top, when that turn is still held.
     private func restore(_ conversation: ConversationState, _ proxy: ScrollViewProxy) {
         let saved = place ?? model.place(for: window) ?? ConversationPlace(resumeID: conversation.resumeID)
         let fitted = saved.fitted(to: conversation)
         place = fitted
+        note(
+            "restore target=\(fitted.target(in: conversation).map(String.init) ?? "end") "
+                + "held=\(conversation.firstHeld ?? 0)-\(conversation.lastHeld ?? 0)")
         if let turn = fitted.target(in: conversation) {
-            top = turn
             proxy.scrollTo(turn, anchor: .top)
         } else {
             proxy.scrollTo(Self.endID, anchor: .bottom)
         }
     }
 
-    /// The end moved: follow it only when the view was there.
-    private func follow(_ proxy: ScrollViewProxy) {
-        if place?.following ?? true {
-            proxy.scrollTo(Self.endID, anchor: .bottom)
-        }
-    }
-
     private func remember() {
         if let place { model.setPlace(place, for: window) }
+    }
+
+    /// The device's launch log is the only view of a scroll the Mac has.
+    private func note(_ line: String) {
+        LaunchLog.note("conv \(window.uuidString.prefix(4)) \(line)")
     }
 
     private func fold(_ turn: Int) -> Binding<Bool> {
