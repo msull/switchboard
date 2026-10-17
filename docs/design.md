@@ -3503,7 +3503,15 @@ Built so far:
   (`launch.log`: launches, window appearances, scene phases) stands in
   for a device syslog the Mac cannot read. The conversation's end
   marker lives outside the lazy stack, so the follow button and
-  opening at the end hold on the device. Markdown tables in an answer
+  opening at the end hold on the device. Following the end was then
+  made a mode (2026-10-16): the view is held at the end with scrolling
+  off, and anything growing under it pulls the end back on screen; a
+  button at the right edge releases it to read, the ellipsis at the
+  foot returns it. Before, following meant "the marker is on screen",
+  and a new turn's row growing after the scroll landed pushed the
+  marker off and turned following off by itself; the turn at the top
+  was also a position bound to the scroll view, which re-applied it as
+  the content grew and sent the view up. Markdown tables in an answer
   are laid out as grids. A Bonjour resolve that gets no answer is
   given up after 5 s, and each offline host resolves on its own task,
   after the retry loop hung on one resolve left waiting by the system.

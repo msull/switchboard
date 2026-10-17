@@ -72,11 +72,12 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   with its inline Markdown, its tables cut out by `MarkdownTable` and
   laid out as grids), `conversation` (turns with the activity
   folded, each tool call's text whole on demand, earlier pages on
-  demand, the end following the host while any of a tall marker after
-  the last turn is on screen, so a bounce leaves the view following,
-  the end staying in view when the field under it grows, and an
-  ellipsis button at the foot of the turns, shown only off the end,
-  that takes the view back to following it; the window keeps its place,
+  demand, the end followed as a mode: the view is held at the end and
+  cannot be dragged off it, whatever grows under it (a new turn's row
+  laid out after the scroll landed, a tool call added, a fold opened)
+  pulls the end back on screen, and a button at the right edge
+  releases it for reading; an ellipsis button at the foot of the
+  turns, shown only released, takes the view back to following; the window keeps its place,
   `ConversationPlace`: the turn at the top or the end it follows and
   the folds open, so a page merging under the view, a reconnect or a
   relaunch puts it back where it was, and another transcript starts
