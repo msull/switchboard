@@ -191,6 +191,11 @@ pub struct SwitchboardApp {
     /// dispatch since then makes another pass worth taking.
     fingerprints: Option<Fingerprints>,
     dirty: bool,
+    /// A device's decide or resume on a ticket, answered when Dispatch
+    /// answers the call it became (the port's thread brings the reply
+    /// on a later frame); one too old is dropped, the connection
+    /// having given up by then.
+    ticket_replies: Vec<TicketReply>,
     /// Each session's draft as last broadcast, so a device holding a
     /// draft hears when the editor under it moves.
     draft_marks: HashMap<RecordId, u64>,
@@ -258,16 +263,27 @@ impl WorkerRecords {
         match resource.kind {
             K::Project | K::Sessions => self.projects.contains(&resource.id),
             K::Session | K::Runs => self.sessions.contains(&resource.id),
-            K::Space | K::Set | K::Projects | K::Spaces | K::Sets | K::Waiting => false,
+            K::Space | K::Set | K::Projects | K::Spaces | K::Sets | K::Waiting | K::Tickets => {
+                false
+            }
         }
     }
 }
 
-/// How a remote request was answered: now, or by the content worker
-/// through the reply channel it was handed.
+/// How a remote request was answered: now, or later through the reply
+/// channel it was handed, by the content worker or by Dispatch's
+/// answer to a ticket command.
 enum Served {
     Now(RemoteReply),
     Deferred,
+}
+
+/// A ticket command a device sent, waiting on Dispatch's answer: the
+/// call it became, and where the answer goes.
+struct TicketReply {
+    call: Body,
+    reply: mpsc::SyncSender<RemoteReply>,
+    asked: Instant,
 }
 
 /// A file diff's answer from its thread.
@@ -341,6 +357,7 @@ impl SwitchboardApp {
             revision: 0,
             fingerprints: None,
             dirty: false,
+            ticket_replies: Vec::new(),
             draft_marks: HashMap::new(),
             last_draft_pass: None,
             subscribers: Vec::new(),
@@ -486,6 +503,9 @@ impl SwitchboardApp {
             file_refs::keep_only(&mut self.ui_state.file_links, *id, None);
         }
         let handles_before = self.resume_handles(&action);
+        if let AppAction::DispatchReplied { body, result } = &action {
+            self.answer_ticket_reply(body, result);
+        }
         let effects = self.core.dispatch(action, now);
         for (id, before) in handles_before {
             if self.core.session(id).map(|s| s.resume.clone()) != Some(before) {
@@ -1565,6 +1585,8 @@ impl SwitchboardApp {
             self.observe(observation);
         }
         self.sweep_watches();
+        self.ticket_replies
+            .retain(|r| r.asked.elapsed() < remote::ANSWER_TIMEOUT);
     }
 
     // --- content: the worker, the versions, the watch set
@@ -2073,6 +2095,255 @@ impl SwitchboardApp {
 
     /// A command's or service's runs as the record holds them: the
     /// numbers, times, exits and the artifacts' names, never paths.
+    /// Dispatch's tickets as the core lists them (§4.7).
+    fn remote_tickets(&self, request: &RemoteRequest) -> RemoteReply {
+        let value = serde_json::to_value(self.core.ticket_listing()).unwrap_or_default();
+        self.remote_json(request, value, STRING_CAP)
+    }
+
+    /// One ticket with its body, attempts and lanes.
+    fn remote_ticket(&self, request: &RemoteRequest, ticket: &str) -> RemoteReply {
+        let Some(detail) = self.core.ticket_detail(ticket) else {
+            return self.refuse(request, 404, "not_found", "no such ticket", true);
+        };
+        let value = serde_json::to_value(detail).unwrap_or_default();
+        self.remote_json(request, value, NOTES_CAP_ALONE)
+    }
+
+    /// A decide or a resume on a ticket under `control` scope, checked
+    /// against the last status here (the decision pending, the answer
+    /// among its options, a note where one is needed) and then the
+    /// Mac's own action; Dispatch's answer reaches the device through
+    /// `answer_ticket_reply`. A decision already answered as asked is
+    /// answered again from the record, so a repeat after a lost reply
+    /// costs nothing.
+    fn remote_ticket_command(
+        &mut self,
+        request: &RemoteRequest,
+        device: &PairedDevice,
+        ticket: &str,
+        verb: &str,
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> Served {
+        if device.scope != Scope::Control {
+            return Served::Now(self.refuse(
+                request,
+                403,
+                "scope",
+                "this device reads only; raise its scope on the host",
+                true,
+            ));
+        }
+        let Some(t) = self.core.ticket(ticket).cloned() else {
+            return Served::Now(self.refuse(request, 404, "not_found", "no such ticket", true));
+        };
+        if !self.core.dispatch_state().connected {
+            return Served::Now(self.refuse(
+                request,
+                503,
+                "dispatch_off",
+                "Dispatch is not running on the host",
+                true,
+            ));
+        }
+        let call = if verb == "decide" {
+            match self.ticket_decide_call(request, &t) {
+                Ok(call) => call,
+                Err(served) => return served,
+            }
+        } else if t.state == "parked" {
+            Body::Resume {
+                ticket: t.id.clone(),
+            }
+        } else {
+            return Served::Now(self.refuse(
+                request,
+                409,
+                "not_parked",
+                &format!("the ticket is {}, not parked", t.state),
+                true,
+            ));
+        };
+        let action = match &call {
+            Body::Decide {
+                ticket,
+                decision,
+                answer,
+                note,
+            } => AppAction::DispatchDecide {
+                ticket: ticket.clone(),
+                decision: decision.clone(),
+                answer: answer.clone(),
+                note: note.clone(),
+            },
+            _ => AppAction::DispatchResume(t.id.clone()),
+        };
+        self.ticket_replies.push(TicketReply {
+            call,
+            reply: reply.clone(),
+            asked: Instant::now(),
+        });
+        self.dispatch_inner(action);
+        Served::Deferred
+    }
+
+    /// The `decide` call a request's body asks for, or the refusal.
+    fn ticket_decide_call(
+        &self,
+        request: &RemoteRequest,
+        t: &crate::ports::dispatch::TicketView,
+    ) -> Result<Body, Served> {
+        let bad = |message: &str| {
+            Err(Served::Now(self.refuse(
+                request,
+                400,
+                "bad_request",
+                message,
+                true,
+            )))
+        };
+        let Ok(body) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
+            return bad("the body is not JSON");
+        };
+        let field = |name: &str| body.get(name).and_then(|v| v.as_str()).map(str::trim);
+        let (Some(decision), Some(answer)) = (field("decision"), field("answer")) else {
+            return bad("decision (its id) and answer are required");
+        };
+        if answer.is_empty() || answer.len() > STRING_CAP {
+            return bad("answer is the option chosen, or the options joined by commas");
+        }
+        let note = field("note").filter(|n| !n.is_empty()).map(str::to_owned);
+        if note.as_ref().is_some_and(|n| n.len() > NOTES_CAP_ALONE) {
+            return bad("the note is over 64 KiB");
+        }
+        let Some(d) = t.decisions.iter().find(|d| d.id == decision) else {
+            return Err(Served::Now(self.refuse(
+                request,
+                404,
+                "not_found",
+                "no such decision on the ticket",
+                true,
+            )));
+        };
+        if d.state != "pending" {
+            if d.answer.as_deref() == Some(answer) {
+                let value = serde_json::json!({
+                    "decision": crate::core::tickets::TicketDecision::from(d),
+                });
+                return Err(Served::Now(self.remote_json(request, value, STRING_CAP)));
+            }
+            return Err(Served::Now(self.refuse(
+                request,
+                409,
+                "answered",
+                &format!("the decision is {}", d.state),
+                true,
+            )));
+        }
+        let chosen: Vec<&str> = if d.multiple {
+            answer.split(',').map(str::trim).collect()
+        } else {
+            vec![answer]
+        };
+        if chosen.iter().any(|c| !d.options.iter().any(|o| o == c)) {
+            return bad("the answer is not among the decision's options");
+        }
+        if note.is_none() && chosen.iter().any(|c| d.needs_note.iter().any(|n| n == c)) {
+            return bad("this answer needs a note");
+        }
+        Ok(Body::Decide {
+            ticket: t.id.clone(),
+            decision: d.id.clone(),
+            answer: chosen.join(","),
+            note,
+        })
+    }
+
+    /// Dispatch's answer to a call a device asked for, sent on to it.
+    fn answer_ticket_reply(&mut self, body: &Body, result: &Result<Reply, String>) {
+        let same = |a: &Body| match (a, body) {
+            (
+                Body::Decide {
+                    ticket, decision, ..
+                },
+                Body::Decide {
+                    ticket: t,
+                    decision: d,
+                    ..
+                },
+            ) => ticket == t && decision == d,
+            (Body::Resume { ticket }, Body::Resume { ticket: t }) => ticket == t,
+            _ => false,
+        };
+        let Some(at) = self.ticket_replies.iter().position(|r| same(&r.call)) else {
+            return;
+        };
+        let pending = self.ticket_replies.remove(at);
+        let answer = match result {
+            Ok(Reply::Decided(d)) => {
+                let value = serde_json::json!({
+                    "decision": crate::core::tickets::TicketDecision::from(d),
+                });
+                self.envelope(200, &value, true)
+            }
+            Ok(Reply::Ticket(t)) => {
+                let value = serde_json::json!({ "ticket": self.core.ticket_summary(t) });
+                self.envelope(200, &value, true)
+            }
+            Ok(Reply::Failed { reason }) => {
+                let (status, code) = if reason.starts_with("no such") {
+                    (404, "not_found")
+                } else {
+                    (400, "failed")
+                };
+                RemoteReply {
+                    status,
+                    body: self.error_json(code, reason),
+                    authenticated: true,
+                }
+            }
+            Ok(_) => RemoteReply {
+                status: 500,
+                body: self.error_json("failed", "Dispatch answered with something else"),
+                authenticated: true,
+            },
+            Err(e) => RemoteReply {
+                status: 503,
+                body: self.error_json("dispatch_off", &format!("Dispatch did not answer: {e}")),
+                authenticated: true,
+            },
+        };
+        let _ = pending.reply.try_send(answer);
+    }
+
+    /// A JSON body for a device: strings bounded, the envelope put
+    /// round it, and a body over the cap refused rather than cut.
+    fn remote_json(
+        &self,
+        request: &RemoteRequest,
+        mut value: serde_json::Value,
+        cap: usize,
+    ) -> RemoteReply {
+        bound_strings(&mut value, cap);
+        let out = self.envelope(200, &value, true);
+        if out.body.len() > BODY_CAP {
+            log::warn!(
+                "remote: {} {} is {} bytes, over the cap",
+                request.method,
+                request.path,
+                out.body.len()
+            );
+            return self.refuse(
+                request,
+                500,
+                "too_large",
+                "the reply is over the port's body cap",
+                true,
+            );
+        }
+        out
+    }
+
     fn remote_runs(&self, request: &RemoteRequest, session: &str) -> RemoteReply {
         let record = parse_uuid("session", session)
             .ok()
@@ -2545,29 +2816,10 @@ impl SwitchboardApp {
             ("POST", ["pair"]) => return Served::Now(self.remote_pair(request)),
             _ => {}
         }
-        let Some(token) = &request.bearer else {
-            return Served::Now(self.refuse(
-                request,
-                401,
-                "unauthorized",
-                "pair this device first",
-                false,
-            ));
+        let device = match self.authenticate(request) {
+            Ok(device) => device,
+            Err(refused) => return Served::Now(refused),
         };
-        let Some(device) = self
-            .core
-            .device_by_token(&remote::token_sha256(token))
-            .cloned()
-        else {
-            return Served::Now(self.refuse(
-                request,
-                401,
-                "unauthorized",
-                "the token is not known; pair again",
-                false,
-            ));
-        };
-        self.dispatch_inner(AppAction::DeviceSeen(device.id));
         if let ("GET", ["events"]) = (request.method.as_str(), segments.as_slice()) {
             return Served::Now(self.remote_subscribe(request, device.id, subscriber));
         }
@@ -2607,6 +2859,13 @@ impl SwitchboardApp {
             ("POST", ["sessions", session, "dictation"]) => {
                 return Served::Now(self.remote_dictation(request, &device, session));
             }
+            ("GET", ["dispatch", "tickets"]) => return Served::Now(self.remote_tickets(request)),
+            ("GET", ["dispatch", "tickets", ticket]) => {
+                return Served::Now(self.remote_ticket(request, ticket));
+            }
+            ("POST", ["dispatch", "tickets", ticket, verb @ ("decide" | "resume")]) => {
+                return self.remote_ticket_command(request, &device, ticket, verb, reply);
+            }
             (
                 "GET",
                 ["sessions", _, "screen" | "conversation" | "last-response"]
@@ -2631,6 +2890,35 @@ impl SwitchboardApp {
             Self::hide_workers(&mut reply);
         }
         Served::Now(self.remote_reply(request, &reply, notes_cap))
+    }
+
+    /// The paired device behind a request's bearer token, seen now; or
+    /// the refusal, which says nothing of the host.
+    fn authenticate(&mut self, request: &RemoteRequest) -> Result<PairedDevice, RemoteReply> {
+        let Some(token) = &request.bearer else {
+            return Err(self.refuse(
+                request,
+                401,
+                "unauthorized",
+                "pair this device first",
+                false,
+            ));
+        };
+        let Some(device) = self
+            .core
+            .device_by_token(&remote::token_sha256(token))
+            .cloned()
+        else {
+            return Err(self.refuse(
+                request,
+                401,
+                "unauthorized",
+                "the token is not known; pair again",
+                false,
+            ));
+        };
+        self.dispatch_inner(AppAction::DeviceSeen(device.id));
+        Ok(device)
     }
 
     /// A command under `control` scope. The body's `op` is the operation
@@ -2946,7 +3234,7 @@ impl SwitchboardApp {
             "server_id": identity.server_id,
             "server_name": identity.server_name,
             "protocol": REMOTE_PROTOCOL,
-            "capabilities": ["read", "control", "draft", "scope"],
+            "capabilities": ["read", "control", "draft", "scope", "tickets"],
             "spki_sha256": identity.spki_sha256,
             "version": self.core.version(),
             "limits": {
@@ -3079,24 +3367,7 @@ impl SwitchboardApp {
         if let serde_json::Value::Object(map) = &mut value {
             map.remove("reply");
         }
-        bound_strings(&mut value, notes_cap);
-        let out = self.envelope(200, &value, true);
-        if out.body.len() > BODY_CAP {
-            log::warn!(
-                "remote: {} {} is {} bytes, over the cap",
-                request.method,
-                request.path,
-                out.body.len()
-            );
-            return self.refuse(
-                request,
-                500,
-                "too_large",
-                "the reply is over the body cap",
-                true,
-            );
-        }
-        out
+        self.remote_json(request, value, notes_cap)
     }
 
     /// A content reply at the revision its key holds.

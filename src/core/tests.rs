@@ -11943,6 +11943,62 @@ mod revision {
     }
 
     #[test]
+    fn the_tickets_move_as_one_collection_when_a_status_changes_them() {
+        use crate::ports::dispatch::{DecisionView, Status, TicketView};
+        let (mut core, _) = loaded(vec![], vec![]);
+        let quiet = Fingerprints::of(&core, Clock::at(1).wall);
+        let mut status = Status {
+            tickets: vec![TicketView {
+                id: "t1".into(),
+                project: "Orchard".into(),
+                state: "active".into(),
+                decisions: vec![DecisionView {
+                    id: "d1".into(),
+                    ticket: "t1".into(),
+                    state: "pending".into(),
+                    ..DecisionView::default()
+                }],
+                ..TicketView::default()
+            }],
+            ..Status::default()
+        };
+        core.dispatch(
+            AppAction::DispatchStatus(Some(status.clone())),
+            Clock::at(2),
+        );
+        let listed = Fingerprints::of(&core, Clock::at(2).wall);
+        assert_eq!(
+            changed(&quiet, &listed),
+            vec![(ResourceKind::Tickets, String::new(), false)]
+        );
+        // The same status again, the runner's order aside, is no change.
+        core.dispatch(
+            AppAction::DispatchStatus(Some(status.clone())),
+            Clock::at(3),
+        );
+        let same = Fingerprints::of(&core, Clock::at(3).wall);
+        assert_eq!(changed(&listed, &same), vec![]);
+        // A decision answered moves the ticket's standing.
+        status.tickets[0].decisions[0].state = "answered".into();
+        core.dispatch(AppAction::DispatchStatus(Some(status)), Clock::at(4));
+        let answered = Fingerprints::of(&core, Clock::at(4).wall);
+        assert_eq!(
+            changed(&same, &answered),
+            vec![(ResourceKind::Tickets, String::new(), false)]
+        );
+        assert_eq!(core.ticket_listing().tickets[0].standing, "queued");
+        // The runner gone: the listing says so, the tickets stay.
+        core.dispatch(AppAction::DispatchStatus(None), Clock::at(5));
+        let gone = Fingerprints::of(&core, Clock::at(5).wall);
+        assert_eq!(
+            changed(&answered, &gone),
+            vec![(ResourceKind::Tickets, String::new(), false)]
+        );
+        assert!(!core.ticket_listing().connected);
+        assert_eq!(core.ticket_listing().tickets.len(), 1);
+    }
+
+    #[test]
     fn a_removed_session_is_removed_and_its_collection_changed() {
         let (mut core, pid, ids) =
             with_records(&[SessionKind::Shell, SessionKind::Shell], |_| None);

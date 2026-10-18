@@ -8,6 +8,10 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+
+- The remote port serves Dispatch's tickets: a listing with each ticket's standing and decisions, one ticket with its body, attempts and lanes, and under the control scope a decision answered or a parked ticket resumed. The headset gets a Tickets tab on it.
+
 ### Changed
 
 - The headset's conversation view follows the end as a mode: it is held at the end, nothing growing under it can leave it behind, and a button at the right edge releases it for reading; the ellipsis at the foot returns it to following. Before, a new turn that began with a tool call could push the end off screen and switch following off, and the view could jump up to the turn it last held at the top.

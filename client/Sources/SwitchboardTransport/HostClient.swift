@@ -113,6 +113,10 @@ public protocol HostAPI: Sendable {
     func dictate(_ id: String, _ body: DictationBody) async throws -> Envelope<DraftBody>
     /// A pinned file of a project, whole (§4.3).
     func file(project: String, path: String) async throws -> Envelope<FileBody>
+    func tickets() async throws -> Envelope<TicketsBody>
+    func ticket(_ id: String) async throws -> Envelope<TicketView>
+    func decide(_ ticket: String, _ request: DecideRequest) async throws -> Envelope<DecidedBody>
+    func resumeTicket(_ ticket: String) async throws -> Envelope<TicketResumedBody>
 }
 
 /// One host over HTTPS with the pinning delegate and a bearer token.
@@ -289,6 +293,22 @@ public final class HostClient: HostAPI, @unchecked Sendable {
             .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
             .joined(separator: "/")
         return try await get("projects/\(project)/files/\(escaped)", query: nil)
+    }
+
+    public func tickets() async throws -> Envelope<TicketsBody> {
+        try await get("dispatch/tickets", query: nil)
+    }
+
+    public func ticket(_ id: String) async throws -> Envelope<TicketView> {
+        try await get("dispatch/tickets/\(id)", query: nil)
+    }
+
+    public func decide(_ ticket: String, _ request: DecideRequest) async throws -> Envelope<DecidedBody> {
+        try await post("dispatch/tickets/\(ticket)/decide", json: request)
+    }
+
+    public func resumeTicket(_ ticket: String) async throws -> Envelope<TicketResumedBody> {
+        try await post("dispatch/tickets/\(ticket)/resume", json: [String: String]())
     }
 
     public func runs(_ id: String) async throws -> Envelope<RunsBody> {

@@ -3515,6 +3515,22 @@ Built so far:
   are laid out as grids. A Bonjour resolve that gets no answer is
   given up after 5 s, and each offline host resolves on its own task,
   after the retry loop hung on one resolve left waiting by the system.
+- **Tickets on the headset (2026-10-17).** The port serves Dispatch's
+  tickets from the app's own status poll (`src/core/tickets.rs`, spec
+  §4.7): a listing by project with each ticket's standing worded as the
+  Mac's page words it and its decisions; one ticket with its body,
+  attempts and lanes; `decide` and `resume` under `control`, answered
+  when Dispatch answers the call the Mac's action became
+  (`TicketReply`, the content worker's deferred channel reused). The
+  tickets are one fingerprinted collection, so a device hears one
+  `changed tickets` frame per status that moved. The client lists them
+  on a Tickets tab, oldest first within a project, urgent ones marked,
+  with a detail view that answers decisions (the recommended option
+  first, a note field, several options for a `multiple` one), resumes
+  a parked ticket, and opens the project's supervisor session. Left
+  out for now: close, take, the console, artifacts and events; a
+  worker session is named but not opened, since the plain listing
+  hides worker records.
 - **Pairing by the typed code (2026-10-14).** visionOS gives an app
   no camera, so the QR code is never scanned on the headset. A
   discovered host that is not paired offers Pair on the Servers screen:

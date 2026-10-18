@@ -47,6 +47,17 @@ public struct SessionRef: Hashable, Codable, Sendable {
     }
 }
 
+/// A Dispatch ticket on one host.
+public struct TicketRef: Hashable, Codable, Sendable {
+    public let serverID: ServerID
+    public let ticketID: String
+
+    public init(serverID: ServerID, ticketID: String) {
+        self.serverID = serverID
+        self.ticketID = ticketID
+    }
+}
+
 public struct WorkingSetRef: Hashable, Codable, Sendable {
     public let serverID: ServerID
     public let setID: String

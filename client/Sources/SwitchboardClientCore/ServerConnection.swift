@@ -69,6 +69,8 @@ public struct HostSnapshot: Sendable, Equatable {
     public var spaces: [SpaceView] = []
     public var sets: [SetView] = []
     public var sessions: [SessionView] = []
+    /// Dispatch's tickets, on a host that serves them.
+    public var tickets: TicketsBody?
     public var fetchedAt: Date
 
     public init(epoch: String, revision: UInt64, fetchedAt: Date = Date()) {
@@ -397,9 +399,16 @@ public actor ServerConnection {
                 next.sets.append(contentsOf: reply.body.sets)
             }
         }
+        if servesTickets {
+            let reply = try await api.tickets()
+            apply(.tickets, at: reply.revision) { next.tickets = reply.body }
+        }
         next.revision = held.values.max() ?? 0
         snapshot = next
     }
+
+    /// The host lists Dispatch's tickets; an older one is asked nothing.
+    private var servesTickets: Bool { info?.capabilities.contains("tickets") ?? false }
 
     /// One event against the held revisions: a `changed` past what a
     /// resource was fetched at refetches that resource, a `removed`
@@ -964,6 +973,10 @@ public actor ServerConnection {
         case .waiting:
             // Derived from the sessions, whose own events accompany it.
             return
+        case .tickets:
+            guard servesTickets else { return }
+            let reply = try await api.tickets()
+            apply(key, at: reply.revision) { next.tickets = reply.body }
         case .screen, .conversation, .runs, .runOutput, .draft, .file:
             // Content: read through its own reader, never as a view.
             return
@@ -971,6 +984,105 @@ public actor ServerConnection {
         next.revision = held.values.max() ?? 0
         next.fetchedAt = Date()
         snapshot = next
+    }
+
+    // MARK: Tickets
+
+    /// One ticket with its body, attempts and lanes, or nothing when
+    /// the host has none by that id.
+    public func readTicket(_ id: String) async -> TicketView? {
+        guard let api else { return nil }
+        do {
+            return try await api.ticket(id).body
+        } catch RemoteError.refused(let status, let code, let message) {
+            if status == 401 { handle(.refused(status: status, code: code, message: message)) }
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
+    /// Answer a decision. No answer either way reads the ticket back:
+    /// a decision no longer pending was answered, by this or before,
+    /// and the host answers a repeat of the same answer from its record.
+    public func decide(_ ticket: String, decision: String, answer: String, note: String?) async
+        -> CommandOutcome
+    {
+        guard let api else { return .unanswered("not connected") }
+        do {
+            let reply = try await api.decide(ticket, DecideRequest(decision: decision, answer: answer, note: note))
+            record(reply.body.decision, on: ticket)
+            return .accepted
+        } catch RemoteError.refused(let status, let code, let message) {
+            if status == 401 || (status == 403 && code != "scope") {
+                handle(.refused(status: status, code: code, message: message))
+            }
+            return .refused(message)
+        } catch let error as RemoteError {
+            if case .pinMismatch = error {
+                handle(error)
+                return .unanswered("\(error)")
+            }
+            lastError = "\(error)"
+        } catch {
+            lastError = "\(error)"
+        }
+        if let read = await readTicket(ticket), let d = read.decisions.first(where: { $0.id == decision }), !d.pending {
+            record(d, on: ticket)
+            return .accepted
+        }
+        return .unanswered(lastError ?? "no answer")
+    }
+
+    /// Resume a parked ticket; no answer either way reads it back.
+    public func resumeTicket(_ ticket: String) async -> CommandOutcome {
+        guard let api else { return .unanswered("not connected") }
+        do {
+            let reply = try await api.resumeTicket(ticket)
+            record(reply.body.ticket)
+            return .accepted
+        } catch RemoteError.refused(let status, let code, let message) {
+            if status == 401 || (status == 403 && code != "scope") {
+                handle(.refused(status: status, code: code, message: message))
+            }
+            return .refused(message)
+        } catch let error as RemoteError {
+            if case .pinMismatch = error {
+                handle(error)
+                return .unanswered("\(error)")
+            }
+            lastError = "\(error)"
+        } catch {
+            lastError = "\(error)"
+        }
+        if let read = await readTicket(ticket), read.state != "parked" {
+            record(read)
+            return .accepted
+        }
+        return .unanswered(lastError ?? "no answer")
+    }
+
+    /// A decision as the host recorded it, in place on the held
+    /// listing, so the view moves before the next `changed` frame.
+    private func record(_ decision: TicketDecisionView, on ticket: String) {
+        guard var listing = snapshot?.tickets,
+            let i = listing.tickets.firstIndex(where: { $0.id == ticket }),
+            let j = listing.tickets[i].decisions.firstIndex(where: { $0.id == decision.id })
+        else { return }
+        listing.tickets[i].decisions[j] = decision
+        snapshot?.tickets = listing
+        changed()
+    }
+
+    /// A ticket as the host answered it, in place on the held listing;
+    /// the body and attempts it carries are the summary's alone.
+    private func record(_ ticket: TicketView) {
+        guard var listing = snapshot?.tickets,
+            let i = listing.tickets.firstIndex(where: { $0.id == ticket.id })
+        else { return }
+        listing.tickets[i] = ticket
+        snapshot?.tickets = listing
+        changed()
     }
 
     private func remove(_ key: ResourceKey, at revision: UInt64) {

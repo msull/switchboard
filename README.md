@@ -15,7 +15,7 @@ cargo test --locked --workspace                      # unit + headless UI + tmux
 cargo test --locked -p egui_term --lib               # the vendored terminal widget (outside the workspace)
 cargo clippy --locked --workspace --all-targets -- -D warnings   # lint
 cargo fmt --all                                      # format
-(cd client && swift test)                            # the Swift client's packages, 72 tests (Xcode; not in the hook or CI)
+(cd client && swift test)                            # the Swift client's packages, 75 tests (Xcode; not in the hook or CI)
 (cd client && scripts/sim.sh run)                    # the visionOS app on the simulator (xcodegen; see client/README.md)
 ./scripts/test-times.sh                              # every test timed serially, the slowest ten, the budget checked
 ```
@@ -363,6 +363,7 @@ src/core/
   control.rs             the control port's commands run quietly under an operation id; read models in the wire's shapes; `ready_for_prompt`, the one verdict `session.prompt` and a view's `prompt_refusal` share
   remote.rs              the remote port's state: the host's identity and paired devices as loaded, the pairing window with its code, scope and failure count, a device's scope and revocation
   updates.rs             the app's version and its update: the scheduled check, a newer release offered, downloaded on a click and installed on another; semantic versions, pre-releases never offered
+  tickets.rs             Dispatch's tickets as the remote port says them: each ticket's summary with its standing worded as the Mac's page words it, its decisions, and alone its body, attempts and lanes; one value for the port's fingerprint and its replies
   revision.rs            the read-model fingerprints behind the remote port's revision: every exported view hashed with its time-derived fields held still, and the `changed`/`removed` diff between two passes (and a record's runs as the `runs` collection)
   diff.rs                a changed file's diff as held per ticket, lane and path, when a re-read is due, which unchanged runs fold
   dispatch.rs            Dispatch as the app shows it: the runner's last status as views, decisions answered as calls, a ticket's events and full view read once per change and its timeline, a project's supervisor chip, the console session

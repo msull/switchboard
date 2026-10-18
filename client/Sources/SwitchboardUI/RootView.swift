@@ -93,6 +93,11 @@ public struct RootView: View {
             }
             .tabItem { Label("Sessions", systemImage: "rectangle.grid.2x2") }
             NavigationStack {
+                TicketsView(model: model)
+                    .navigationTitle("Tickets")
+            }
+            .tabItem { Label("Tickets", systemImage: "checklist") }
+            NavigationStack {
                 ServersView(model: model)
                     .navigationTitle("Hosts")
             }
