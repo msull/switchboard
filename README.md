@@ -15,7 +15,7 @@ cargo test --locked --workspace                      # unit + headless UI + tmux
 cargo test --locked -p egui_term --lib               # the vendored terminal widget (outside the workspace)
 cargo clippy --locked --workspace --all-targets -- -D warnings   # lint
 cargo fmt --all                                      # format
-(cd client && swift test)                            # the Swift client's packages, 75 tests (Xcode; not in the hook or CI)
+(cd client && swift test)                            # the Swift client's packages, 77 tests (Xcode; not in the hook or CI)
 (cd client && scripts/sim.sh run)                    # the visionOS app on the simulator (xcodegen; see client/README.md)
 ./scripts/test-times.sh                              # every test timed serially, the slowest ten, the budget checked
 ```

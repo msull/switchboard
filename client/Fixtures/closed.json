@@ -1,0 +1,31 @@
+{
+  "body": {
+    "ticket": {
+      "closable": false,
+      "created_ms": 3,
+      "current_session": null,
+      "decisions": [],
+      "id": "t3",
+      "kind": "manual",
+      "labels": [],
+      "number": null,
+      "project": "Orchard",
+      "reason": "closed by hand",
+      "root_project": null,
+      "stage": "investigate",
+      "stages": [
+        "investigate"
+      ],
+      "standing": "closing: closed by hand",
+      "state": "closing",
+      "title": "Parked one",
+      "updated_ms": 40,
+      "urgent": true,
+      "url": null,
+      "waiting_for": null,
+      "waits": false
+    }
+  },
+  "epoch": "741e8acb-99af-4205-b7f6-908d0d0c00c2",
+  "revision": 13
+}

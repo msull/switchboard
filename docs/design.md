@@ -3527,10 +3527,21 @@ Built so far:
   on a Tickets tab, oldest first within a project, urgent ones marked,
   with a detail view that answers decisions (the recommended option
   first, a note field, several options for a `multiple` one), resumes
-  a parked ticket, and opens the project's supervisor session. Left
-  out for now: close, take, the console, artifacts and events; a
-  worker session is named but not opened, since the plain listing
-  hides worker records.
+  a parked ticket, and opens the project's supervisor session.
+  The next day (2026-10-18) the attempts' files came: each attempt
+  lists its artifacts, checks log, review rounds' files and evidence
+  by a key that stands for the path, the port reads one as text
+  through the Mac's own artifact read (from its cache while the ticket
+  stands) or as an image from the disk, serves the ticket's events
+  from the Mac's cache, and takes `close`; `info` lists `evidence` for
+  it. The client's list is ordered last-moved-first with a menu for
+  the order (waiting first, newest, by project), the hosts, projects
+  and states (closed hidden unless asked), and a "waiting on me"
+  switch; the detail shows each attempt's checks and rounds with a
+  button per readable file, a Notes shortcut to the newest notes, a
+  timeline, and Close. Left out for now: take, the console, the plan
+  review's feedback flow; a worker session is named but not opened,
+  since the plain listing hides worker records.
 - **Pairing by the typed code (2026-10-14).** visionOS gives an app
   no camera, so the QR code is never scanned on the headset. A
   discovered host that is not paired offers Pair on the Servers screen:

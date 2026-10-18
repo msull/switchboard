@@ -64,12 +64,35 @@ fn port_with(host: FakeHost, secrets: FakeSecrets, remote: FakeRemoteStore) -> P
 /// A port whose Dispatch runner answers `status`, which the app is
 /// handed as its last poll.
 fn port_dispatching(status: switchboard::ports::dispatch::Status) -> Port {
+    use switchboard::ports::dispatch::EventView;
     let mut port = port_built(
         FakeHost::default(),
         FakeSecrets::default(),
         FakeRemoteStore::default(),
         FakeDispatch {
             status: Some(status.clone()),
+            artifacts: [(NOTES_PATH.into(), "Found it: one file each.\n".to_owned())]
+                .into_iter()
+                .collect(),
+            events: vec![
+                EventView {
+                    seq: 1,
+                    at_ms: 3,
+                    stage: "investigate".into(),
+                    kind: "stage".into(),
+                    text: "queued → investigate".into(),
+                    ..EventView::default()
+                },
+                EventView {
+                    seq: 2,
+                    at_ms: 3,
+                    stage: "investigate".into(),
+                    kind: "attempt-started".into(),
+                    text: "root #1 agent".into(),
+                    attempt: Some(("investigate".into(), 1)),
+                    ..EventView::default()
+                },
+            ],
             ..FakeDispatch::default()
         },
     );
@@ -1573,6 +1596,16 @@ fn write_fixtures(dir: &std::path::Path) {
     }
 }
 
+/// The fixture ticket's notes, read by the key its listing gave.
+fn ticket_file_fixture(port: &mut Port, t: Option<&str>) -> serde_json::Value {
+    let (_, ticket) = get(port, "/api/v1/dispatch/tickets/t1", t);
+    let key = ticket["body"]["attempts"][0]["files"][0]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    get(port, &format!("/api/v1/dispatch/tickets/t1/files/{key}"), t).1
+}
+
 /// A pinned file of a project with a root on disk, read.
 fn file_fixture(port: &mut Port, space: &str, token: &str) -> serde_json::Value {
     let root = tempfile::Builder::new()
@@ -1668,6 +1701,12 @@ fn content_fixtures(
             )
             .1,
         ),
+        ("ticket_events", get(port, "/api/v1/dispatch/tickets/t1/events", t).1),
+        ("ticket_file", ticket_file_fixture(port, t)),
+        (
+            "closed",
+            call(port, "POST", "/api/v1/dispatch/tickets/t3/close", t, "{}").1,
+        ),
         ("op_status", get(port, "/api/v1/ops/fixture-send", t).1),
         (
             "draft",
@@ -1743,6 +1782,12 @@ fn the_client_fixtures_decode_on_both_sides() {
     assert_eq!(ticket["body"]["attempts"][0]["n"], 1);
     let decided = read("decided");
     assert_eq!(decided["body"]["decision"]["id"], "d1");
+    let events = read("ticket_events");
+    assert_eq!(events["body"]["events"][0]["kind"], "stage");
+    let file = read("ticket_file");
+    assert!(file["body"]["text"].is_string());
+    let closed = read("closed");
+    assert_eq!(closed["body"]["ticket"]["state"], "closing");
     let draft = read("draft");
     assert_eq!(draft["body"]["draft"]["text"], "Fix the test. and run");
     assert_eq!(draft["body"]["draft"]["status"], "listening");
@@ -2053,9 +2098,27 @@ fn listed(port: &mut Port, path: &str, token: &str, key: &str) -> Vec<String> {
 /// on `t1`, one answered and one needing a note on `t2`, and `t3`
 /// parked; `Orchard` has a supervisor session.
 #[allow(clippy::too_many_lines)] // one status whole, read as the runner would answer it
+/// The notes of the fixture ticket's first attempt, which the fake
+/// Dispatch answers a read of.
+const NOTES_PATH: &str = "/dispatch/tickets/t1/investigate/1/root/notes.md";
+/// A screenshot in the fixture ticket's evidence, written to the disk
+/// so the port reads it as the real runner's would be.
+const SHOT_PATH: &str = "/tmp/switchboard-remote-tests/shot.png";
+const SHOT_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nnot really a picture";
+
+#[allow(clippy::too_many_lines)]
 fn tickets_status() -> switchboard::ports::dispatch::Status {
     use switchboard::ports::dispatch::{
-        AttemptView, DecisionView, LaneView, ProjectView, Status, SupervisorView, TicketView,
+        AttemptView, ChecksView, DecisionView, EvidenceView, LaneView, ProjectView, Status,
+        SupervisorView, TicketView,
+    };
+    std::fs::create_dir_all("/tmp/switchboard-remote-tests").unwrap();
+    std::fs::write(SHOT_PATH, SHOT_BYTES).unwrap();
+    let evidence = |rel: &str, path: &str, bytes: u64| EvidenceView {
+        path: path.into(),
+        rel: rel.into(),
+        bytes,
+        modified_ms: 4,
     };
     let decision = |id: &str, ticket: &str, name: &str, options: &[&str]| DecisionView {
         id: id.into(),
@@ -2135,9 +2198,31 @@ fn tickets_status() -> switchboard::ports::dispatch::Status {
                 attempts: vec![AttemptView {
                     stage: "investigate".into(),
                     n: 1,
+                    context: "root".into(),
                     kind: "agent".into(),
                     state: "complete".into(),
                     session: Some("worker-session-id".into()),
+                    artifacts: vec![
+                        ("notes".into(), NOTES_PATH.into()),
+                        (
+                            "token".into(),
+                            "/dispatch/tickets/t1/investigate/1/root/token".into(),
+                        ),
+                    ],
+                    secret: vec!["token".into()],
+                    checks: Some(ChecksView {
+                        head: "abc1234".into(),
+                        exit: Some(0),
+                        log: "/dispatch/tickets/t1/investigate/1/root/checks.log".into(),
+                    }),
+                    evidence: vec![
+                        evidence(
+                            "probe.log",
+                            "/dispatch/tickets/t1/investigate/1/root/evidence/probe.log",
+                            12,
+                        ),
+                        evidence("shot.png", SHOT_PATH, SHOT_BYTES.len() as u64),
+                    ],
                     started_ms: 3,
                     ended_ms: Some(4),
                     ..AttemptView::default()
@@ -2155,6 +2240,7 @@ fn tickets_status() -> switchboard::ports::dispatch::Status {
                 state: "parked".into(),
                 reason: Some("owner's call".into()),
                 stages: vec!["investigate".into()],
+                closable: true,
                 created_ms: 3,
                 updated_ms: 40,
                 ..TicketView::default()
@@ -2265,6 +2351,116 @@ fn a_decision_is_answered_under_control_and_checked_against_the_record() {
     let (_, reply) = get(&mut port, "/api/v1/dispatch/tickets", t);
     let standing = reply["body"]["tickets"][0]["standing"].as_str().unwrap();
     assert!(standing.starts_with("held:"), "{standing}");
+}
+
+#[test]
+fn a_tickets_files_are_listed_by_key_and_read_through_the_port() {
+    use base64::Engine as _;
+    let mut port = port_dispatching(tickets_status());
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    let (status, reply) = get(&mut port, "/api/v1/dispatch/tickets/t1", t);
+    assert_eq!(status, 200, "{reply}");
+    let attempt = &reply["body"]["attempts"][0];
+    assert_eq!(attempt["checks"]["exit"], 0);
+    let files = attempt["files"].as_array().unwrap();
+    let names: Vec<&str> = files.iter().map(|f| f["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        ["notes", "token", "checks", "probe.log", "shot.png"],
+        "artifacts, the checks log, then the evidence"
+    );
+    let kinds: Vec<&str> = files.iter().map(|f| f["kind"].as_str().unwrap()).collect();
+    assert_eq!(
+        kinds,
+        ["artifact", "secret", "checks", "evidence", "evidence"]
+    );
+    assert_eq!(files[1]["inline"], false, "a secret artifact is never read");
+    assert_eq!(files[4]["image"], true);
+    assert_eq!(files[3]["bytes"], 12);
+    let key = |i: usize| files[i]["key"].as_str().unwrap().to_owned();
+    assert!(
+        files.iter().all(|f| f.get("path").is_none()),
+        "paths stay on the Mac"
+    );
+
+    // Text comes through the Mac's own read of Dispatch's port.
+    let read = format!("/api/v1/dispatch/tickets/t1/files/{}", key(0));
+    let (status, reply) = get(&mut port, &read, t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["key"], key(0));
+    assert_eq!(reply["body"]["text"], "Found it: one file each.\n");
+    // Again, from the cache: the ticket has not changed.
+    let (status, reply) = get(&mut port, &read, t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["text"], "Found it: one file each.\n");
+
+    // The fake has no text for the checks log: the runner's refusal.
+    let read = format!("/api/v1/dispatch/tickets/t1/files/{}", key(2));
+    let (status, reply) = get(&mut port, &read, t);
+    assert_eq!((status, code(&reply)), (404, "not_found"), "{reply}");
+    let read = format!("/api/v1/dispatch/tickets/t1/files/{}", key(1));
+    let (status, reply) = get(&mut port, &read, t);
+    assert_eq!((status, code(&reply)), (415, "not_text"), "{reply}");
+
+    // An image comes from the disk, as base64 with its media type.
+    let read = format!("/api/v1/dispatch/tickets/t1/files/{}", key(4));
+    let (status, reply) = get(&mut port, &read, t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["media"], "image/png");
+    let data = reply["body"]["data"].as_str().unwrap();
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .unwrap(),
+        SHOT_BYTES
+    );
+    let (status, reply) = get(&mut port, "/api/v1/dispatch/tickets/t1/files/nope", t);
+    assert_eq!((status, code(&reply)), (404, "not_found"), "{reply}");
+}
+
+#[test]
+fn a_tickets_events_are_read_and_a_closable_ticket_is_closed() {
+    let mut port = port_dispatching(tickets_status());
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    let events = "/api/v1/dispatch/tickets/t1/events";
+    let (status, reply) = get(&mut port, events, t);
+    assert_eq!(status, 200, "{reply}");
+    let listed = reply["body"]["events"].as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[1]["text"], "root #1 agent");
+    assert_eq!(listed[1]["attempt"], "investigate/1");
+    assert_eq!(reply["body"]["last"], 2);
+    assert_eq!(reply["body"]["unavailable"], false);
+    // Again, from the cache.
+    let (status, reply) = get(&mut port, events, t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["events"].as_array().unwrap().len(), 2);
+    let (status, reply) = get(&mut port, "/api/v1/dispatch/tickets/nope/events", t);
+    assert_eq!((status, code(&reply)), (404, "not_found"), "{reply}");
+
+    // A close needs the control scope and a closable ticket.
+    let close = "/api/v1/dispatch/tickets/t3/close";
+    let (status, reply) = call(&mut port, "POST", close, t, "{}");
+    assert_eq!((status, code(&reply)), (403, "scope"), "{reply}");
+    let id = port.app.core().devices()[0].id;
+    port.app.dispatch(AppAction::SetDeviceScope {
+        device: id,
+        scope: Scope::Control,
+    });
+    let (status, reply) = call(&mut port, "POST", close, t, "{}");
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["ticket"]["id"], "t3");
+    assert_eq!(reply["body"]["ticket"]["state"], "closing");
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        "/api/v1/dispatch/tickets/t1/close",
+        t,
+        "{}",
+    );
+    assert_eq!((status, code(&reply)), (409, "not_closable"), "{reply}");
 }
 
 #[test]

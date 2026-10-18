@@ -10,6 +10,8 @@ public struct PresentationState: Codable, Equatable, Sendable {
     /// How the main window browses, and what it shows.
     public var browse: BrowseMode = .list
     public var filters = Filters()
+    /// The ticket list's filters and order.
+    public var ticketFilters = TicketFilters()
     /// The session focus mode is on, kept by ref so a reorder keeps it.
     public var focused: SessionRef?
 
@@ -31,6 +33,16 @@ public struct PresentationState: Codable, Equatable, Sendable {
     public static let modeCap = 256
 
     public init() {}
+
+    /// A state saved by an older client lacks what was added since.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        modes = try c.decodeIfPresent([UUID: ModeEntry].self, forKey: .modes) ?? [:]
+        browse = try c.decodeIfPresent(BrowseMode.self, forKey: .browse) ?? .list
+        filters = try c.decodeIfPresent(Filters.self, forKey: .filters) ?? Filters()
+        ticketFilters = try c.decodeIfPresent(TicketFilters.self, forKey: .ticketFilters) ?? TicketFilters()
+        focused = try c.decodeIfPresent(SessionRef.self, forKey: .focused)
+    }
 
     public mutating func setMode(_ mode: ViewMode, for window: UUID, at: Date = Date()) {
         modes[window] = ModeEntry(mode: mode, at: at, place: modes[window]?.place)

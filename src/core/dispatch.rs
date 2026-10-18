@@ -759,7 +759,8 @@ impl AppCore {
 
     /// Whether the text held for `path` was read at the ticket's
     /// `updated_ms`, or at a time that cannot be compared with it.
-    fn artifact_current(&self, path: &std::path::Path, updated_ms: Option<u64>) -> bool {
+    #[must_use]
+    pub fn artifact_current(&self, path: &std::path::Path, updated_ms: Option<u64>) -> bool {
         self.dispatch.artifacts.contains_key(path)
             && match (
                 self.dispatch.artifacts_at.get(path).copied().flatten(),

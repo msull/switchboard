@@ -247,6 +247,9 @@ pub struct FakeDispatch {
     pub events: Vec<EventView>,
     /// The paths a single-ticket reply carries.
     pub paths: PathsView,
+    /// The text an artifact read answers, by path; any other path is
+    /// `no such file`.
+    pub artifacts: HashMap<PathBuf, String>,
 }
 
 impl DispatchPort for FakeDispatch {
@@ -296,7 +299,10 @@ impl DispatchPort for FakeDispatch {
                     withdrawn: Vec::new(),
                 })
             }
-            DispatchBody::Artifact { .. } => DispatchReply::failed("no such file"),
+            DispatchBody::Artifact { path, .. } => self.artifacts.get(path).map_or_else(
+                || DispatchReply::failed("no such file"),
+                |text| DispatchReply::Artifact { text: text.clone() },
+            ),
             DispatchBody::Decide {
                 ticket, decision, ..
             } => status

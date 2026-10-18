@@ -1,0 +1,32 @@
+{
+  "body": {
+    "events": [
+      {
+        "at_ms": 3,
+        "attempt": null,
+        "decision": null,
+        "head": null,
+        "kind": "stage",
+        "seq": 1,
+        "stage": "investigate",
+        "text": "queued → investigate",
+        "url": null
+      },
+      {
+        "at_ms": 3,
+        "attempt": "investigate/1",
+        "decision": null,
+        "head": null,
+        "kind": "attempt-started",
+        "seq": 2,
+        "stage": "investigate",
+        "text": "root #1 agent",
+        "url": null
+      }
+    ],
+    "last": 2,
+    "unavailable": false
+  },
+  "epoch": "741e8acb-99af-4205-b7f6-908d0d0c00c2",
+  "revision": 13
+}

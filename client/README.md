@@ -8,7 +8,7 @@ targets visionOS 26.
 
 ```sh
 swift build                      # every target
-swift test                       # 75 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
+swift test                       # 77 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -63,11 +63,14 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   with the unified store, filters and the cross-host order; its loop
   only retries hosts that are not connected.
 - `SwitchboardUI`: `RootView` (the main window's tabs), `BrowserView`,
-  `TicketsView` (Dispatch's tickets from every host, the ones waiting on
-  you first; a ticket opens on its decisions, each answered with a tap,
-  the recommended option marked and a note where an answer needs one, its
-  body, attempts and lanes, Resume for a parked one, and the project's
-  supervisor session),
+  `TicketsView` (Dispatch's tickets from every host, last moved first,
+  with a menu for the order and the filters; a ticket opens on its
+  decisions, each answered with a tap, the recommended option marked and
+  a note where an answer needs one, its body, attempts with their checks,
+  rounds and a button per file the port reads, lanes, a timeline, Resume
+  for a parked one, Close, and the project's supervisor session; a file
+  opens as the agent's markdown, a monospaced block or a picture),
+  `Ago` (a host's timestamp as `4m`, `2h`),
   `SessionCardView`, `SourceLabel` and `ServersView` (known and
   discovered hosts; a discovered one pairs through `PairSheet`, which
   shows the key it presents for the owner to check against the host's

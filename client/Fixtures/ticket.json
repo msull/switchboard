@@ -2,12 +2,75 @@
   "body": {
     "attempts": [
       {
-        "context": "",
+        "checks": {
+          "exit": 0,
+          "head": "abc1234"
+        },
+        "context": "root",
         "ended_ms": 4,
+        "evidence_swept_ms": null,
+        "files": [
+          {
+            "bytes": null,
+            "image": false,
+            "inline": true,
+            "key": "567fb820f2379768",
+            "kind": "artifact",
+            "modified_ms": null,
+            "n": 1,
+            "name": "notes",
+            "stage": "investigate"
+          },
+          {
+            "bytes": null,
+            "image": false,
+            "inline": false,
+            "key": "21e6134614b19964",
+            "kind": "secret",
+            "modified_ms": null,
+            "n": 1,
+            "name": "token",
+            "stage": "investigate"
+          },
+          {
+            "bytes": null,
+            "image": false,
+            "inline": true,
+            "key": "4342aa39b3cb0d82",
+            "kind": "checks",
+            "modified_ms": null,
+            "n": 1,
+            "name": "checks",
+            "stage": "investigate"
+          },
+          {
+            "bytes": 12,
+            "image": false,
+            "inline": true,
+            "key": "d8eefa1744e3f25d",
+            "kind": "evidence",
+            "modified_ms": 4,
+            "n": 1,
+            "name": "probe.log",
+            "stage": "investigate"
+          },
+          {
+            "bytes": 28,
+            "image": true,
+            "inline": false,
+            "key": "c07680fcc4fae99a",
+            "kind": "evidence",
+            "modified_ms": 4,
+            "n": 1,
+            "name": "shot.png",
+            "stage": "investigate"
+          }
+        ],
         "kind": "agent",
         "n": 1,
         "pr": null,
         "reason": null,
+        "rounds": [],
         "session": "worker-session-id",
         "stage": "investigate",
         "started_ms": 3,
@@ -69,6 +132,6 @@
     "waiting_for": null,
     "waits": true
   },
-  "epoch": "587f987f-7f49-43bb-a01b-ec4ef5b769f0",
+  "epoch": "741e8acb-99af-4205-b7f6-908d0d0c00c2",
   "revision": 13
 }

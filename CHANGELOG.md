@@ -11,6 +11,7 @@ and the versions follow [Semantic Versioning](https://semver.org).
 ### Added
 
 - The remote port serves Dispatch's tickets: a listing with each ticket's standing and decisions, one ticket with its body, attempts and lanes, and under the control scope a decision answered or a parked ticket resumed. The headset gets a Tickets tab on it.
+- The headset reads what each stage produced: every attempt lists its notes and other artifacts, its checks log, its review rounds' findings and responses and its evidence, each opened with a tap as text or as a picture; a ticket's timeline is read from the runner's event log; and a closable ticket can be closed. The ticket list is ordered last moved first, with a menu for the order (waiting first, newest, by project), the hosts, projects and states (closed hidden unless asked) and a "waiting on me" switch.
 
 ### Changed
 

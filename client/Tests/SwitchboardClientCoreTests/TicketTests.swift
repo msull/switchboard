@@ -43,8 +43,12 @@ final class TicketTests: XCTestCase {
         let hostA = FakeHost(serverID: a, name: "Desk", spki: "ka")
         let hostB = FakeHost(serverID: b, name: "Laptop", spki: "kb")
         hostA.set {
-            $0.capabilities = ["read", "control", "draft", "scope", "tickets"]
+            $0.capabilities = ["read", "control", "draft", "scope", "tickets", "evidence"]
             $0.tickets = listing()
+            $0.ticketFiles = ["k-notes": TicketFileBody(key: "k-notes", text: "Found it.")]
+            $0.ticketEvents = ["t1": TicketEventsBody(events: [
+                TicketEventView(seq: 1, atMs: 3, stage: "investigate", kind: "stage", text: "queued → investigate"),
+            ], last: 1)]
         }
         network.hosts = [addrA: hostA, addrB: hostB]
         let manager = ConnectionManager(
@@ -123,6 +127,76 @@ final class TicketTests: XCTestCase {
         XCTAssertEqual(resumed, .accepted)
         let active = await settle(manager) { $0.tickets.first { $0.ticket.id == "t3" }?.ticket.state == "active" }
         XCTAssertTrue(active, "the listing moves at once")
+    }
+
+    func testTheListIsFilteredAndOrderedAsTheFiltersSay() async throws {
+        let (manager, _, _) = try await twoHosts()
+        let store = await manager.store
+        var filters = TicketFilters()
+        XCTAssertEqual(filters.apply(store.tickets).map(\.ticket.id), ["t3", "t2", "t1"], "last moved first")
+        filters.sort = .waiting
+        XCTAssertEqual(filters.apply(store.tickets).map(\.ticket.id), ["t2", "t3", "t1"])
+        filters.sort = .created
+        XCTAssertEqual(filters.apply(store.tickets).map(\.ticket.id), ["t3", "t2", "t1"])
+        filters.sort = .recent
+        filters.waitingOnly = true
+        XCTAssertEqual(filters.apply(store.tickets).map(\.ticket.id), ["t2"])
+        filters = TicketFilters()
+        filters.states = ["parked"]
+        XCTAssertEqual(filters.apply(store.tickets).map(\.ticket.id), ["t3"])
+
+        // A closed ticket is hidden until closed is asked for.
+        var closed = store.tickets
+        closed.append(UnifiedTicket(
+            ref: TicketRef(serverID: a, ticketID: "t4"),
+            ticket: TicketView(id: "t4", project: "Orchard", title: "Done", state: "closed", updatedMs: 99),
+            serverName: "Desk", stale: false, supervisor: nil))
+        filters = TicketFilters()
+        XCTAssertEqual(filters.apply(closed).map(\.ticket.id), ["t3", "t2", "t1"])
+        filters.states = ["closed"]
+        XCTAssertEqual(filters.apply(closed).map(\.ticket.id), ["t4"])
+        let choices = TicketFilterChoices(store: store)
+        XCTAssertEqual(choices.projects, ["Orchard"])
+        XCTAssertEqual(choices.states, ["active", "parked"])
+        XCTAssertEqual(choices.hosts.map(\.name), ["Desk"], "only hosts with tickets")
+
+        // The filters survive a save by an older client's state.
+        let data = try JSONEncoder().encode(filters)
+        XCTAssertEqual(try JSONDecoder().decode(TicketFilters.self, from: data), filters)
+        let older = try JSONDecoder().decode(TicketFilters.self, from: Data("{}".utf8))
+        XCTAssertEqual(older, TicketFilters())
+    }
+
+    func testAFileAndTheEventsAreReadAndATicketIsClosed() async throws {
+        let (manager, hostA, _) = try await twoHosts()
+        let ref = TicketRef(serverID: a, ticketID: "t1")
+        let hosts = await manager.evidenceHosts
+        XCTAssertEqual(hosts, [a])
+        let file = try await manager.readTicketFile(ref, key: "k-notes")
+        XCTAssertEqual(file.text, "Found it.")
+        do {
+            _ = try await manager.readTicketFile(ref, key: "nope")
+            XCTFail("a missing file is refused")
+        } catch RemoteError.refused(let status, _, _) {
+            XCTAssertEqual(status, 404)
+        }
+        let events = try await manager.readTicketEvents(ref)
+        XCTAssertEqual(events.events.map(\.text), ["queued → investigate"])
+        XCTAssertEqual(events.last, 1)
+
+        // A close on a ticket the host marks closable; another is refused.
+        hostA.set {
+            $0.tickets?.tickets[2] = TicketView(
+                id: "t3", project: "Orchard", kind: "manual", title: "Parked one", state: "parked",
+                standing: "parked", closable: true, createdMs: 3, updatedMs: 30)
+        }
+        let refused = await manager.closeTicket(ref)
+        XCTAssertEqual(refused, .refused("the ticket is active"))
+        let closed = await manager.closeTicket(TicketRef(serverID: a, ticketID: "t3"))
+        XCTAssertEqual(closed, .accepted)
+        let closing = await settle(manager) { $0.tickets.first { $0.ticket.id == "t3" }?.ticket.state == "closing" }
+        XCTAssertTrue(closing, "the listing moves at once")
+        XCTAssertTrue(hostA.calls.contains("close_ticket"))
     }
 
     /// Pump the manager until `check` holds on its store, or a second passes.
