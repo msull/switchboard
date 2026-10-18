@@ -30,6 +30,36 @@ public struct UnifiedSet: Identifiable, Sendable, Equatable {
     public var id: WorkingSetRef { ref }
 }
 
+/// One Dispatch ticket with its source, and the session of its
+/// project's supervisor when the host names one.
+public struct UnifiedTicket: Identifiable, Sendable, Equatable, Hashable {
+    public let ref: TicketRef
+    public let ticket: TicketView
+    public let serverName: String
+    public let stale: Bool
+    public let supervisor: SessionRef?
+
+    public var id: TicketRef { ref }
+
+    public init(ref: TicketRef, ticket: TicketView, serverName: String, stale: Bool, supervisor: SessionRef?) {
+        self.ref = ref
+        self.ticket = ticket
+        self.serverName = serverName
+        self.stale = stale
+        self.supervisor = supervisor
+    }
+
+    public static func == (lhs: UnifiedTicket, rhs: UnifiedTicket) -> Bool {
+        lhs.ref == rhs.ref && lhs.ticket == rhs.ticket && lhs.serverName == rhs.serverName
+            && lhs.stale == rhs.stale && lhs.supervisor == rhs.supervisor
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(ref)
+        hasher.combine(ticket.updatedMs)
+    }
+}
+
 /// One host as the server screen lists it.
 public struct HostStatus: Identifiable, Sendable, Equatable {
     public let server: KnownServer
@@ -105,6 +135,11 @@ public struct UnifiedStore: Sendable, Equatable {
     public var hosts: [HostStatus] = []
     public var sessions: [UnifiedSession] = []
     public var sets: [UnifiedSet] = []
+    /// Every host's tickets: the ones waiting on the owner first, then
+    /// the host's own order (by project, oldest first).
+    public var tickets: [UnifiedTicket] = []
+    /// The hosts that serve tickets and whose runner answered last.
+    public var dispatchHosts: [ServerID] = []
 
     public init() {}
 
@@ -138,7 +173,22 @@ public struct UnifiedStore: Sendable, Equatable {
                         ref: WorkingSetRef(serverID: server.id, setID: set.id), set: set,
                         serverName: label, stale: stale))
             }
+            if let listing = snapshot.tickets {
+                if listing.connected { store.dispatchHosts.append(server.id) }
+                for ticket in listing.tickets {
+                    let supervisor = listing.projects.first { $0.name == ticket.project }?.supervisorSession
+                    store.tickets.append(
+                        UnifiedTicket(
+                            ref: TicketRef(serverID: server.id, ticketID: ticket.id), ticket: ticket,
+                            serverName: label, stale: stale,
+                            supervisor: supervisor.map { SessionRef(serverID: server.id, recordID: $0) }))
+                }
+            }
         }
+        store.tickets = store.tickets.enumerated().sorted { a, b in
+            if a.element.ticket.waits != b.element.ticket.waits { return a.element.ticket.waits }
+            return a.offset < b.offset
+        }.map(\.element)
         store.sessions = UnifiedOrder.sort(store.sessions)
         store.sets.sort { ($0.serverName, $0.set.name, $0.ref.setID) < ($1.serverName, $1.set.name, $1.ref.setID) }
         return store
@@ -391,6 +441,24 @@ public actor ConnectionManager {
     /// Answer Claude Code's folder question with yes.
     public func trust(_ ref: SessionRef) async -> CommandOutcome {
         await connections[ref.serverID]?.command(ref.recordID, .trust) ?? .unanswered("no host")
+    }
+
+    /// One ticket read alone.
+    public func readTicket(_ ref: TicketRef) async -> TicketView? {
+        await connections[ref.serverID]?.readTicket(ref.ticketID)
+    }
+
+    /// Answer a ticket's decision.
+    public func decide(_ ref: TicketRef, decision: String, answer: String, note: String?) async
+        -> CommandOutcome
+    {
+        await connections[ref.serverID]?.decide(ref.ticketID, decision: decision, answer: answer, note: note)
+            ?? .unanswered("no host")
+    }
+
+    /// Resume a parked ticket.
+    public func resumeTicket(_ ref: TicketRef) async -> CommandOutcome {
+        await connections[ref.serverID]?.resumeTicket(ref.ticketID) ?? .unanswered("no host")
     }
 
     public func readTurn(_ ref: SessionRef, n: Int) async {

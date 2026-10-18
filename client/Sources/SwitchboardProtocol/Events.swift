@@ -103,6 +103,8 @@ public enum ResourceKey: Hashable, Sendable {
     /// A pinned file of a project, a content key; the wire id is
     /// `project/path`.
     case file(project: String, path: String)
+    /// Dispatch's tickets, one collection, refetched whole on `changed`.
+    case tickets
 
     /// The `kind` and `id` a frame names for this key.
     public var wire: (kind: String, id: String) {
@@ -122,6 +124,7 @@ public enum ResourceKey: Hashable, Sendable {
         case .runOutput(let session, let run): return ("run_output", "\(session)/\(run)")
         case .draft(let session): return ("draft", session)
         case .file(let project, let path): return ("file", "\(project)/\(path)")
+        case .tickets: return ("tickets", "")
         }
     }
 
@@ -151,6 +154,7 @@ public enum ResourceKey: Hashable, Sendable {
         case "conversation": self = .conversation(session: ref.id)
         case "runs": self = .runs(session: ref.id)
         case "draft": self = .draft(session: ref.id)
+        case "tickets": self = .tickets
         case "file":
             guard let slash = ref.id.firstIndex(of: "/") else { return nil }
             self = .file(

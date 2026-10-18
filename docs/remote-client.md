@@ -181,6 +181,10 @@ Each host is authoritative for its own resources. The client aggregates views wi
 | POST | `/api/v1/sessions/{id}/draft` | `session.draft` | control |
 | POST | `/api/v1/sessions/{id}/dictation` | `session.dictation` | control |
 | GET | `/api/v1/ops/{op}` | `op.status` | read |
+| GET | `/api/v1/dispatch/tickets` | new: the core's `TicketListing` (§4.7) | read |
+| GET | `/api/v1/dispatch/tickets/{id}` | new: `TicketDetail` | read |
+| POST | `/api/v1/dispatch/tickets/{id}/decide` | new: the Mac's `DispatchDecide` | control |
+| POST | `/api/v1/dispatch/tickets/{id}/resume` | new: the Mac's `DispatchResume` | control |
 | GET | `/api/v1/events` | WebSocket upgrade | read |
 
 Everything else on the wire is **refused before translation**, by an allowlist, not a denylist: `env.resolve` returns secret values; the `env.*` writes, `definition.install`, `project.add`, `project.root`, `set.sync`, `workflow.*`, `dispatch.runner`, `session.kill` and `session.remove` change what runs on the host or what it keeps. v1 remote is the table above and nothing more.
@@ -280,7 +284,13 @@ Because the subscriber is registered on the frame thread before any later pass c
 
 ### 4.6 Dispatch and waiting
 
-"Waiting on you" on a card includes reasons set from outside: Dispatch marks a session through `session.waiting` when one of its tickets needs a decision. `SessionView.waiting_reason` is already on the wire; the client shows it. Answering a Dispatch decision remotely is v2, through Dispatch's own port, not through Switchboard. The `Dispatch · <project>` working sets are ordinary sets to the client.
+"Waiting on you" on a card includes reasons set from outside: Dispatch marks a session through `session.waiting` when one of its tickets needs a decision. `SessionView.waiting_reason` is already on the wire; the client shows it. The `Dispatch · <project>` working sets are ordinary sets to the client.
+
+#### 4.7 Tickets
+
+The ticket view on a device (2026-10-17) reads Dispatch through the Switchboard port, not Dispatch's own socket, which only the Mac reaches: the port serves what the app already holds from its two-second status poll, so a device costs the runner nothing. `GET dispatch/tickets` is the core's `TicketListing` (`src/core/tickets.rs`): `connected` (a runner answered the last poll; without one the tickets are the last seen), the `projects` with a pipeline (slots, running, pending, waiting on me, the queue, the supervisor's session id), and the `tickets` by project then oldest first, never the runner's write order. Each ticket is a summary: source, state and reason, the current stage's name among the `stages`, `standing` worded exactly as the Mac's page words it (`1 waiting on you`, `plan running`, `parked: <reason>`, `held: <why>`), `waits` and `urgent` as the page colours it, `current_session` and `root_project`, and every decision with its question, options, recommendation, `multiple`, state, answer and `needs_note`. `GET dispatch/tickets/{id}` adds the body (bounded at the notes cap), the attempts with the session each ran in and the pull request it is bound to, the lanes by branch, and the holds; paths stay on the Mac. The collection is one resource, `tickets` with an empty id, fingerprinted with everything else: a decision made or answered, a stage moved, or the runner coming or going is one `changed` frame, to every subscriber.
+
+Two commands under `control`, each the Mac's own action and so Dispatch's own call: `decide` takes `{decision, answer, note?}` (the decision's id; for a `multiple` decision the options joined by commas) and is checked against the last status before anything runs (the decision pending, every option among the decision's, a note where the option needs one), and `resume` a parked ticket. The reply is deferred until Dispatch answers the call, through the same channel the content worker answers on: `{decision}` or `{ticket}` on success, the runner's reason as `failed` or `not_found`, `dispatch_off` (503) when no runner answers. A decision already answered as asked is answered again from the record, so a device that lost the reply repeats at no cost; one answered otherwise is `answered` (409). `info` lists `tickets` among the capabilities, and a client treats a host without it as having no tickets.
 
 ## 5. Security and pairing
 

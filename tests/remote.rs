@@ -19,8 +19,8 @@ use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use switchboard::SwitchboardApp;
 use switchboard::adapters::fakes::{
-    self, FakeAdvertiser, FakeHost, FakeOperations, FakeRemoteStore, FakeSecrets, FakeTranscripts,
-    MemoryStore,
+    self, FakeAdvertiser, FakeDispatch, FakeHost, FakeOperations, FakeRemoteStore, FakeSecrets,
+    FakeTranscripts, MemoryStore,
 };
 use switchboard::adapters::remote::{self, MAX_UNAUTHENTICATED, pinned_client};
 use switchboard::app::Services;
@@ -58,6 +58,31 @@ fn port() -> Port {
 }
 
 fn port_with(host: FakeHost, secrets: FakeSecrets, remote: FakeRemoteStore) -> Port {
+    port_built(host, secrets, remote, FakeDispatch::default())
+}
+
+/// A port whose Dispatch runner answers `status`, which the app is
+/// handed as its last poll.
+fn port_dispatching(status: switchboard::ports::dispatch::Status) -> Port {
+    let mut port = port_built(
+        FakeHost::default(),
+        FakeSecrets::default(),
+        FakeRemoteStore::default(),
+        FakeDispatch {
+            status: Some(status.clone()),
+            ..FakeDispatch::default()
+        },
+    );
+    port.app.dispatch(AppAction::DispatchStatus(Some(status)));
+    port
+}
+
+fn port_built(
+    host: FakeHost,
+    secrets: FakeSecrets,
+    remote: FakeRemoteStore,
+    dispatch: FakeDispatch,
+) -> Port {
     let advertiser = FakeAdvertiser::default();
     let transcripts = FakeTranscripts::default();
     let services = Services {
@@ -67,6 +92,7 @@ fn port_with(host: FakeHost, secrets: FakeSecrets, remote: FakeRemoteStore) -> P
         advertiser: Box::new(advertiser.clone()),
         operations: Box::new(FakeOperations::default()),
         transcripts: Arc::new(transcripts.clone()),
+        dispatch: Some(Box::new(dispatch)),
         ..fakes::services()
     };
     let mut app = SwitchboardApp::with_services(services);
@@ -1444,7 +1470,7 @@ fn bonjour_advertises_only_while_the_port_is_on_the_lan() {
 /// port.
 /// Every fixture from a seeded port, written to `dir`.
 fn write_fixtures(dir: &std::path::Path) {
-    let mut port = port();
+    let mut port = port_dispatching(tickets_status());
     let mut scripted = conversation(2);
     scripted.turns[1].final_text = "pong".into();
     port.transcripts.set(Some(scripted));
@@ -1629,6 +1655,19 @@ fn content_fixtures(
             )
             .1,
         ),
+        ("tickets", get(port, "/api/v1/dispatch/tickets", t).1),
+        ("ticket", get(port, "/api/v1/dispatch/tickets/t1", t).1),
+        (
+            "decided",
+            call(
+                port,
+                "POST",
+                "/api/v1/dispatch/tickets/t1/decide",
+                t,
+                r#"{"decision":"d1","answer":"frontend"}"#,
+            )
+            .1,
+        ),
         ("op_status", get(port, "/api/v1/ops/fixture-send", t).1),
         (
             "draft",
@@ -1692,6 +1731,18 @@ fn the_client_fixtures_decode_on_both_sides() {
     let file = read("file");
     assert_eq!(file["body"]["path"], "docs/plan.md");
     assert!(file["body"]["text"].is_string() && file["body"]["size"].is_u64());
+    let tickets = read("tickets");
+    assert_eq!(tickets["body"]["connected"], true);
+    assert_eq!(tickets["body"]["tickets"][0]["id"], "t1");
+    assert_eq!(
+        tickets["body"]["tickets"][0]["decisions"][0]["name"],
+        "lanes"
+    );
+    let ticket = read("ticket");
+    assert!(ticket["body"]["body"].is_string());
+    assert_eq!(ticket["body"]["attempts"][0]["n"], 1);
+    let decided = read("decided");
+    assert_eq!(decided["body"]["decision"]["id"], "d1");
     let draft = read("draft");
     assert_eq!(draft["body"]["draft"]["text"], "Fix the test. and run");
     assert_eq!(draft["body"]["draft"]["status"], "listening");
@@ -1996,6 +2047,266 @@ fn listed(port: &mut Port, path: &str, token: &str, key: &str) -> Vec<String> {
         .iter()
         .map(|v| v["id"].as_str().unwrap().to_owned())
         .collect()
+}
+
+/// Dispatch's last status as a device reads it: a lanes decision open
+/// on `t1`, one answered and one needing a note on `t2`, and `t3`
+/// parked; `Orchard` has a supervisor session.
+#[allow(clippy::too_many_lines)] // one status whole, read as the runner would answer it
+fn tickets_status() -> switchboard::ports::dispatch::Status {
+    use switchboard::ports::dispatch::{
+        AttemptView, DecisionView, LaneView, ProjectView, Status, SupervisorView, TicketView,
+    };
+    let decision = |id: &str, ticket: &str, name: &str, options: &[&str]| DecisionView {
+        id: id.into(),
+        ticket: ticket.into(),
+        stage: "plan".into(),
+        name: name.into(),
+        question: format!("{name}?"),
+        options: options.iter().map(|o| (*o).to_owned()).collect(),
+        state: "pending".into(),
+        made_ms: 10,
+        ..DecisionView::default()
+    };
+    Status {
+        data_dir: "/dispatch".into(),
+        worktrees: "/wt".into(),
+        projects: vec![ProjectView {
+            name: "Orchard".into(),
+            queue: vec!["t1".into(), "t2".into()],
+            slots: 2,
+            waiting_on_me: 1,
+            running: 1,
+            pending: 1,
+            supervisor: Some(SupervisorView {
+                session: Some("sup-session-id".into()),
+                ..SupervisorView::default()
+            }),
+            ..ProjectView::default()
+        }],
+        tickets: vec![
+            TicketView {
+                id: "t2".into(),
+                project: "Orchard".into(),
+                kind: "github".into(),
+                number: Some(9),
+                title: "Roster import".into(),
+                state: "active".into(),
+                stages: vec!["investigate".into(), "plan".into()],
+                stage: 1,
+                decisions: vec![
+                    DecisionView {
+                        state: "answered".into(),
+                        answer: Some("merge".into()),
+                        ..decision("d2", "t2", "merge", &["merge", "park"])
+                    },
+                    DecisionView {
+                        needs_note: vec!["park".into()],
+                        recommendation: Some("rerun".into()),
+                        ..decision("d3", "t2", "rerun", &["rerun", "park"])
+                    },
+                ],
+                created_ms: 2,
+                updated_ms: 20,
+                ..TicketView::default()
+            },
+            TicketView {
+                id: "t1".into(),
+                project: "Orchard".into(),
+                kind: "github".into(),
+                number: Some(104),
+                title: "One file per entry".into(),
+                body: "Each entry in its own file.".into(),
+                url: Some("https://example.invalid/issues/104".into()),
+                state: "active".into(),
+                stages: vec!["investigate".into(), "plan".into()],
+                stage: 1,
+                decisions: vec![DecisionView {
+                    multiple: true,
+                    recommendation: Some("frontend".into()),
+                    ..decision("d1", "t1", "lanes", &["backend", "frontend"])
+                }],
+                lanes: vec![LaneView {
+                    name: "frontend".into(),
+                    branch: "t1-frontend".into(),
+                    chosen: true,
+                    ..LaneView::default()
+                }],
+                attempts: vec![AttemptView {
+                    stage: "investigate".into(),
+                    n: 1,
+                    kind: "agent".into(),
+                    state: "complete".into(),
+                    session: Some("worker-session-id".into()),
+                    started_ms: 3,
+                    ended_ms: Some(4),
+                    ..AttemptView::default()
+                }],
+                current_session: Some("worker-session-id".into()),
+                created_ms: 1,
+                updated_ms: 30,
+                ..TicketView::default()
+            },
+            TicketView {
+                id: "t3".into(),
+                project: "Orchard".into(),
+                kind: "manual".into(),
+                title: "Parked one".into(),
+                state: "parked".into(),
+                reason: Some("owner's call".into()),
+                stages: vec!["investigate".into()],
+                created_ms: 3,
+                updated_ms: 40,
+                ..TicketView::default()
+            },
+        ],
+    }
+}
+
+#[test]
+fn tickets_are_listed_with_their_standing_and_read_alone() {
+    let mut port = port_dispatching(tickets_status());
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    let (status, reply) = get(&mut port, "/api/v1/dispatch/tickets", t);
+    assert_eq!(status, 200, "{reply}");
+    let body = &reply["body"];
+    assert_eq!(body["connected"], true);
+    assert_eq!(body["projects"][0]["supervisor_session"], "sup-session-id");
+    let ids: Vec<&str> = body["tickets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        ["t1", "t2", "t3"],
+        "oldest first, not the runner's order"
+    );
+    let t1 = &body["tickets"][0];
+    assert_eq!(t1["standing"], "1 waiting on you");
+    assert_eq!(
+        (t1["waits"].as_bool(), t1["urgent"].as_bool()),
+        (Some(true), Some(true))
+    );
+    assert_eq!(t1["stage"], "plan");
+    assert_eq!(t1["decisions"][0]["question"], "lanes?");
+    assert!(t1.get("body").is_none(), "the list leaves the body out");
+    let t3 = &body["tickets"][2];
+    assert_eq!(t3["standing"], "parked: owner's call");
+
+    let (status, reply) = get(&mut port, "/api/v1/dispatch/tickets/t1", t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["body"], "Each entry in its own file.");
+    assert_eq!(reply["body"]["attempts"][0]["session"], "worker-session-id");
+    assert_eq!(reply["body"]["lanes"][0]["branch"], "t1-frontend");
+    let (status, reply) = get(&mut port, "/api/v1/dispatch/tickets/nope", t);
+    assert_eq!((status, code(&reply)), (404, "not_found"));
+}
+
+#[test]
+fn a_decision_is_answered_under_control_and_checked_against_the_record() {
+    let mut port = port_dispatching(tickets_status());
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    let decide = "/api/v1/dispatch/tickets/t1/decide";
+    let answer = r#"{"decision":"d1","answer":"frontend"}"#;
+    let (status, reply) = call(&mut port, "POST", decide, t, answer);
+    assert_eq!((status, code(&reply)), (403, "scope"), "{reply}");
+    let id = port.app.core().devices()[0].id;
+    port.app.dispatch(AppAction::SetDeviceScope {
+        device: id,
+        scope: Scope::Control,
+    });
+    let heard = subscribe(&mut port, &token);
+    let (status, reply) = call(&mut port, "POST", decide, t, answer);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["decision"]["id"], "d1");
+
+    // Not among the options; a note where the option needs one; a
+    // decision answered as asked is answered again from the record,
+    // and otherwise refused.
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        decide,
+        t,
+        r#"{"decision":"d1","answer":"ios"}"#,
+    );
+    assert_eq!((status, code(&reply)), (400, "bad_request"), "{reply}");
+    let decide2 = "/api/v1/dispatch/tickets/t2/decide";
+    let park = r#"{"decision":"d3","answer":"park"}"#;
+    let (status, reply) = call(&mut port, "POST", decide2, t, park);
+    assert_eq!((status, code(&reply)), (400, "bad_request"), "{reply}");
+    let noted = r#"{"decision":"d3","answer":"park","note":"later"}"#;
+    let (status, reply) = call(&mut port, "POST", decide2, t, noted);
+    assert_eq!(status, 200, "{reply}");
+    let again = r#"{"decision":"d2","answer":"merge"}"#;
+    let (status, reply) = call(&mut port, "POST", decide2, t, again);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["decision"]["state"], "answered");
+    let other = r#"{"decision":"d2","answer":"park"}"#;
+    let (status, reply) = call(&mut port, "POST", decide2, t, other);
+    assert_eq!((status, code(&reply)), (409, "answered"), "{reply}");
+
+    // The next status answers the lanes question: the listing moved.
+    let mut next = tickets_status();
+    next.tickets[1].decisions[0].state = "answered".into();
+    next.tickets[1].decisions[0].answer = Some("frontend".into());
+    port.app.dispatch(AppAction::DispatchStatus(Some(next)));
+    let kinds = resources(&events(&mut port, &heard));
+    assert!(
+        kinds
+            .iter()
+            .any(|(t, k, _)| t == "changed" && k == "tickets"),
+        "{kinds:?}"
+    );
+    let (_, reply) = get(&mut port, "/api/v1/dispatch/tickets", t);
+    let standing = reply["body"]["tickets"][0]["standing"].as_str().unwrap();
+    assert!(standing.starts_with("held:"), "{standing}");
+}
+
+#[test]
+fn a_parked_ticket_is_resumed_and_without_a_runner_the_tickets_still_read() {
+    let mut port = port_dispatching(tickets_status());
+    let token = pair(&mut port, "ABCD2345", Scope::Control, "Vision Pro");
+    let t = Some(token.as_str());
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        "/api/v1/dispatch/tickets/t3/resume",
+        t,
+        "{}",
+    );
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["ticket"]["id"], "t3");
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        "/api/v1/dispatch/tickets/t1/resume",
+        t,
+        "{}",
+    );
+    assert_eq!((status, code(&reply)), (409, "not_parked"), "{reply}");
+
+    port.app.dispatch(AppAction::DispatchStatus(None));
+    let (status, reply) = get(&mut port, "/api/v1/dispatch/tickets", t);
+    assert_eq!(status, 200);
+    assert_eq!(reply["body"]["connected"], false);
+    assert_eq!(
+        reply["body"]["tickets"].as_array().unwrap().len(),
+        3,
+        "the last seen"
+    );
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        "/api/v1/dispatch/tickets/t3/resume",
+        t,
+        "{}",
+    );
+    assert_eq!((status, code(&reply)), (503, "dispatch_off"), "{reply}");
 }
 
 /// The ids of the `session` frames a subscriber got.

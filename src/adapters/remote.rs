@@ -574,7 +574,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a connection waits for the frame's answer. The frame
 /// answers on its next pass, so this only matters if it has stalled.
-const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 /// The frame drains at most this many requests per pass from a channel
 /// this deep; a full channel answers 503 without reaching the frame.
 pub const DRAIN_PER_PASS: usize = 8;

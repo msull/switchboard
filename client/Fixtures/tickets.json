@@ -1,0 +1,161 @@
+{
+  "body": {
+    "connected": true,
+    "projects": [
+      {
+        "name": "Orchard",
+        "pending": 1,
+        "queue": [
+          "t1",
+          "t2"
+        ],
+        "running": 1,
+        "slots": 2,
+        "supervisor_session": "sup-session-id",
+        "waiting_on_me": 1
+      }
+    ],
+    "tickets": [
+      {
+        "closable": false,
+        "created_ms": 1,
+        "current_session": "worker-session-id",
+        "decisions": [
+          {
+            "answer": null,
+            "answered_by": null,
+            "answered_ms": null,
+            "id": "d1",
+            "made_ms": 10,
+            "multiple": true,
+            "name": "lanes",
+            "needs_note": [],
+            "note": null,
+            "options": [
+              "backend",
+              "frontend"
+            ],
+            "question": "lanes?",
+            "recommendation": "frontend",
+            "stage": "plan",
+            "state": "pending"
+          }
+        ],
+        "id": "t1",
+        "kind": "github",
+        "labels": [],
+        "number": 104,
+        "project": "Orchard",
+        "reason": null,
+        "root_project": null,
+        "stage": "plan",
+        "stages": [
+          "investigate",
+          "plan"
+        ],
+        "standing": "1 waiting on you",
+        "state": "active",
+        "title": "One file per entry",
+        "updated_ms": 30,
+        "urgent": true,
+        "url": "https://example.invalid/issues/104",
+        "waiting_for": null,
+        "waits": true
+      },
+      {
+        "closable": false,
+        "created_ms": 2,
+        "current_session": null,
+        "decisions": [
+          {
+            "answer": "merge",
+            "answered_by": null,
+            "answered_ms": null,
+            "id": "d2",
+            "made_ms": 10,
+            "multiple": false,
+            "name": "merge",
+            "needs_note": [],
+            "note": null,
+            "options": [
+              "merge",
+              "park"
+            ],
+            "question": "merge?",
+            "recommendation": null,
+            "stage": "plan",
+            "state": "answered"
+          },
+          {
+            "answer": null,
+            "answered_by": null,
+            "answered_ms": null,
+            "id": "d3",
+            "made_ms": 10,
+            "multiple": false,
+            "name": "rerun",
+            "needs_note": [
+              "park"
+            ],
+            "note": null,
+            "options": [
+              "rerun",
+              "park"
+            ],
+            "question": "rerun?",
+            "recommendation": "rerun",
+            "stage": "plan",
+            "state": "pending"
+          }
+        ],
+        "id": "t2",
+        "kind": "github",
+        "labels": [],
+        "number": 9,
+        "project": "Orchard",
+        "reason": null,
+        "root_project": null,
+        "stage": "plan",
+        "stages": [
+          "investigate",
+          "plan"
+        ],
+        "standing": "1 waiting on you",
+        "state": "active",
+        "title": "Roster import",
+        "updated_ms": 20,
+        "urgent": true,
+        "url": null,
+        "waiting_for": null,
+        "waits": true
+      },
+      {
+        "closable": false,
+        "created_ms": 3,
+        "current_session": null,
+        "decisions": [],
+        "id": "t3",
+        "kind": "manual",
+        "labels": [],
+        "number": null,
+        "project": "Orchard",
+        "reason": "owner's call",
+        "root_project": null,
+        "stage": "investigate",
+        "stages": [
+          "investigate"
+        ],
+        "standing": "parked: owner's call",
+        "state": "parked",
+        "title": "Parked one",
+        "updated_ms": 40,
+        "urgent": true,
+        "url": null,
+        "waiting_for": null,
+        "waits": false
+      }
+    ]
+  },
+  "epoch": "587f987f-7f49-43bb-a01b-ec4ef5b769f0",
+  "revision": 13
+}

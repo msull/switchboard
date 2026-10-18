@@ -51,6 +51,13 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     /// `(recognizer session, events)` as received.
     var dictations: [(UInt64, [DictationEvent])] = []
     var capabilities = ["read", "control", "draft"]
+    /// Dispatch's tickets; none is a host without the capability.
+    var tickets: TicketsBody?
+    /// Every decide as received, in order.
+    var decides: [(String, DecideRequest)] = []
+    /// Decides get no answer this many times (the answer is still
+    /// recorded on the ticket, as one that reached the host would be).
+    var decideSilences = 0
     /// The pinned files, by `project/path`; a missing one is `not_pinned`.
     var files: [String: FileBody] = [:]
     /// The op of every command, in order.
@@ -303,6 +310,75 @@ final class FakeHost: HostAPI, @unchecked Sendable {
         return try answer("op:\(op)") { OpStatusBody(status: status) }
     }
 
+    func tickets() async throws -> Envelope<TicketsBody> {
+        lock.lock()
+        let held = tickets
+        lock.unlock()
+        guard let held else {
+            throw RemoteError.refused(status: 404, code: "not_found", message: "not available on this port")
+        }
+        return try answer("tickets") { held }
+    }
+
+    func ticket(_ id: String) async throws -> Envelope<TicketView> {
+        lock.lock()
+        let held = tickets?.tickets.first { $0.id == id }
+        lock.unlock()
+        guard let held else {
+            throw RemoteError.refused(status: 404, code: "not_found", message: "no such ticket")
+        }
+        return try answer("ticket") { held }
+    }
+
+    /// The decision answered on the ticket as the host records it,
+    /// then handed back; a silence keeps the record and drops the reply.
+    func decide(_ ticket: String, _ request: DecideRequest) async throws -> Envelope<DecidedBody> {
+        lock.lock()
+        decides.append((ticket, request))
+        guard var held = tickets, let i = held.tickets.firstIndex(where: { $0.id == ticket }),
+            let j = held.tickets[i].decisions.firstIndex(where: { $0.id == request.decision })
+        else {
+            lock.unlock()
+            throw RemoteError.refused(status: 404, code: "not_found", message: "no such decision on the ticket")
+        }
+        let was = held.tickets[i].decisions[j]
+        if !was.pending {
+            lock.unlock()
+            throw RemoteError.refused(status: 409, code: "answered", message: "the decision is \(was.state)")
+        }
+        let answered = TicketDecisionView(
+            id: was.id, stage: was.stage, name: was.name, question: was.question, options: was.options,
+            recommendation: was.recommendation, multiple: was.multiple, state: "answered",
+            answer: request.answer, note: request.note, madeMs: was.madeMs, answeredBy: "user",
+            answeredMs: 99, needsNote: was.needsNote)
+        held.tickets[i].decisions[j] = answered
+        tickets = held
+        if decideSilences > 0 {
+            decideSilences -= 1
+            lock.unlock()
+            throw RemoteError.transport("cut short")
+        }
+        lock.unlock()
+        return try answer("decide") { DecidedBody(decision: answered) }
+    }
+
+    func resumeTicket(_ ticket: String) async throws -> Envelope<TicketResumedBody> {
+        lock.lock()
+        guard var held = tickets, let i = held.tickets.firstIndex(where: { $0.id == ticket }) else {
+            lock.unlock()
+            throw RemoteError.refused(status: 404, code: "not_found", message: "no such ticket")
+        }
+        let was = held.tickets[i]
+        let resumed = TicketView(
+            id: was.id, project: was.project, kind: was.kind, number: was.number, title: was.title,
+            state: "active", stage: was.stage, stages: was.stages, standing: "queued",
+            decisions: was.decisions, createdMs: was.createdMs, updatedMs: was.updatedMs + 1)
+        held.tickets[i] = resumed
+        tickets = held
+        lock.unlock()
+        return try answer("resume_ticket") { TicketResumedBody(ticket: resumed) }
+    }
+
     func file(project: String, path: String) async throws -> Envelope<FileBody> {
         lock.lock()
         let file = files["\(project)/\(path)"]
@@ -512,6 +588,14 @@ struct Route: HostAPI {
     }
     func runs(_ id: String) async throws -> Envelope<RunsBody> {
         try await network.route(address, pin).runs(id)
+    }
+    func tickets() async throws -> Envelope<TicketsBody> { try await network.route(address, pin).tickets() }
+    func ticket(_ id: String) async throws -> Envelope<TicketView> { try await network.route(address, pin).ticket(id) }
+    func decide(_ ticket: String, _ request: DecideRequest) async throws -> Envelope<DecidedBody> {
+        try await network.route(address, pin).decide(ticket, request)
+    }
+    func resumeTicket(_ ticket: String) async throws -> Envelope<TicketResumedBody> {
+        try await network.route(address, pin).resumeTicket(ticket)
     }
     func runOutput(_ id: String, run: Int, lines: Int?) async throws -> Envelope<RunOutputBody> {
         try await network.route(address, pin).runOutput(id, run: run, lines: lines)

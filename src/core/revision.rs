@@ -34,6 +34,10 @@ pub enum ResourceKind {
     /// A command's or service's runs; the id is the record's. Moves
     /// when a run starts or ends, and when one is pruned.
     Runs,
+    /// Dispatch's tickets as the port lists them, one collection:
+    /// moves when any ticket's listing does, or the runner comes or
+    /// goes.
+    Tickets,
 }
 
 impl ResourceKind {
@@ -51,6 +55,7 @@ impl ResourceKind {
             Self::Sessions => "sessions",
             Self::Waiting => "waiting",
             Self::Runs => "runs",
+            Self::Tickets => "tickets",
         }
     }
 }
@@ -151,6 +156,7 @@ impl Fingerprints {
             "",
             ids_hash(waiting.iter().map(|s| &s.id)),
         );
+        put(ResourceKind::Tickets, "", hash_of(&core.ticket_listing()));
         Self { items }
     }
 

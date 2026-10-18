@@ -38,6 +38,9 @@ public final class BrowserModel {
     public private(set) var drafts: [SessionRef: DraftView] = [:]
     private var draftHolders: [SessionRef: Int] = [:]
     public private(set) var draftHosts: Set<ServerID> = []
+    /// Tickets read alone, by ref: the body, attempts and lanes the
+    /// listing leaves out.
+    public private(set) var ticketDetails: [TicketRef: TicketView] = [:]
     /// The session whose input is active: the last one a control bar
     /// typed or dictated into, which the prompt window follows.
     public private(set) var activeInput: SessionRef?
@@ -304,6 +307,27 @@ public final class BrowserModel {
     public func trust(_ ref: SessionRef) async -> CommandOutcome {
         let outcome = await manager.trust(ref)
         await pull()
+        return outcome
+    }
+
+    /// One ticket read alone, for its detail view.
+    public func loadTicket(_ ref: TicketRef) async {
+        if let ticket = await manager.readTicket(ref) {
+            ticketDetails[ref] = ticket
+        }
+    }
+
+    public func decide(_ ref: TicketRef, decision: String, answer: String, note: String?) async -> CommandOutcome {
+        let outcome = await manager.decide(ref, decision: decision, answer: answer, note: note)
+        await pull()
+        await loadTicket(ref)
+        return outcome
+    }
+
+    public func resumeTicket(_ ref: TicketRef) async -> CommandOutcome {
+        let outcome = await manager.resumeTicket(ref)
+        await pull()
+        await loadTicket(ref)
         return outcome
     }
 

@@ -1,0 +1,25 @@
+{
+  "body": {
+    "decision": {
+      "answer": null,
+      "answered_by": null,
+      "answered_ms": null,
+      "id": "d1",
+      "made_ms": 10,
+      "multiple": true,
+      "name": "lanes",
+      "needs_note": [],
+      "note": null,
+      "options": [
+        "backend",
+        "frontend"
+      ],
+      "question": "lanes?",
+      "recommendation": "frontend",
+      "stage": "plan",
+      "state": "pending"
+    }
+  },
+  "epoch": "587f987f-7f49-43bb-a01b-ec4ef5b769f0",
+  "revision": 13
+}
