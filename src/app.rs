@@ -1518,6 +1518,27 @@ fn parse_uuid(kind: &str, text: &str) -> Result<uuid::Uuid, String> {
     uuid::Uuid::parse_str(text).map_err(|_| format!("{kind} id {text:?} is not a uuid"))
 }
 
+/// The directory a device names for a session, absolute or relative
+/// to the project's root: `None` unless it is the root or a directory
+/// under it, with no step back out, so a device never opens a shell
+/// elsewhere on the disk.
+fn project_dir(root: &Path, text: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let given = Path::new(text);
+    let dir = if given.is_absolute() {
+        given.to_path_buf()
+    } else {
+        root.join(given)
+    };
+    let plain = dir.components().all(|c| {
+        matches!(
+            c,
+            Component::Normal(_) | Component::RootDir | Component::Prefix(_)
+        )
+    });
+    (plain && dir.starts_with(root) && dir.is_dir()).then_some(dir)
+}
+
 impl SwitchboardApp {
     /// Bind the control socket in the data directory. Refused for a
     /// read-only instance: the one holding the store lock owns the port.
@@ -3045,6 +3066,9 @@ impl SwitchboardApp {
             ("POST", ["sessions", session, verb @ ("send" | "resume" | "trust")]) => {
                 return Served::Now(self.remote_command(request, &device, session, verb));
             }
+            ("POST", ["projects", project, "sessions"]) => {
+                return Served::Now(self.remote_new_session(request, &device, project));
+            }
             ("GET" | "POST", ["sessions", session, "draft"]) => {
                 return Served::Now(self.remote_draft(request, &device, session));
             }
@@ -3182,6 +3206,119 @@ impl SwitchboardApp {
             }
             "resume" => wire::Body::SessionResume { session },
             _ => wire::Body::SessionTrust { session },
+        };
+        let reply = self.serve(&wire::Request::new(op, body));
+        if let wire::Reply::Failed { reason } = &reply
+            && reason.starts_with("interrupted")
+        {
+            return self.refuse(request, 409, "interrupted", reason, true);
+        }
+        self.remote_reply(request, &reply, STRING_CAP)
+    }
+
+    /// A new session in a project under `control` scope, through
+    /// `session.new` as the CLI and Dispatch make theirs, the body's
+    /// `op` the key as for `remote_command`. A device opens an agent or
+    /// a shell, named, in the project's root or a directory under it,
+    /// never elsewhere on the disk; an agent's `prompt` becomes its
+    /// first turn, so the session is already working when its window
+    /// opens.
+    fn remote_new_session(
+        &mut self,
+        request: &RemoteRequest,
+        device: &PairedDevice,
+        project: &str,
+    ) -> RemoteReply {
+        if device.scope != Scope::Control {
+            return self.refuse(
+                request,
+                403,
+                "scope",
+                "this device reads only; raise its scope on the host",
+                true,
+            );
+        }
+        let Ok(body) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
+            return self.refuse(request, 400, "bad_request", "the body is not JSON", true);
+        };
+        let field = |name: &str| body.get(name).and_then(|v| v.as_str()).map(str::trim);
+        let op = field("op").unwrap_or_default();
+        if op.is_empty() || op.len() > OP_CAP {
+            return self.refuse(
+                request,
+                400,
+                "bad_request",
+                "op is the operation id, 1 to 64 characters",
+                true,
+            );
+        }
+        let root = parse_uuid("project", project)
+            .ok()
+            .and_then(|id| self.core.workspace(ProjectId(id)))
+            .map(|w| w.project.root.clone());
+        let Some(root) = root else {
+            return self.refuse(request, 404, "not_found", "no such project", true);
+        };
+        let name = field("name").unwrap_or_default();
+        if name.is_empty() || name.len() > NAME_CAP {
+            return self.refuse(
+                request,
+                400,
+                "bad_request",
+                "name is the session's name, 1 to 128 bytes",
+                true,
+            );
+        }
+        let session_kind = match field("kind") {
+            Some("claude") => wire::SessionKind::Claude,
+            Some("codex") => wire::SessionKind::Codex,
+            Some("shell") => wire::SessionKind::Shell,
+            _ => {
+                return self.refuse(
+                    request,
+                    400,
+                    "bad_request",
+                    "kind is claude, codex or shell",
+                    true,
+                );
+            }
+        };
+        let cwd = match field("cwd").filter(|c| !c.is_empty()) {
+            None => root,
+            Some(text) => match project_dir(&root, text) {
+                Some(dir) => dir,
+                None => {
+                    return self.refuse(
+                        request,
+                        400,
+                        "bad_request",
+                        "cwd is a directory of the project, by a path under its root",
+                        true,
+                    );
+                }
+            },
+        };
+        let prompt = field("prompt").filter(|p| !p.is_empty()).map(str::to_owned);
+        if prompt.as_ref().is_some_and(|p| p.len() > SEND_BYTES_CAP) {
+            return self.refuse(
+                request,
+                400,
+                "bad_request",
+                "prompt is the first message, up to 16 KiB",
+                true,
+            );
+        }
+        let body = wire::Body::SessionNew {
+            project: project.to_owned(),
+            name: name.to_owned(),
+            session_kind,
+            cwd,
+            launch: wire::Launch::Shell,
+            prompt,
+            notes: String::new(),
+            env: std::collections::BTreeMap::new(),
+            env_sets: Vec::new(),
+            replaces: None,
         };
         let reply = self.serve(&wire::Request::new(op, body));
         if let wire::Reply::Failed { reason } = &reply
@@ -3440,7 +3577,7 @@ impl SwitchboardApp {
             "server_id": identity.server_id,
             "server_name": identity.server_name,
             "protocol": REMOTE_PROTOCOL,
-            "capabilities": ["read", "control", "draft", "scope", "tickets", "evidence"],
+            "capabilities": ["read", "control", "draft", "scope", "tickets", "evidence", "create"],
             "spki_sha256": identity.spki_sha256,
             "version": self.core.version(),
             "limits": {
@@ -4121,6 +4258,8 @@ const STRING_CAP: usize = 4 * 1024;
 /// may make.
 const SEND_BYTES_CAP: usize = 16 * 1024;
 const OP_CAP: usize = 64;
+/// The longest name a device gives a session it opens.
+const NAME_CAP: usize = 128;
 /// The most speech events one dictation request carries.
 const DICTATION_EVENTS_CAP: usize = 256;
 /// How often the drafts are fingerprinted for `changed` events.

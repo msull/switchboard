@@ -6,7 +6,8 @@
       "draft",
       "scope",
       "tickets",
-      "evidence"
+      "evidence",
+      "create"
     ],
     "limits": {
       "activity_bytes": 512,
@@ -23,11 +24,11 @@
     },
     "pairing_open": false,
     "protocol": 1,
-    "server_id": "294da244-6752-4e5d-ad6f-d028a93ce47f",
+    "server_id": "c1293981-13e8-4a4a-b9ac-40996d878650",
     "server_name": "Desk Mac",
-    "spki_sha256": "50e3342e69f96de1a0181fc47109212bea198138b056a41d5c25d38440caf6cc",
+    "spki_sha256": "4e17f5616298250f55cbdef7c7a054ec8e79299bf5599b021b4b69a265a36360",
     "version": "0.2.1"
   },
-  "epoch": "741e8acb-99af-4205-b7f6-908d0d0c00c2",
+  "epoch": "e7ca5075-8197-4995-a320-59e942313c67",
   "revision": 10
 }

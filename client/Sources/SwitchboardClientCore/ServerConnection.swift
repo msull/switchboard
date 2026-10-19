@@ -47,6 +47,26 @@ public enum CommandOutcome: Equatable, Sendable {
     }
 }
 
+/// What became of a session a device asked a host to open.
+public enum NewSessionOutcome: Equatable, Sendable {
+    /// The host opened it, under this record id when the reply named
+    /// one; a reply lost on the way names none.
+    case opened(String?)
+    case refused(String)
+    case interrupted
+    case unanswered(String)
+
+    /// A line for the sheet.
+    public var note: String? {
+        switch self {
+        case .opened: return nil
+        case .refused(let why): return why
+        case .interrupted: return "The host started this; check its sessions."
+        case .unanswered(let why): return "No answer from the host: \(why)"
+        }
+    }
+}
+
 public enum ConnectionState: Equatable, Sendable {
     case discovered
     case unpaired
@@ -411,6 +431,8 @@ public actor ServerConnection {
     private var servesTickets: Bool { info?.capabilities.contains("tickets") ?? false }
     /// The host serves a ticket's files, events and close.
     public var servesEvidence: Bool { info?.capabilities.contains("evidence") ?? false }
+    /// The host opens a session in a project for a control device.
+    public var servesCreate: Bool { info?.capabilities.contains("create") ?? false }
 
     /// One event against the held revisions: a `changed` past what a
     /// resource was fetched at refetches that resource, a `removed`
@@ -800,6 +822,58 @@ public actor ServerConnection {
     private func status(of op: String) async -> OpStatusView? {
         guard let api else { return nil }
         return try? await api.opStatus(op).body.status
+    }
+
+    /// A new session in `project`, as `command` sends: the op the key,
+    /// no answer followed by the status query, whose `made` names the
+    /// record when the host had opened it. The project's sessions are
+    /// read again on success, so the new one is listed before its
+    /// window opens.
+    public func newSession(
+        project: String, name: String, kind: SessionKind, cwd: String?, prompt: String?,
+        op: String = UUID().uuidString
+    ) async -> NewSessionOutcome {
+        guard let api else { return .unanswered("not connected") }
+        let request = NewSessionRequest(op: op, name: name, kind: kind, cwd: cwd, prompt: prompt)
+        var outcome: NewSessionOutcome = .unanswered("no answer")
+        for attempt in 0...1 {
+            do {
+                let reply = try await api.newSession(project: project, request)
+                outcome = .opened(reply.body.made.first?.id)
+                break
+            } catch RemoteError.refused(let status, let code, let message) {
+                if status == 409 || code == "interrupted" { return .interrupted }
+                if status == 401 || (status == 403 && code != "scope") {
+                    handle(.refused(status: status, code: code, message: message))
+                }
+                return .refused(message)
+            } catch let error as RemoteError {
+                if case .pinMismatch = error {
+                    handle(error)
+                    return .unanswered("\(error)")
+                }
+                lastError = "\(error)"
+            } catch {
+                lastError = "\(error)"
+            }
+            guard let status = try? await api.opStatus(op).body else {
+                outcome = .unanswered(lastError ?? "no answer")
+                break
+            }
+            switch status.status {
+            case .done(failed: nil): outcome = .opened(status.made.first?.id)
+            case .done(failed: .some(let reason)): return .refused(reason)
+            case .interrupted, .inProgress: return .interrupted
+            case .unknown:
+                outcome = .unanswered(lastError ?? "no answer")
+                if attempt == 0 { continue }
+            }
+            break
+        }
+        if case .opened = outcome {
+            try? await refetch(.sessions(project: project), api: api)
+        }
+        return outcome
     }
 
     public func readConversation(_ session: String, from: Int?, limit: Int?) async {

@@ -24,6 +24,17 @@ final class PresentationTests: XCTestCase {
         XCTAssertGreaterThan(ScreenScale.captionPoints, ScreenScale.caption2Points)
     }
 
+    func testADefaultNameCountsTheProjectsSessionsOfTheKind() {
+        let listed = [
+            SessionView(id: "r1", project: "p", name: "one", kind: .claude),
+            SessionView(id: "r2", project: "p", name: "two", kind: .shell),
+        ]
+        XCTAssertEqual(NewSessionNaming.defaultName(kind: .claude, existing: listed), "Claude 2")
+        XCTAssertEqual(NewSessionNaming.defaultName(kind: .shell, existing: listed), "Shell 2")
+        XCTAssertEqual(NewSessionNaming.defaultName(kind: .codex, existing: listed), "Codex 1")
+        XCTAssertEqual(NewSessionNaming.defaultName(kind: .claude, existing: []), "Claude 1")
+    }
+
     func testTwoRequestsOnOneSessionAreTwoWindowsAndARequestRoundTrips() throws {
         let ref = SessionRef(serverID: a, recordID: "r1")
         let one = CardWindowRequest(ref: ref)

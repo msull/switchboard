@@ -10,7 +10,7 @@ final class FixturesTests: XCTestCase {
     func testEveryFixtureDecodes() throws {
         let info: Envelope<ServerInfo> = try Fixtures.load("info")
         XCTAssertEqual(info.body.protocolVersion, RemoteProtocol.version)
-        XCTAssertEqual(info.body.capabilities, ["read", "control", "draft", "scope", "tickets", "evidence"])
+        XCTAssertEqual(info.body.capabilities, ["read", "control", "draft", "scope", "tickets", "evidence", "create"])
         XCTAssertEqual(info.body.spkiSha256.count, 64)
         XCTAssertEqual(info.body.limits.screenLines, 200)
         XCTAssertFalse(info.body.pairingOpen)
@@ -68,6 +68,9 @@ final class FixturesTests: XCTestCase {
         XCTAssertFalse(events.body.unavailable)
         let closed: Envelope<TicketResumedBody> = try Fixtures.load("closed")
         XCTAssertEqual(closed.body.ticket.state, "closing")
+        let created: Envelope<CommandBody> = try Fixtures.load("created")
+        XCTAssertEqual(created.body.made.map(\.kind), ["session"])
+        XCTAssertEqual(created.body.made.first?.id.count, 36, "a record id")
 
         let screen: Envelope<ScreenBody> = try Fixtures.load("screen")
         XCTAssertTrue(screen.body.text.hasPrefix("$ claude"))

@@ -4,7 +4,7 @@
       "card": "starting",
       "cwd": "/tmp",
       "held_until_ms": null,
-      "id": "2cb9e0d6-7dec-4cdd-8bab-f333767aa40e",
+      "id": "3e4f02d5-6f67-4f0c-9b1d-f6829710506b",
       "kind": "claude",
       "last_activity_ms": null,
       "last_exit": null,
@@ -14,16 +14,16 @@
       "notes": "ticket 1\nnotes with two lines",
       "op": "se",
       "pending": [],
-      "project": "11c92aa2-66b5-486e-846b-7ce68834e7c0",
+      "project": "0e1ca7f0-bea7-4caf-bfb1-d8403b8dc181",
       "prompt_refusal": "no turn reported yet",
       "quiet_secs": null,
-      "resume_id": "f952883c-7229-499d-97e7-d8edf4a991d9",
+      "resume_id": "02d07e41-6488-4103-a49f-fd13af41a417",
       "trust_question": false,
       "waiting": false,
       "waiting_reason": null,
       "wakeup_at_ms": null
     }
   },
-  "epoch": "741e8acb-99af-4205-b7f6-908d0d0c00c2",
+  "epoch": "e7ca5075-8197-4995-a320-59e942313c67",
   "revision": 10
 }
