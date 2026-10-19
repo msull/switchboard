@@ -1,13 +1,20 @@
 //! What the remote port says of Dispatch's tickets: each ticket as a
 //! device shows it at a glance, with its standing worded as the Mac's
 //! own page words it, the decisions a device may answer, and in the
-//! single-ticket view the body, attempts and lanes. Shaped here, in
-//! the core, so the port's fingerprint and its replies are one value.
+//! single-ticket view the body, attempts and lanes, each attempt with
+//! the files it wrote or kept, named by a key that stands for the path.
+//! Shaped here, in the core, so the port's fingerprint and its replies
+//! are one value.
+
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use super::AppCore;
-use crate::ports::dispatch::{AttemptView, DecisionView, LaneView, ProjectView, TicketView};
+use crate::ports::dispatch::{
+    AttemptView, DecisionView, EventView, LaneView, ProjectView, TicketView,
+};
 
 /// A decision as a device answers it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -57,7 +64,49 @@ pub struct TicketPullRequest {
     pub checks: String,
 }
 
-/// One attempt of a stage, with the session it ran in.
+/// A file of an attempt: an artifact it wrote (its notes, a plan, a
+/// review summary), a review round's findings or response, the log of
+/// the stage's checks, or a file of its evidence directory. A device
+/// reads one by its `key`, which stands for the path; the path stays
+/// on the Mac.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct TicketFile {
+    pub key: String,
+    pub stage: String,
+    pub n: u32,
+    /// The artifact's name, `checks`, `round N findings` or `round N
+    /// response`, or an evidence file's path under its directory.
+    pub name: String,
+    /// `artifact`, `checks`, `findings`, `response`, `evidence`, or
+    /// `secret` for an artifact Dispatch never reads.
+    pub kind: String,
+    /// Known for evidence, which the runner recorded when the writer
+    /// finished.
+    pub bytes: Option<u64>,
+    pub modified_ms: Option<u64>,
+    /// Text the port serves.
+    pub inline: bool,
+    /// An image the port serves.
+    pub image: bool,
+}
+
+/// The stage's checks of an attempt, once they ran.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct TicketChecks {
+    pub head: String,
+    /// None while they run.
+    pub exit: Option<i32>,
+}
+
+/// One round of a code review attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct TicketRound {
+    pub n: u32,
+    pub state: String,
+    pub open_points: u32,
+}
+
+/// One attempt of a stage, with the session it ran in and its files.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct TicketAttempt {
     pub stage: String,
@@ -68,6 +117,11 @@ pub struct TicketAttempt {
     pub reason: Option<String>,
     pub session: Option<String>,
     pub pr: Option<TicketPullRequest>,
+    pub checks: Option<TicketChecks>,
+    pub rounds: Vec<TicketRound>,
+    pub files: Vec<TicketFile>,
+    /// When the evidence directory was removed, in ms.
+    pub evidence_swept_ms: Option<u64>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
 }
@@ -87,10 +141,105 @@ impl From<&AttemptView> for TicketAttempt {
                 url: pr.url.clone(),
                 checks: pr.checks.clone(),
             }),
+            checks: a.checks.as_ref().map(|c| TicketChecks {
+                head: c.head.clone(),
+                exit: c.exit,
+            }),
+            rounds: a
+                .rounds
+                .iter()
+                .map(|r| TicketRound {
+                    n: r.n,
+                    state: r.state.clone(),
+                    open_points: r.open_points,
+                })
+                .collect(),
+            files: attempt_files(a).into_iter().map(|(f, _)| f).collect(),
+            evidence_swept_ms: a.evidence_swept_ms,
             started_ms: a.started_ms,
             ended_ms: a.ended_ms,
         }
     }
+}
+
+/// Evidence a device reads as text: what an agent's probes and the
+/// tester's notes are written as.
+const EVIDENCE_TEXT: [&str; 6] = ["md", "txt", "log", "json", "csv", "tsv"];
+/// Evidence a device shows as a picture: the tester's screenshots.
+const EVIDENCE_IMAGES: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
+
+fn extension_in(path: &Path, list: &[&str]) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| list.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// The media type of an evidence image, by its extension.
+#[must_use]
+pub fn image_media(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => return None,
+    })
+}
+
+/// The key a device names a file by: a hash of its path, so the path
+/// itself stays on the Mac. Stable for the life of the process, which
+/// is as long as a device holds a listing from it.
+#[must_use]
+pub fn file_key(path: &Path) -> String {
+    let mut h = DefaultHasher::new();
+    path.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// Every file of an attempt with its path, in the order the Mac's page
+/// lists them: artifacts, the checks log, each round's files, then the
+/// evidence.
+fn attempt_files(a: &AttemptView) -> Vec<(TicketFile, PathBuf)> {
+    let file = |name: String, kind: &str, path: &PathBuf, inline: bool| TicketFile {
+        key: file_key(path),
+        stage: a.stage.clone(),
+        n: a.n,
+        name,
+        kind: kind.to_owned(),
+        bytes: None,
+        modified_ms: None,
+        inline,
+        image: false,
+    };
+    let mut files = Vec::new();
+    for (name, path) in &a.artifacts {
+        let secret = a.is_secret(name);
+        let kind = if secret { "secret" } else { "artifact" };
+        files.push((file(name.clone(), kind, path, !secret), path.clone()));
+    }
+    if let Some(c) = &a.checks {
+        files.push((file("checks".into(), "checks", &c.log, true), c.log.clone()));
+    }
+    for r in &a.rounds {
+        if let Some(p) = &r.feedback {
+            let name = format!("round {} findings", r.n);
+            files.push((file(name, "findings", p, true), p.clone()));
+        }
+        if let Some(p) = &r.response {
+            let name = format!("round {} response", r.n);
+            files.push((file(name, "response", p, true), p.clone()));
+        }
+    }
+    for e in &a.evidence {
+        let inline = extension_in(&e.path, &EVIDENCE_TEXT);
+        let mut f = file(e.rel.clone(), "evidence", &e.path, inline);
+        f.bytes = Some(e.bytes);
+        f.modified_ms = Some(e.modified_ms);
+        f.image = extension_in(&e.path, &EVIDENCE_IMAGES);
+        files.push((f, e.path.clone()));
+    }
+    files
 }
 
 /// A lane by its branch; paths stay on the Mac.
@@ -178,6 +327,48 @@ pub struct TicketListing {
     pub tickets: Vec<TicketSummary>,
 }
 
+/// One line of the runner's event log about a ticket.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct TicketEvent {
+    pub seq: u64,
+    pub at_ms: u64,
+    pub stage: String,
+    /// The log's word: `stage`, `attempt-ended`, `answered`, ...
+    pub kind: String,
+    pub text: String,
+    /// The attempt it is about, as `stage/n`.
+    pub attempt: Option<String>,
+    pub decision: Option<String>,
+    pub head: Option<String>,
+    pub url: Option<String>,
+}
+
+impl From<&EventView> for TicketEvent {
+    fn from(e: &EventView) -> Self {
+        Self {
+            seq: e.seq,
+            at_ms: e.at_ms,
+            stage: e.stage.clone(),
+            kind: e.kind.clone(),
+            text: e.text.clone(),
+            attempt: e.attempt.as_ref().map(|(s, n)| format!("{s}/{n}")),
+            decision: e.decision.clone(),
+            head: e.head.clone(),
+            url: e.url.clone(),
+        }
+    }
+}
+
+/// A ticket's events as the Mac holds them, oldest first.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct TicketEvents {
+    pub events: Vec<TicketEvent>,
+    /// The cursor the next read continues from.
+    pub last: u64,
+    /// The runner does not serve events (an older build).
+    pub unavailable: bool,
+}
+
 impl AppCore {
     /// The tickets as the port lists them.
     #[must_use]
@@ -239,6 +430,34 @@ impl AppCore {
             lanes: t.lanes.iter().map(TicketLane::from).collect(),
             holds: t.holds.clone(),
         })
+    }
+
+    /// The file a device named by its key on ticket `id`, with the path
+    /// the Mac reads it at.
+    #[must_use]
+    pub fn ticket_file(&self, id: &str, key: &str) -> Option<(TicketFile, PathBuf)> {
+        self.ticket(id)?
+            .attempts
+            .iter()
+            .flat_map(attempt_files)
+            .find(|(f, _)| f.key == key)
+    }
+
+    /// A ticket's events as read so far; none before the first read.
+    #[must_use]
+    pub fn ticket_events(&self, id: &str) -> TicketEvents {
+        let Some(e) = self.dispatch.events.get(id) else {
+            return TicketEvents {
+                events: Vec::new(),
+                last: 0,
+                unavailable: false,
+            };
+        };
+        TicketEvents {
+            events: e.events.iter().map(TicketEvent::from).collect(),
+            last: e.last,
+            unavailable: e.unavailable,
+        }
     }
 }
 

@@ -12254,3 +12254,127 @@ mod updates {
         assert!(core.notices().last().unwrap().text.contains("read-only"));
     }
 }
+
+mod tickets {
+    //! The port's view of a ticket's files and events.
+
+    use super::*;
+    use crate::core::tickets::file_key;
+    use crate::ports::dispatch::{AttemptView, ChecksView, EvidenceView, Status, TicketView};
+
+    fn status() -> Status {
+        Status {
+            tickets: vec![TicketView {
+                id: "t1".into(),
+                project: "Orchard".into(),
+                state: "active".into(),
+                attempts: vec![AttemptView {
+                    stage: "try".into(),
+                    n: 2,
+                    artifacts: vec![
+                        ("notes".into(), "/d/t1/try/2/joined/notes.md".into()),
+                        ("token".into(), "/d/t1/try/2/joined/token".into()),
+                    ],
+                    secret: vec!["token".into()],
+                    checks: Some(ChecksView {
+                        head: "abc".into(),
+                        exit: Some(1),
+                        log: "/d/t1/try/2/joined/checks.log".into(),
+                    }),
+                    evidence: vec![
+                        EvidenceView {
+                            path: "/d/t1/try/2/joined/evidence/Shot.PNG".into(),
+                            rel: "Shot.PNG".into(),
+                            bytes: 9,
+                            modified_ms: 5,
+                        },
+                        EvidenceView {
+                            path: "/d/t1/try/2/joined/evidence/run.command".into(),
+                            rel: "run.command".into(),
+                            bytes: 9,
+                            modified_ms: 5,
+                        },
+                    ],
+                    ..AttemptView::default()
+                }],
+                ..TicketView::default()
+            }],
+            ..Status::default()
+        }
+    }
+
+    #[test]
+    fn a_file_is_found_by_the_key_that_stands_for_its_path() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        core.dispatch(AppAction::DispatchStatus(Some(status())), Clock::at(2));
+        let detail = core.ticket_detail("t1").unwrap();
+        let files = &detail.attempts[0].files;
+        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["notes", "token", "checks", "Shot.PNG", "run.command"]
+        );
+        let kinds: Vec<&str> = files.iter().map(|f| f.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            ["artifact", "secret", "checks", "evidence", "evidence"]
+        );
+        // Text artifacts and the log read inline; a secret never; the
+        // picture is an image whatever its case; a script is neither.
+        let inline: Vec<bool> = files.iter().map(|f| f.inline).collect();
+        assert_eq!(inline, [true, false, true, false, false]);
+        let image: Vec<bool> = files.iter().map(|f| f.image).collect();
+        assert_eq!(image, [false, false, false, true, false]);
+        assert_eq!(files[3].bytes, Some(9));
+        assert_eq!(detail.attempts[0].checks.as_ref().unwrap().exit, Some(1));
+
+        let key = file_key(std::path::Path::new("/d/t1/try/2/joined/notes.md"));
+        assert_eq!(
+            files[0].key, key,
+            "the key is the path's, so a device may hold it"
+        );
+        let (found, path) = core.ticket_file("t1", &key).unwrap();
+        assert_eq!(found.name, "notes");
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/d/t1/try/2/joined/notes.md")
+        );
+        assert!(core.ticket_file("t1", "nope").is_none());
+        assert!(core.ticket_file("t2", &key).is_none());
+    }
+
+    #[test]
+    fn events_read_as_the_cache_holds_them() {
+        use crate::ports::dispatch::{Body, EventView, EventsView, Reply};
+        let (mut core, _) = loaded(vec![], vec![]);
+        core.dispatch(AppAction::DispatchStatus(Some(status())), Clock::at(2));
+        let none = core.ticket_events("t1");
+        assert!(none.events.is_empty() && none.last == 0 && !none.unavailable);
+        core.dispatch(
+            AppAction::DispatchReplied {
+                body: Body::Events {
+                    ticket: "t1".into(),
+                    since: 0,
+                },
+                result: Ok(Reply::Events(EventsView {
+                    events: vec![EventView {
+                        seq: 7,
+                        at_ms: 3,
+                        stage: "try".into(),
+                        kind: "attempt-started".into(),
+                        text: "joined #2 agent".into(),
+                        attempt: Some(("try".into(), 2)),
+                        ..EventView::default()
+                    }],
+                    last: 7,
+                    withdrawn: vec![],
+                })),
+            },
+            Clock::at(3),
+        );
+        let read = core.ticket_events("t1");
+        assert_eq!(read.last, 7);
+        assert_eq!(read.events[0].attempt.as_deref(), Some("try/2"));
+        assert_eq!(read.events[0].text, "joined #2 agent");
+    }
+}

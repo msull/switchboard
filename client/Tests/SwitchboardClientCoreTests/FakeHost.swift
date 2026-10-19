@@ -58,6 +58,9 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     /// Decides get no answer this many times (the answer is still
     /// recorded on the ticket, as one that reached the host would be).
     var decideSilences = 0
+    /// A ticket's files by key, and its events.
+    var ticketFiles: [String: TicketFileBody] = [:]
+    var ticketEvents: [String: TicketEventsBody] = [:]
     /// The pinned files, by `project/path`; a missing one is `not_pinned`.
     var files: [String: FileBody] = [:]
     /// The op of every command, in order.
@@ -379,6 +382,44 @@ final class FakeHost: HostAPI, @unchecked Sendable {
         return try answer("resume_ticket") { TicketResumedBody(ticket: resumed) }
     }
 
+    func closeTicket(_ ticket: String) async throws -> Envelope<TicketResumedBody> {
+        lock.lock()
+        guard var held = tickets, let i = held.tickets.firstIndex(where: { $0.id == ticket }) else {
+            lock.unlock()
+            throw RemoteError.refused(status: 404, code: "not_found", message: "no such ticket")
+        }
+        let was = held.tickets[i]
+        guard was.closable else {
+            lock.unlock()
+            throw RemoteError.refused(status: 409, code: "not_closable", message: "the ticket is \(was.state)")
+        }
+        let closing = TicketView(
+            id: was.id, project: was.project, kind: was.kind, number: was.number, title: was.title,
+            state: "closing", reason: "closed by hand", stage: was.stage, stages: was.stages,
+            standing: "closing", decisions: was.decisions, createdMs: was.createdMs, updatedMs: was.updatedMs + 1)
+        held.tickets[i] = closing
+        tickets = held
+        lock.unlock()
+        return try answer("close_ticket") { TicketResumedBody(ticket: closing) }
+    }
+
+    func ticketFile(_ ticket: String, key: String) async throws -> Envelope<TicketFileBody> {
+        lock.lock()
+        let held = ticketFiles[key]
+        lock.unlock()
+        guard let held else {
+            throw RemoteError.refused(status: 404, code: "not_found", message: "no such file")
+        }
+        return try answer("ticket_file:\(key)") { held }
+    }
+
+    func ticketEvents(_ ticket: String) async throws -> Envelope<TicketEventsBody> {
+        lock.lock()
+        let held = ticketEvents[ticket] ?? TicketEventsBody(events: [])
+        lock.unlock()
+        return try answer("ticket_events:\(ticket)") { held }
+    }
+
     func file(project: String, path: String) async throws -> Envelope<FileBody> {
         lock.lock()
         let file = files["\(project)/\(path)"]
@@ -596,6 +637,15 @@ struct Route: HostAPI {
     }
     func resumeTicket(_ ticket: String) async throws -> Envelope<TicketResumedBody> {
         try await network.route(address, pin).resumeTicket(ticket)
+    }
+    func closeTicket(_ ticket: String) async throws -> Envelope<TicketResumedBody> {
+        try await network.route(address, pin).closeTicket(ticket)
+    }
+    func ticketFile(_ ticket: String, key: String) async throws -> Envelope<TicketFileBody> {
+        try await network.route(address, pin).ticketFile(ticket, key: key)
+    }
+    func ticketEvents(_ ticket: String) async throws -> Envelope<TicketEventsBody> {
+        try await network.route(address, pin).ticketEvents(ticket)
     }
     func runOutput(_ id: String, run: Int, lines: Int?) async throws -> Envelope<RunOutputBody> {
         try await network.route(address, pin).runOutput(id, run: run, lines: lines)

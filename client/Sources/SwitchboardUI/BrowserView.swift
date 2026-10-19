@@ -14,6 +14,11 @@ public final class BrowserModel {
     /// The filter menu's choices, replaced only when they differ, so
     /// the menu's body is not re-evaluated by the two-second pull.
     public private(set) var filterChoices = FilterChoices()
+    public private(set) var ticketFilterChoices = TicketFilterChoices()
+    /// The hosts that serve a ticket's files, events and close.
+    public private(set) var evidenceHosts: Set<ServerID> = []
+    /// Each ticket's events as last read, by ref.
+    public private(set) var ticketEvents: [TicketRef: TicketEventsBody] = [:]
     /// The card windows on screen, by window id, so a click on a listed
     /// session reaches its window. Nothing here outlives the process:
     /// a launch brings back the main window and no other.
@@ -125,6 +130,10 @@ public final class BrowserModel {
         store = await manager.store
         let choices = FilterChoices(store: store)
         if choices != filterChoices { filterChoices = choices }
+        let ticketChoices = TicketFilterChoices(store: store)
+        if ticketChoices != ticketFilterChoices { ticketFilterChoices = ticketChoices }
+        let evidence = await manager.evidenceHosts
+        if evidence != evidenceHosts { evidenceHosts = evidence }
         discovered = await manager.discovered.map {
             DiscoveredServerRow(instance: $0.instance, serverID: $0.serverID, name: $0.name)
         }.sorted { $0.instance < $1.instance }
@@ -329,6 +338,40 @@ public final class BrowserModel {
         await pull()
         await loadTicket(ref)
         return outcome
+    }
+
+    public func closeTicket(_ ref: TicketRef) async -> CommandOutcome {
+        let outcome = await manager.closeTicket(ref)
+        await pull()
+        await loadTicket(ref)
+        return outcome
+    }
+
+    /// A ticket's events, read again whole; the host serves them from
+    /// its own cache while the ticket has not moved.
+    public func loadTicketEvents(_ ref: TicketRef) async {
+        guard evidenceHosts.contains(ref.serverID) else { return }
+        if let events = try? await manager.readTicketEvents(ref) {
+            ticketEvents[ref] = events
+        }
+    }
+
+    /// One file of a ticket by its key.
+    public func readTicketFile(_ ref: TicketRef, key: String) async throws -> TicketFileBody {
+        try await manager.readTicketFile(ref, key: key)
+    }
+
+    /// The ticket list as filtered and ordered.
+    public var tickets: [UnifiedTicket] {
+        presentation.ticketFilters.apply(store.tickets)
+    }
+
+    public var ticketFilters: TicketFilters {
+        get { presentation.ticketFilters }
+        set {
+            presentation.ticketFilters = newValue
+            save()
+        }
     }
 
     /// A turn whole, for a window that opened its activity: the page

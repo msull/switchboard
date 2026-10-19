@@ -69,7 +69,83 @@ public struct TicketPullRequestView: Decodable, Sendable, Equatable {
     }
 }
 
-/// One attempt of a stage, with the session it ran in.
+/// A file of an attempt: an artifact it wrote (its notes, a plan, a
+/// review summary), a review round's findings or response, the log of
+/// the stage's checks, or a file of its evidence directory. Read by
+/// its `key`, which stands for a path that stays on the Mac.
+public struct TicketFileView: Decodable, Sendable, Equatable, Identifiable {
+    public let key: String
+    public let stage: String
+    public let n: UInt32
+    public let name: String
+    /// `artifact`, `checks`, `findings`, `response`, `evidence`, or
+    /// `secret` for an artifact Dispatch never reads.
+    public let kind: String
+    public let bytes: UInt64?
+    public let modifiedMs: UInt64?
+    /// Text the port serves.
+    public let inline: Bool
+    /// An image the port serves.
+    public let image: Bool
+
+    public var id: String { key }
+    /// The port reads it, as text or as a picture.
+    public var readable: Bool { inline || image }
+
+    enum CodingKeys: String, CodingKey {
+        case key, stage, n, name, kind, bytes, inline, image
+        case modifiedMs = "modified_ms"
+    }
+
+    public init(
+        key: String, stage: String, n: UInt32, name: String, kind: String = "artifact",
+        bytes: UInt64? = nil, modifiedMs: UInt64? = nil, inline: Bool = true, image: Bool = false
+    ) {
+        self.key = key
+        self.stage = stage
+        self.n = n
+        self.name = name
+        self.kind = kind
+        self.bytes = bytes
+        self.modifiedMs = modifiedMs
+        self.inline = inline
+        self.image = image
+    }
+}
+
+/// The stage's checks of an attempt, once they ran.
+public struct TicketChecksView: Decodable, Sendable, Equatable {
+    public let head: String
+    /// None while they run.
+    public let exit: Int32?
+
+    public init(head: String, exit: Int32?) {
+        self.head = head
+        self.exit = exit
+    }
+}
+
+/// One round of a code review attempt.
+public struct TicketRoundView: Decodable, Sendable, Equatable, Identifiable {
+    public let n: UInt32
+    public let state: String
+    public let openPoints: UInt32
+
+    public var id: UInt32 { n }
+
+    enum CodingKeys: String, CodingKey {
+        case n, state
+        case openPoints = "open_points"
+    }
+
+    public init(n: UInt32, state: String, openPoints: UInt32 = 0) {
+        self.n = n
+        self.state = state
+        self.openPoints = openPoints
+    }
+}
+
+/// One attempt of a stage, with the session it ran in and its files.
 public struct TicketAttemptView: Decodable, Sendable, Equatable, Identifiable {
     public let stage: String
     public let n: UInt32
@@ -79,21 +155,47 @@ public struct TicketAttemptView: Decodable, Sendable, Equatable, Identifiable {
     public let reason: String?
     public let session: String?
     public let pr: TicketPullRequestView?
+    public let checks: TicketChecksView?
+    public let rounds: [TicketRoundView]
+    public let files: [TicketFileView]
+    /// When the evidence directory was removed, in ms.
+    public let evidenceSweptMs: UInt64?
     public let startedMs: UInt64
     public let endedMs: UInt64?
 
     public var id: String { "\(stage)/\(n)" }
 
     enum CodingKeys: String, CodingKey {
-        case stage, n, context, kind, state, reason, session, pr
+        case stage, n, context, kind, state, reason, session, pr, checks, rounds, files
+        case evidenceSweptMs = "evidence_swept_ms"
         case startedMs = "started_ms"
         case endedMs = "ended_ms"
+    }
+
+    /// A host from before the files were served lists none.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        stage = try c.decode(String.self, forKey: .stage)
+        n = try c.decode(UInt32.self, forKey: .n)
+        context = try c.decodeIfPresent(String.self, forKey: .context) ?? ""
+        kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? "agent"
+        state = try c.decodeIfPresent(String.self, forKey: .state) ?? ""
+        reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        session = try c.decodeIfPresent(String.self, forKey: .session)
+        pr = try c.decodeIfPresent(TicketPullRequestView.self, forKey: .pr)
+        checks = try c.decodeIfPresent(TicketChecksView.self, forKey: .checks)
+        rounds = try c.decodeIfPresent([TicketRoundView].self, forKey: .rounds) ?? []
+        files = try c.decodeIfPresent([TicketFileView].self, forKey: .files) ?? []
+        evidenceSweptMs = try c.decodeIfPresent(UInt64.self, forKey: .evidenceSweptMs)
+        startedMs = try c.decodeIfPresent(UInt64.self, forKey: .startedMs) ?? 0
+        endedMs = try c.decodeIfPresent(UInt64.self, forKey: .endedMs)
     }
 
     public init(
         stage: String, n: UInt32, context: String = "", kind: String = "agent", state: String,
         reason: String? = nil, session: String? = nil, pr: TicketPullRequestView? = nil,
-        startedMs: UInt64 = 0, endedMs: UInt64? = nil
+        checks: TicketChecksView? = nil, rounds: [TicketRoundView] = [], files: [TicketFileView] = [],
+        evidenceSweptMs: UInt64? = nil, startedMs: UInt64 = 0, endedMs: UInt64? = nil
     ) {
         self.stage = stage
         self.n = n
@@ -103,6 +205,10 @@ public struct TicketAttemptView: Decodable, Sendable, Equatable, Identifiable {
         self.reason = reason
         self.session = session
         self.pr = pr
+        self.checks = checks
+        self.rounds = rounds
+        self.files = files
+        self.evidenceSweptMs = evidenceSweptMs
         self.startedMs = startedMs
         self.endedMs = endedMs
     }
@@ -317,11 +423,85 @@ public struct DecidedBody: Decodable, Sendable, Equatable {
     }
 }
 
-/// The ticket as it stands, answering a resume.
+/// The ticket as it stands, answering a resume or a close.
 public struct TicketResumedBody: Decodable, Sendable, Equatable {
     public let ticket: TicketView
 
     public init(ticket: TicketView) {
         self.ticket = ticket
+    }
+}
+
+/// `GET dispatch/tickets/{id}/files/{key}`: the file's text, or for an
+/// image its bytes as base64 with the media type.
+public struct TicketFileBody: Decodable, Sendable, Equatable {
+    public let key: String
+    public let text: String?
+    public let media: String?
+    public let data: String?
+
+    public init(key: String, text: String? = nil, media: String? = nil, data: String? = nil) {
+        self.key = key
+        self.text = text
+        self.media = media
+        self.data = data
+    }
+
+    /// The image's bytes, when it is one.
+    public var imageData: Data? {
+        guard let data else { return nil }
+        return Data(base64Encoded: data)
+    }
+}
+
+/// One line of the runner's event log about a ticket.
+public struct TicketEventView: Decodable, Sendable, Equatable, Identifiable {
+    public let seq: UInt64
+    public let atMs: UInt64
+    public let stage: String
+    /// The log's word: `stage`, `attempt-ended`, `answered`, ...
+    public let kind: String
+    public let text: String
+    /// The attempt it is about, as `stage/n`.
+    public let attempt: String?
+    public let decision: String?
+    public let head: String?
+    public let url: String?
+
+    public var id: UInt64 { seq }
+
+    enum CodingKeys: String, CodingKey {
+        case seq, stage, kind, text, attempt, decision, head, url
+        case atMs = "at_ms"
+    }
+
+    public init(
+        seq: UInt64, atMs: UInt64 = 0, stage: String = "", kind: String, text: String,
+        attempt: String? = nil, decision: String? = nil, head: String? = nil, url: String? = nil
+    ) {
+        self.seq = seq
+        self.atMs = atMs
+        self.stage = stage
+        self.kind = kind
+        self.text = text
+        self.attempt = attempt
+        self.decision = decision
+        self.head = head
+        self.url = url
+    }
+}
+
+/// `GET dispatch/tickets/{id}/events`: the ticket's events as the Mac
+/// holds them, oldest first.
+public struct TicketEventsBody: Decodable, Sendable, Equatable {
+    public let events: [TicketEventView]
+    public let last: UInt64
+    /// The runner does not serve events (an older build).
+    public let unavailable: Bool
+
+    public init(events: [TicketEventView], last: UInt64 = 0, unavailable: Bool = false) {
+        self.events = events
+        self.last = last
+        self.unavailable = unavailable
     }
 }

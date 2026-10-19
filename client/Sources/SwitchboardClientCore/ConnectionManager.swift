@@ -88,6 +88,128 @@ public struct Filters: Sendable, Equatable, Codable {
     }
 }
 
+/// How the ticket list is ordered.
+public enum TicketSort: String, Sendable, Equatable, Codable, CaseIterable {
+    /// Last moved first.
+    case recent
+    /// The ones waiting on the owner first, then last moved.
+    case waiting
+    /// Newest ticket first.
+    case created
+    /// By project, then last moved.
+    case project
+
+    public var label: String {
+        switch self {
+        case .recent: return "Recent"
+        case .waiting: return "Waiting first"
+        case .created: return "Newest"
+        case .project: return "By project"
+        }
+    }
+}
+
+/// The user's filters over the ticket list, and its order. An empty
+/// set admits everything; closed tickets are hidden unless asked for.
+public struct TicketFilters: Sendable, Equatable, Codable {
+    public var servers: Set<ServerID> = []
+    public var projects: Set<String> = []
+    /// `active`, `parked` or `closed` (which takes `closing` with it).
+    public var states: Set<String> = []
+    /// Only the tickets waiting on the owner.
+    public var waitingOnly = false
+    public var sort: TicketSort = .recent
+
+    public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        servers = try c.decodeIfPresent(Set<ServerID>.self, forKey: .servers) ?? []
+        projects = try c.decodeIfPresent(Set<String>.self, forKey: .projects) ?? []
+        states = try c.decodeIfPresent(Set<String>.self, forKey: .states) ?? []
+        waitingOnly = try c.decodeIfPresent(Bool.self, forKey: .waitingOnly) ?? false
+        sort = try c.decodeIfPresent(TicketSort.self, forKey: .sort) ?? .recent
+    }
+
+    /// The state word a ticket is filtered by: `closing` counts as closed,
+    /// `parking` as parked.
+    public static func stateWord(_ ticket: TicketView) -> String {
+        switch ticket.state {
+        case "closed", "closing": return "closed"
+        case "parked", "parking": return "parked"
+        default: return "active"
+        }
+    }
+
+    public func admits(_ item: UnifiedTicket) -> Bool {
+        let word = Self.stateWord(item.ticket)
+        if states.isEmpty && word == "closed" { return false }
+        return (servers.isEmpty || servers.contains(item.ref.serverID))
+            && (projects.isEmpty || projects.contains(item.ticket.project))
+            && (states.isEmpty || states.contains(word))
+            && (!waitingOnly || item.ticket.waits)
+    }
+
+    /// The admitted tickets in the chosen order; ties keep the store's
+    /// order, so a list is stable between pulls.
+    public func apply(_ items: [UnifiedTicket]) -> [UnifiedTicket] {
+        let kept = items.filter(admits)
+        func recent(_ a: UnifiedTicket, _ b: UnifiedTicket) -> Bool {
+            a.ticket.updatedMs > b.ticket.updatedMs
+        }
+        switch sort {
+        case .recent:
+            return kept.stableSorted(by: recent)
+        case .waiting:
+            return kept.stableSorted { a, b in
+                if a.ticket.waits != b.ticket.waits { return a.ticket.waits }
+                return recent(a, b)
+            }
+        case .created:
+            return kept.stableSorted { $0.ticket.createdMs > $1.ticket.createdMs }
+        case .project:
+            return kept.stableSorted { a, b in
+                if a.ticket.project != b.ticket.project { return a.ticket.project < b.ticket.project }
+                return recent(a, b)
+            }
+        }
+    }
+}
+
+extension Array {
+    /// A sort that keeps equal elements in their order.
+    fileprivate func stableSorted(by before: (Element, Element) -> Bool) -> [Element] {
+        enumerated().sorted { a, b in
+            if before(a.element, b.element) { return true }
+            if before(b.element, a.element) { return false }
+            return a.offset < b.offset
+        }.map(\.element)
+    }
+}
+
+/// What the ticket filter menu offers: the hosts with tickets, the
+/// projects and the state words seen. Equal across polls that change
+/// nothing the menu shows, as `FilterChoices`.
+public struct TicketFilterChoices: Sendable, Equatable {
+    public var hosts: [FilterChoices.Host] = []
+    public var projects: [String] = []
+    public var states: [String] = []
+
+    public init() {}
+
+    public init(store: UnifiedStore) {
+        var seen: [ServerID: String] = [:]
+        for item in store.tickets { seen[item.ref.serverID] = item.serverName }
+        hosts = store.hosts.compactMap { host in
+            seen[host.id].map { FilterChoices.Host(id: host.id, name: $0) }
+        }
+        projects = Array(Set(store.tickets.map(\.ticket.project))).sorted()
+        states = ["active", "parked", "closed"].filter { word in
+            store.tickets.contains { TicketFilters.stateWord($0.ticket) == word }
+        }
+    }
+}
+
 /// What the filter menu offers: the hosts by name and the card words
 /// the listed sessions are in. A value of its own, equal across polls
 /// that change nothing the menu shows, so an open menu is not rebuilt
@@ -459,6 +581,34 @@ public actor ConnectionManager {
     /// Resume a parked ticket.
     public func resumeTicket(_ ref: TicketRef) async -> CommandOutcome {
         await connections[ref.serverID]?.resumeTicket(ref.ticketID) ?? .unanswered("no host")
+    }
+
+    /// Close a ticket.
+    public func closeTicket(_ ref: TicketRef) async -> CommandOutcome {
+        await connections[ref.serverID]?.closeTicket(ref.ticketID) ?? .unanswered("no host")
+    }
+
+    /// One file of a ticket by its key.
+    public func readTicketFile(_ ref: TicketRef, key: String) async throws -> TicketFileBody {
+        guard let connection = connections[ref.serverID] else { throw RemoteError.transport("no host") }
+        return try await connection.readTicketFile(ref.ticketID, key: key)
+    }
+
+    /// A ticket's events, oldest first.
+    public func readTicketEvents(_ ref: TicketRef) async throws -> TicketEventsBody {
+        guard let connection = connections[ref.serverID] else { throw RemoteError.transport("no host") }
+        return try await connection.readTicketEvents(ref.ticketID)
+    }
+
+    /// The hosts that serve a ticket's files, events and close.
+    public var evidenceHosts: Set<ServerID> {
+        get async {
+            var hosts: Set<ServerID> = []
+            for (id, connection) in connections where await connection.servesEvidence {
+                hosts.insert(id)
+            }
+            return hosts
+        }
     }
 
     public func readTurn(_ ref: SessionRef, n: Int) async {

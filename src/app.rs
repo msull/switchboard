@@ -6,12 +6,13 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
+use base64::Engine as _;
 use switchboard_control as wire;
 
 use crate::adapters::control::{ControlSocket, Incoming};
@@ -503,10 +504,16 @@ impl SwitchboardApp {
             file_refs::keep_only(&mut self.ui_state.file_links, *id, None);
         }
         let handles_before = self.resume_handles(&action);
-        if let AppAction::DispatchReplied { body, result } = &action {
+        let replied = match &action {
+            AppAction::DispatchReplied { body, result } if !self.ticket_replies.is_empty() => {
+                Some((body.clone(), result.clone()))
+            }
+            _ => None,
+        };
+        let effects = self.core.dispatch(action, now);
+        if let Some((body, result)) = &replied {
             self.answer_ticket_reply(body, result);
         }
-        let effects = self.core.dispatch(action, now);
         for (id, before) in handles_before {
             if self.core.session(id).map(|s| s.resume.clone()) != Some(before) {
                 self.conversations.remove(id);
@@ -2110,7 +2117,7 @@ impl SwitchboardApp {
         self.remote_json(request, value, NOTES_CAP_ALONE)
     }
 
-    /// A decide or a resume on a ticket under `control` scope, checked
+    /// A decide, a resume or a close on a ticket under `control` scope, checked
     /// against the last status here (the decision pending, the answer
     /// among its options, a note where one is needed) and then the
     /// Mac's own action; Dispatch's answer reaches the device through
@@ -2151,6 +2158,20 @@ impl SwitchboardApp {
                 Ok(call) => call,
                 Err(served) => return served,
             }
+        } else if verb == "close" {
+            if !t.closable {
+                return Served::Now(self.refuse(
+                    request,
+                    409,
+                    "not_closable",
+                    &format!("the ticket is {}; it cannot be closed now", t.state),
+                    true,
+                ));
+            }
+            Body::Close {
+                ticket: t.id.clone(),
+                reason: None,
+            }
         } else if t.state == "parked" {
             Body::Resume {
                 ticket: t.id.clone(),
@@ -2176,6 +2197,7 @@ impl SwitchboardApp {
                 answer: answer.clone(),
                 note: note.clone(),
             },
+            Body::Close { .. } => AppAction::DispatchClose(t.id.clone()),
             _ => AppAction::DispatchResume(t.id.clone()),
         };
         self.ticket_replies.push(TicketReply {
@@ -2272,25 +2294,48 @@ impl SwitchboardApp {
                     ..
                 },
             ) => ticket == t && decision == d,
-            (Body::Resume { ticket }, Body::Resume { ticket: t }) => ticket == t,
+            (Body::Resume { ticket }, Body::Resume { ticket: t })
+            | (Body::Close { ticket, .. }, Body::Close { ticket: t, .. })
+            | (Body::Events { ticket, .. }, Body::Events { ticket: t, .. }) => ticket == t,
+            (Body::Artifact { path, .. }, Body::Artifact { path: p, .. }) => path == p,
             _ => false,
         };
-        let Some(at) = self.ticket_replies.iter().position(|r| same(&r.call)) else {
+        // Every device that asked for the same thing gets the one answer.
+        let (pending, kept): (Vec<TicketReply>, Vec<TicketReply>) =
+            std::mem::take(&mut self.ticket_replies)
+                .into_iter()
+                .partition(|r| same(&r.call));
+        self.ticket_replies = kept;
+        if pending.is_empty() {
             return;
-        };
-        let pending = self.ticket_replies.remove(at);
-        let answer = match result {
-            Ok(Reply::Decided(d)) => {
+        }
+        let answer = match (body, result) {
+            (_, Ok(Reply::Decided(d))) => {
                 let value = serde_json::json!({
                     "decision": crate::core::tickets::TicketDecision::from(d),
                 });
                 self.envelope(200, &value, true)
             }
-            Ok(Reply::Ticket(t)) => {
+            (_, Ok(Reply::Ticket(t))) => {
                 let value = serde_json::json!({ "ticket": self.core.ticket_summary(t) });
                 self.envelope(200, &value, true)
             }
-            Ok(Reply::Failed { reason }) => {
+            (Body::Artifact { path, .. }, Ok(Reply::Artifact { text })) => {
+                let mut value = serde_json::json!({
+                    "key": crate::core::tickets::file_key(path),
+                    "text": text,
+                });
+                bound_strings(&mut value, FILE_CAP);
+                self.envelope(200, &value, true)
+            }
+            // The core has taken the events in by now, or marked them
+            // unavailable from this runner; either way the cache answers.
+            (Body::Events { ticket, .. }, Ok(Reply::Events(_) | Reply::Failed { .. })) => {
+                let value =
+                    serde_json::to_value(self.core.ticket_events(ticket)).unwrap_or_default();
+                self.envelope(200, &value, true)
+            }
+            (_, Ok(Reply::Failed { reason })) => {
                 let (status, code) = if reason.starts_with("no such") {
                     (404, "not_found")
                 } else {
@@ -2302,18 +2347,165 @@ impl SwitchboardApp {
                     authenticated: true,
                 }
             }
-            Ok(_) => RemoteReply {
+            (_, Ok(_)) => RemoteReply {
                 status: 500,
                 body: self.error_json("failed", "Dispatch answered with something else"),
                 authenticated: true,
             },
-            Err(e) => RemoteReply {
+            (_, Err(e)) => RemoteReply {
                 status: 503,
                 body: self.error_json("dispatch_off", &format!("Dispatch did not answer: {e}")),
                 authenticated: true,
             },
         };
-        let _ = pending.reply.try_send(answer);
+        for r in pending {
+            let _ = r.reply.try_send(answer.clone());
+        }
+    }
+
+    /// A ticket's events, from the Mac's cache while the ticket has not
+    /// changed since they were read, else read through Dispatch's port
+    /// first; the reply waits for that read. Without a runner the cache
+    /// answers as it stands, and empty-handed it is `dispatch_off`.
+    fn remote_ticket_events(
+        &mut self,
+        request: &RemoteRequest,
+        ticket: &str,
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> Served {
+        let Some(t) = self.core.ticket(ticket) else {
+            return Served::Now(self.refuse(request, 404, "not_found", "no such ticket", true));
+        };
+        let updated_ms = t.updated_ms;
+        let state = self.core.dispatch_state();
+        let cached = state.events.get(ticket);
+        let fresh = cached
+            .is_some_and(|e| e.unavailable || (!e.in_flight && e.asked_at == Some(updated_ms)));
+        if fresh || !state.connected {
+            if cached.is_none() {
+                return Served::Now(self.refuse(
+                    request,
+                    503,
+                    "dispatch_off",
+                    "Dispatch is not running on the host",
+                    true,
+                ));
+            }
+            let value = serde_json::to_value(self.core.ticket_events(ticket)).unwrap_or_default();
+            return Served::Now(self.remote_json(request, value, STRING_CAP));
+        }
+        self.ticket_replies.push(TicketReply {
+            call: Body::Events {
+                ticket: ticket.to_owned(),
+                since: 0,
+            },
+            reply: reply.clone(),
+            asked: Instant::now(),
+        });
+        self.dispatch_inner(AppAction::DispatchReadEvents {
+            ticket: ticket.to_owned(),
+            updated_ms,
+        });
+        Served::Deferred
+    }
+
+    /// One file of a ticket's attempt by its key (`TicketFile`): an
+    /// image straight from the disk, text through the Mac's own read of
+    /// Dispatch's port, from its cache while the ticket has not changed
+    /// since. Dispatch refuses a secret artifact and a file outside the
+    /// ticket's directory, and that refusal is the device's answer.
+    fn remote_ticket_file(
+        &mut self,
+        request: &RemoteRequest,
+        ticket: &str,
+        key: &str,
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> Served {
+        let Some(t) = self.core.ticket(ticket) else {
+            return Served::Now(self.refuse(request, 404, "not_found", "no such ticket", true));
+        };
+        let updated_ms = t.updated_ms;
+        let Some((file, path)) = self.core.ticket_file(ticket, key) else {
+            return Served::Now(self.refuse(request, 404, "not_found", "no such file", true));
+        };
+        if file.image {
+            return Served::Now(self.remote_ticket_image(request, &file, &path));
+        }
+        if !file.inline {
+            return Served::Now(self.refuse(
+                request,
+                415,
+                "not_text",
+                "not a text file; open it on the host",
+                true,
+            ));
+        }
+        if self.core.artifact_current(&path, Some(updated_ms)) {
+            let text = self
+                .core
+                .dispatch_state()
+                .artifacts
+                .get(&path)
+                .cloned()
+                .unwrap_or_default();
+            let value = serde_json::json!({ "key": file.key, "text": text });
+            return Served::Now(self.remote_json(request, value, FILE_CAP));
+        }
+        if !self.core.dispatch_state().connected {
+            return Served::Now(self.refuse(
+                request,
+                503,
+                "dispatch_off",
+                "Dispatch is not running on the host",
+                true,
+            ));
+        }
+        self.ticket_replies.push(TicketReply {
+            call: Body::Artifact {
+                ticket: ticket.to_owned(),
+                path: path.clone(),
+            },
+            reply: reply.clone(),
+            asked: Instant::now(),
+        });
+        self.dispatch_inner(AppAction::DispatchReadArtifact {
+            ticket: ticket.to_owned(),
+            path,
+        });
+        Served::Deferred
+    }
+
+    /// An evidence image as base64 with its media type, read from the
+    /// disk here: the file is one the runner recorded under the ticket,
+    /// and the app opens the same path for the owner on the Mac.
+    fn remote_ticket_image(
+        &self,
+        request: &RemoteRequest,
+        file: &crate::core::tickets::TicketFile,
+        path: &Path,
+    ) -> RemoteReply {
+        let len = match std::fs::metadata(path) {
+            Ok(m) => m.len(),
+            Err(_) => return self.refuse(request, 404, "not_found", "the file is gone", true),
+        };
+        if len > IMAGE_CAP {
+            return self.refuse(
+                request,
+                413,
+                "too_large",
+                "the image is over what the port serves; open it on the host",
+                true,
+            );
+        }
+        let Ok(bytes) = std::fs::read(path) else {
+            return self.refuse(request, 404, "not_found", "the file is gone", true);
+        };
+        let value = serde_json::json!({
+            "key": file.key,
+            "media": crate::core::tickets::image_media(path).unwrap_or("application/octet-stream"),
+            "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+        });
+        self.remote_json(request, value, BODY_CAP)
     }
 
     /// A JSON body for a device: strings bounded, the envelope put
@@ -2863,8 +3055,22 @@ impl SwitchboardApp {
             ("GET", ["dispatch", "tickets", ticket]) => {
                 return Served::Now(self.remote_ticket(request, ticket));
             }
-            ("POST", ["dispatch", "tickets", ticket, verb @ ("decide" | "resume")]) => {
+            (
+                "POST",
+                [
+                    "dispatch",
+                    "tickets",
+                    ticket,
+                    verb @ ("decide" | "resume" | "close"),
+                ],
+            ) => {
                 return self.remote_ticket_command(request, &device, ticket, verb, reply);
+            }
+            ("GET", ["dispatch", "tickets", ticket, "events"]) => {
+                return self.remote_ticket_events(request, ticket, reply);
+            }
+            ("GET", ["dispatch", "tickets", ticket, "files", key]) => {
+                return self.remote_ticket_file(request, ticket, key, reply);
             }
             (
                 "GET",
@@ -3234,7 +3440,7 @@ impl SwitchboardApp {
             "server_id": identity.server_id,
             "server_name": identity.server_name,
             "protocol": REMOTE_PROTOCOL,
-            "capabilities": ["read", "control", "draft", "scope", "tickets"],
+            "capabilities": ["read", "control", "draft", "scope", "tickets", "evidence"],
             "spki_sha256": identity.spki_sha256,
             "version": self.core.version(),
             "limits": {
@@ -3920,6 +4126,12 @@ const DICTATION_EVENTS_CAP: usize = 256;
 /// How often the drafts are fingerprinted for `changed` events.
 const DRAFT_PASS_EVERY: Duration = Duration::from_millis(150);
 const NOTES_CAP_ALONE: usize = 64 * 1024;
+/// The most of a ticket's file a device reads as text: a plan or a
+/// review's findings run long, and a device shows them whole.
+const FILE_CAP: usize = 256 * 1024;
+/// The most of an evidence image the port serves, as base64 inside the
+/// body cap; a screenshot is well under it.
+const IMAGE_CAP: u64 = 700 * 1024;
 
 /// Cut every string in `value` to its cap, `notes` to `notes_cap` and
 /// the rest to `STRING_CAP`, naming each cut field in a `truncated`

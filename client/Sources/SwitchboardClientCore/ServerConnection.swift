@@ -409,6 +409,8 @@ public actor ServerConnection {
 
     /// The host lists Dispatch's tickets; an older one is asked nothing.
     private var servesTickets: Bool { info?.capabilities.contains("tickets") ?? false }
+    /// The host serves a ticket's files, events and close.
+    public var servesEvidence: Bool { info?.capabilities.contains("evidence") ?? false }
 
     /// One event against the held revisions: a `changed` past what a
     /// resource was fetched at refetches that resource, a `removed`
@@ -1060,6 +1062,57 @@ public actor ServerConnection {
             return .accepted
         }
         return .unanswered(lastError ?? "no answer")
+    }
+
+    /// Close a ticket: its trees removed, its branch and record kept.
+    /// No answer either way reads the ticket back, as a resume does.
+    public func closeTicket(_ ticket: String) async -> CommandOutcome {
+        guard let api else { return .unanswered("not connected") }
+        do {
+            let reply = try await api.closeTicket(ticket)
+            record(reply.body.ticket)
+            return .accepted
+        } catch RemoteError.refused(let status, let code, let message) {
+            if status == 401 || (status == 403 && code != "scope") {
+                handle(.refused(status: status, code: code, message: message))
+            }
+            return .refused(message)
+        } catch let error as RemoteError {
+            if case .pinMismatch = error {
+                handle(error)
+                return .unanswered("\(error)")
+            }
+            lastError = "\(error)"
+        } catch {
+            lastError = "\(error)"
+        }
+        if let read = await readTicket(ticket), read.state == "closing" || read.state == "closed" {
+            record(read)
+            return .accepted
+        }
+        return .unanswered(lastError ?? "no answer")
+    }
+
+    /// One file of a ticket by its key: text, or an image as bytes.
+    public func readTicketFile(_ ticket: String, key: String) async throws -> TicketFileBody {
+        guard let api else { throw RemoteError.transport("not connected") }
+        do {
+            return try await api.ticketFile(ticket, key: key).body
+        } catch RemoteError.refused(let status, let code, let message) {
+            if status == 401 { handle(.refused(status: status, code: code, message: message)) }
+            throw RemoteError.refused(status: status, code: code, message: message)
+        }
+    }
+
+    /// A ticket's events, oldest first.
+    public func readTicketEvents(_ ticket: String) async throws -> TicketEventsBody {
+        guard let api else { throw RemoteError.transport("not connected") }
+        do {
+            return try await api.ticketEvents(ticket).body
+        } catch RemoteError.refused(let status, let code, let message) {
+            if status == 401 { handle(.refused(status: status, code: code, message: message)) }
+            throw RemoteError.refused(status: status, code: code, message: message)
+        }
     }
 
     /// A decision as the host recorded it, in place on the held

@@ -117,6 +117,9 @@ public protocol HostAPI: Sendable {
     func ticket(_ id: String) async throws -> Envelope<TicketView>
     func decide(_ ticket: String, _ request: DecideRequest) async throws -> Envelope<DecidedBody>
     func resumeTicket(_ ticket: String) async throws -> Envelope<TicketResumedBody>
+    func closeTicket(_ ticket: String) async throws -> Envelope<TicketResumedBody>
+    func ticketFile(_ ticket: String, key: String) async throws -> Envelope<TicketFileBody>
+    func ticketEvents(_ ticket: String) async throws -> Envelope<TicketEventsBody>
 }
 
 /// One host over HTTPS with the pinning delegate and a bearer token.
@@ -309,6 +312,18 @@ public final class HostClient: HostAPI, @unchecked Sendable {
 
     public func resumeTicket(_ ticket: String) async throws -> Envelope<TicketResumedBody> {
         try await post("dispatch/tickets/\(ticket)/resume", json: [String: String]())
+    }
+
+    public func closeTicket(_ ticket: String) async throws -> Envelope<TicketResumedBody> {
+        try await post("dispatch/tickets/\(ticket)/close", json: [String: String]())
+    }
+
+    public func ticketFile(_ ticket: String, key: String) async throws -> Envelope<TicketFileBody> {
+        try await get("dispatch/tickets/\(ticket)/files/\(key)", query: nil)
+    }
+
+    public func ticketEvents(_ ticket: String) async throws -> Envelope<TicketEventsBody> {
+        try await get("dispatch/tickets/\(ticket)/events", query: nil)
     }
 
     public func runs(_ id: String) async throws -> Envelope<RunsBody> {
