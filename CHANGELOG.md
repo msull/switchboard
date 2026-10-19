@@ -8,6 +8,8 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-19
+
 ### Added
 
 - A session can be opened from the headset: a plus button on the Sessions tab, or "New session in this project" on a listed session, opens a Claude Code, Codex or shell session in a project on any connected host paired under the control scope, in the project's root or a directory under it, with a first message for an agent; the new session's window opens on the reply. The remote port takes `POST projects/{id}/sessions` for it and lists `create` among its capabilities.
