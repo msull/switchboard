@@ -8,7 +8,7 @@ targets visionOS 26.
 
 ```sh
 swift build                      # every target
-swift test                       # 77 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
+swift test                       # 81 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -63,6 +63,9 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   with the unified store, filters and the cross-host order; its loop
   only retries hosts that are not connected.
 - `SwitchboardUI`: `RootView` (the main window's tabs), `BrowserView`,
+  `NewSessionView` (the sheet that opens a Claude Code, Codex or shell
+  session in a project on a host that serves `create`, with a first
+  message for an agent; `NewSessionNaming` gives the default name),
   `TicketsView` (Dispatch's tickets from every host, last moved first,
   with a menu for the order and the filters; a ticket opens on its
   decisions, each answered with a tap, the recommended option marked and

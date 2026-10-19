@@ -21,6 +21,33 @@ public struct UnifiedSession: Identifiable, Sendable, Equatable {
     }
 }
 
+/// A host's projects and workspaces as last fetched, for a sheet that
+/// opens a session on it.
+public struct HostCatalog: Sendable, Equatable {
+    public var projects: [ProjectView]
+    public var spaces: [SpaceView]
+
+    public init(projects: [ProjectView], spaces: [SpaceView]) {
+        self.projects = projects
+        self.spaces = spaces
+    }
+
+    /// The projects grouped by workspace, in the host's order of
+    /// workspaces, the global view left out; a project whose workspace
+    /// is not listed falls under its id.
+    public var byWorkspace: [(name: String, projects: [ProjectView])] {
+        var groups: [(name: String, projects: [ProjectView])] = []
+        for space in spaces where !space.view {
+            let members = projects.filter { $0.space == space.id }
+            if !members.isEmpty { groups.append((space.name, members)) }
+        }
+        let known = Set(spaces.map(\.id))
+        let orphans = projects.filter { !known.contains($0.space) }
+        if !orphans.isEmpty { groups.append(("Other", orphans)) }
+        return groups
+    }
+}
+
 public struct UnifiedSet: Identifiable, Sendable, Equatable {
     public let ref: WorkingSetRef
     public let set: SetView
@@ -598,6 +625,36 @@ public actor ConnectionManager {
     public func readTicketEvents(_ ref: TicketRef) async throws -> TicketEventsBody {
         guard let connection = connections[ref.serverID] else { throw RemoteError.transport("no host") }
         return try await connection.readTicketEvents(ref.ticketID)
+    }
+
+    /// The hosts a session can be opened on from here: connected,
+    /// under the control scope, and serving `create`.
+    public var createHosts: Set<ServerID> {
+        get async {
+            var hosts: Set<ServerID> = []
+            for (id, connection) in connections where await connection.servesCreate {
+                guard await connection.state.isConnected, await connection.server.scope == .control else { continue }
+                hosts.insert(id)
+            }
+            return hosts
+        }
+    }
+
+    /// A host's projects and workspaces, once it has a snapshot.
+    public func catalog(for host: ServerID) async -> HostCatalog? {
+        guard let snapshot = await connections[host]?.snapshot else { return nil }
+        return HostCatalog(projects: snapshot.projects, spaces: snapshot.spaces)
+    }
+
+    /// Open a session in a project on one host.
+    public func newSession(
+        on host: ServerID, project: String, name: String, kind: SessionKind, cwd: String?, prompt: String?
+    ) async -> NewSessionOutcome {
+        guard let connection = connections[host] else { return .unanswered("no host") }
+        let outcome = await connection.newSession(
+            project: project, name: name, kind: kind, cwd: cwd, prompt: prompt)
+        await rebuild()
+        return outcome
     }
 
     /// The hosts that serve a ticket's files, events and close.

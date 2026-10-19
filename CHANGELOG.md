@@ -10,6 +10,7 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ### Added
 
+- A session can be opened from the headset: a plus button on the Sessions tab, or "New session in this project" on a listed session, opens a Claude Code, Codex or shell session in a project on any connected host paired under the control scope, in the project's root or a directory under it, with a first message for an agent; the new session's window opens on the reply. The remote port takes `POST projects/{id}/sessions` for it and lists `create` among its capabilities.
 - The remote port serves Dispatch's tickets: a listing with each ticket's standing and decisions, one ticket with its body, attempts and lanes, and under the control scope a decision answered or a parked ticket resumed. The headset gets a Tickets tab on it.
 - The headset reads what each stage produced: every attempt lists its notes and other artifacts, its checks log, its review rounds' findings and responses and its evidence, each opened with a tap as text or as a picture; a ticket's timeline is read from the runner's event log; and a closable ticket can be closed. The ticket list is ordered last moved first, with a menu for the order (waiting first, newest, by project), the hosts, projects and states (closed hidden unless asked) and a "waiting on me" switch.
 

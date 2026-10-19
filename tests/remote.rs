@@ -906,6 +906,97 @@ fn project_with_root(port: &mut Port, space: &str, root: &std::path::Path) -> St
     made_id(&reply, RecordKind::Project)
 }
 
+/// A control device opens a session in a project: an agent with its
+/// first prompt on its command line, or a shell, in the root or a
+/// directory under it; the op is the key, so a repeat opens nothing
+/// more. A read device, a directory outside the project or missing,
+/// another kind, no name and an unknown project are refused by name.
+#[test]
+fn a_control_device_opens_a_session_in_a_project_and_nowhere_else() {
+    use switchboard::core::{AgentKind, SessionKind as Kind};
+    let mut port = port();
+    let (space, _, _) = seed(&mut port, "");
+    let root = tempfile::Builder::new()
+        .prefix("sbnew")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::create_dir(root.path().join("sub")).unwrap();
+    let project = project_with_root(&mut port, &space, root.path());
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    let path = format!("/api/v1/projects/{project}/sessions");
+    let agent = r#"{"op":"ns1","name":"explorer","kind":"claude","prompt":"Look around."}"#;
+    let (status, reply) = call(&mut port, "POST", &path, t, agent);
+    assert_eq!((status, code(&reply)), (403, "scope"), "{reply}");
+    let id = port.app.core().devices()[0].id;
+    port.app.dispatch(AppAction::SetDeviceScope {
+        device: id,
+        scope: Scope::Control,
+    });
+
+    let spawned = port.host.state().spawned.len();
+    let (status, reply) = call(&mut port, "POST", &path, t, agent);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["made"][0]["kind"], "session");
+    let made = |reply: &serde_json::Value| {
+        let id = reply["body"]["made"][0]["id"].as_str().unwrap();
+        RecordId(uuid::Uuid::parse_str(id).unwrap())
+    };
+    let record = port.app.core().session(made(&reply)).unwrap();
+    assert_eq!(record.name, "explorer");
+    assert_eq!(record.kind, Kind::Agent(AgentKind::ClaudeCode));
+    assert_eq!(record.cwd, root.path(), "the project's root by default");
+    let spawns = port.host.state().spawned.clone();
+    assert_eq!(spawns.len(), spawned + 1, "launched");
+    let argv = spawns.last().unwrap().command.clone().unwrap_or_default();
+    assert_eq!(argv.last().map(String::as_str), Some("Look around."));
+    let (status, _) = call(&mut port, "POST", &path, t, agent);
+    assert_eq!(status, 200);
+    assert_eq!(
+        port.host.state().spawned.len(),
+        spawned + 1,
+        "a repeat of the op opens nothing more"
+    );
+
+    let shell = r#"{"op":"ns2","name":"sub shell","kind":"shell","cwd":"sub"}"#;
+    let (status, reply) = call(&mut port, "POST", &path, t, shell);
+    assert_eq!(status, 200, "{reply}");
+    let record = port.app.core().session(made(&reply)).unwrap();
+    assert_eq!(record.kind, Kind::Shell);
+    assert_eq!(record.cwd, root.path().join("sub"));
+    assert_eq!(port.host.state().spawned.len(), spawned + 2);
+
+    for body in [
+        r#"{"op":"ns3","name":"x","kind":"shell","cwd":"../"}"#,
+        r#"{"op":"ns4","name":"x","kind":"shell","cwd":"/etc"}"#,
+        r#"{"op":"ns5","name":"x","kind":"shell","cwd":"nowhere"}"#,
+        r#"{"op":"ns6","name":"x","kind":"service"}"#,
+        r#"{"op":"ns7","kind":"shell"}"#,
+        r#"{"name":"x","kind":"shell"}"#,
+        "nope",
+    ] {
+        let (status, reply) = call(&mut port, "POST", &path, t, body);
+        assert_eq!(
+            (status, code(&reply)),
+            (400, "bad_request"),
+            "{body}: {reply}"
+        );
+    }
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        "/api/v1/projects/00000000-0000-0000-0000-000000000000/sessions",
+        t,
+        shell,
+    );
+    assert_eq!((status, code(&reply)), (404, "not_found"), "{reply}");
+    assert_eq!(
+        port.host.state().spawned.len(),
+        spawned + 2,
+        "nothing else ran"
+    );
+}
+
 /// A working set in `space` pinning `paths` of `project`.
 fn pin_files(port: &mut Port, space: &str, project: &str, paths: &[&str]) -> String {
     let reply = control(
@@ -1492,6 +1583,7 @@ fn bonjour_advertises_only_while_the_port_is_on_the_lan() {
 /// a test. `SWITCHBOARD_WRITE_FIXTURES=1` rewrites them from a seeded
 /// port.
 /// Every fixture from a seeded port, written to `dir`.
+#[allow(clippy::too_many_lines)] // one entry per fixture
 fn write_fixtures(dir: &std::path::Path) {
     let mut port = port_dispatching(tickets_status());
     let mut scripted = conversation(2);
@@ -1585,6 +1677,17 @@ fn write_fixtures(dir: &std::path::Path) {
         scope: Scope::Control,
     });
     files.extend(content_fixtures(&mut port, &session, &command, &token));
+    files.push((
+        "created",
+        call(
+            &mut port,
+            "POST",
+            &format!("/api/v1/projects/{project}/sessions"),
+            t,
+            r#"{"op":"fixture-new","name":"explorer","kind":"claude","prompt":"Look around."}"#,
+        )
+        .1,
+    ));
     files.push(("file", file_fixture(&mut port, &space, &token)));
     for (name, value) in &mut files {
         if *name == "pair" {
@@ -1788,6 +1891,8 @@ fn the_client_fixtures_decode_on_both_sides() {
     assert!(file["body"]["text"].is_string());
     let closed = read("closed");
     assert_eq!(closed["body"]["ticket"]["state"], "closing");
+    let created = read("created");
+    assert_eq!(created["body"]["made"][0]["kind"], "session");
     let draft = read("draft");
     assert_eq!(draft["body"]["draft"]["text"], "Fix the test. and run");
     assert_eq!(draft["body"]["draft"]["status"], "listening");

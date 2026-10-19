@@ -17,6 +17,8 @@ public final class BrowserModel {
     public private(set) var ticketFilterChoices = TicketFilterChoices()
     /// The hosts that serve a ticket's files, events and close.
     public private(set) var evidenceHosts: Set<ServerID> = []
+    /// The hosts a session can be opened on from here.
+    public private(set) var createHosts: Set<ServerID> = []
     /// Each ticket's events as last read, by ref.
     public private(set) var ticketEvents: [TicketRef: TicketEventsBody] = [:]
     /// The card windows on screen, by window id, so a click on a listed
@@ -134,6 +136,8 @@ public final class BrowserModel {
         if ticketChoices != ticketFilterChoices { ticketFilterChoices = ticketChoices }
         let evidence = await manager.evidenceHosts
         if evidence != evidenceHosts { evidenceHosts = evidence }
+        let create = await manager.createHosts
+        if create != createHosts { createHosts = create }
         discovered = await manager.discovered.map {
             DiscoveredServerRow(instance: $0.instance, serverID: $0.serverID, name: $0.name)
         }.sorted { $0.instance < $1.instance }
@@ -303,6 +307,22 @@ public final class BrowserModel {
 
     public func send(_ ref: SessionRef, text: String) async -> CommandOutcome {
         let outcome = await manager.send(ref, text: text)
+        await pull()
+        return outcome
+    }
+
+    /// A host's projects and workspaces, for the new-session sheet.
+    public func catalog(for host: ServerID) async -> HostCatalog? {
+        await manager.catalog(for: host)
+    }
+
+    /// Open a session in a project on a host; the store is pulled
+    /// after, so an opened one is listed for its window.
+    public func newSession(
+        on host: ServerID, project: String, name: String, kind: SessionKind, cwd: String?, prompt: String?
+    ) async -> NewSessionOutcome {
+        let outcome = await manager.newSession(
+            on: host, project: project, name: name, kind: kind, cwd: cwd, prompt: prompt)
         await pull()
         return outcome
     }
@@ -496,6 +516,8 @@ public struct DiscoveredServerRow: Identifiable, Sendable, Equatable {
 public struct BrowserView: View {
     @Bindable var model: BrowserModel
     @Environment(\.openWindow) private var openWindow
+    /// The new-session sheet, open while this is set.
+    @State private var newSession: NewSessionSeed?
 
     public init(model: BrowserModel) {
         self.model = model
@@ -511,6 +533,14 @@ public struct BrowserView: View {
         }
         .toolbar {
             ToolbarItemGroup {
+                if !model.createHosts.isEmpty {
+                    Button {
+                        newSession = NewSessionSeed()
+                    } label: {
+                        Label("New session", systemImage: "plus")
+                    }
+                    .help("Open a session in a project on a host")
+                }
                 Picker("Layout", selection: $model.browse) {
                     ForEach(BrowseMode.allCases) { mode in
                         Label(mode.title, systemImage: mode.symbol).tag(mode)
@@ -518,6 +548,21 @@ public struct BrowserView: View {
                 }
                 .pickerStyle(.segmented)
                 FilterMenu(model: model).equatable()
+            }
+        }
+        .sheet(item: $newSession) { seed in
+            NewSessionSheet(model: model, seed: seed)
+        }
+    }
+
+    /// The listed session's menu: another window on it, and a new
+    /// session beside it when its host opens one from here.
+    @ViewBuilder
+    private func menu(for item: UnifiedSession) -> some View {
+        Button("Open another window") { openAnother(item) }
+        if model.createHosts.contains(item.ref.serverID) {
+            Button("New session in this project") {
+                newSession = NewSessionSeed(host: item.ref.serverID, project: item.session.project)
             }
         }
     }
@@ -545,7 +590,7 @@ public struct BrowserView: View {
                 ForEach(model.sessions) { item in
                     Button { open(item) } label: { SessionCardView(item: item) }
                         .buttonStyle(.plain)
-                        .contextMenu { Button("Open another window") { openAnother(item) } }
+                        .contextMenu { menu(for: item) }
                 }
             }
             setsSections
@@ -564,7 +609,7 @@ public struct BrowserView: View {
                             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                     }
                     .buttonStyle(.plain)
-                    .contextMenu { Button("Open another window") { openAnother(item) } }
+                    .contextMenu { menu(for: item) }
                 }
             }
             .padding()

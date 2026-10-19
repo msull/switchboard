@@ -65,6 +65,14 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     var files: [String: FileBody] = [:]
     /// The op of every command, in order.
     var ops: [String] = []
+    /// The scope the pairing reply grants.
+    var scope = "read"
+    /// Every session a device opened, as (project, request), each
+    /// listed under the project as `n<count>`.
+    var created: [(String, NewSessionRequest)] = []
+    /// What a done op made, for the status of a creation whose reply
+    /// was lost.
+    var opMade: [String: [MadeView]] = [:]
     /// Runs after a `sessions` reply is built and before it is returned:
     /// a mutation between the snapshot and its delivery.
     var afterSessionsBuilt: (() -> Void)?
@@ -198,7 +206,7 @@ final class FakeHost: HostAPI, @unchecked Sendable {
                 PairReply.self,
                 from: Data(
                     """
-                    {"token":"tok-\(pairs)","scope":"read","server_id":"\(serverID)","device_id":"d1"}
+                    {"token":"tok-\(pairs)","scope":"\(scope)","server_id":"\(serverID)","device_id":"d1"}
                     """.utf8))
         }
     }
@@ -309,8 +317,37 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     func opStatus(_ op: String) async throws -> Envelope<OpStatusBody> {
         lock.lock()
         let status = opStatuses[op] ?? .unknown
+        let made = opMade[op] ?? []
         lock.unlock()
-        return try answer("op:\(op)") { OpStatusBody(status: status) }
+        return try answer("op:\(op)") { OpStatusBody(status: status, made: made) }
+    }
+
+    /// A creation runs on the host even when its reply is lost, as a
+    /// real one may; the op's status then says so and names the record.
+    func newSession(project: String, _ request: NewSessionRequest) async throws -> Envelope<CommandBody> {
+        lock.lock()
+        calls.append("new:\(project):\(request.name)")
+        ops.append(request.op)
+        let silent = commandSilences > 0
+        if silent { commandSilences -= 1 }
+        let refusal = commandRefusal
+        var made: [MadeView] = []
+        if refusal == nil {
+            created.append((project, request))
+            let id = "n\(created.count)"
+            sessions[project, default: []].append(
+                SessionView(id: id, project: project, name: request.name, kind: request.kind))
+            revision += 1
+            made = [MadeView(kind: "session", id: id)]
+            if silent {
+                opStatuses[request.op] = .done(failed: nil)
+                opMade[request.op] = made
+            }
+        }
+        lock.unlock()
+        if silent { throw RemoteError.transport("timed out") }
+        if let refusal { throw refusal }
+        return try answer("new") { CommandBody(made: made) }
     }
 
     func tickets() async throws -> Envelope<TicketsBody> {
@@ -608,6 +645,9 @@ struct Route: HostAPI {
         -> Envelope<CommandBody>
     {
         try await network.route(address, pin).command(id, verb, op: op, text: text)
+    }
+    func newSession(project: String, _ request: NewSessionRequest) async throws -> Envelope<CommandBody> {
+        try await network.route(address, pin).newSession(project: project, request)
     }
     func opStatus(_ op: String) async throws -> Envelope<OpStatusBody> {
         try await network.route(address, pin).opStatus(op)

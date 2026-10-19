@@ -101,6 +101,9 @@ public protocol HostAPI: Sendable {
     func runs(_ id: String) async throws -> Envelope<RunsBody>
     func runOutput(_ id: String, run: Int, lines: Int?) async throws -> Envelope<RunOutputBody>
     /// A command under the control scope; `op` is its idempotency key.
+    /// A new session in a project under the control scope; the body's
+    /// `made` names it.
+    func newSession(project: String, _ request: NewSessionRequest) async throws -> Envelope<CommandBody>
     func command(_ id: String, _ verb: CommandVerb, op: String, text: String?) async throws
         -> Envelope<CommandBody>
     /// What became of an op, after a command got no answer.
@@ -273,6 +276,12 @@ public final class HostClient: HostAPI, @unchecked Sendable {
         var body: [String: String] = ["op": op]
         if let text { body["text"] = text }
         return try await post("sessions/\(id)/\(verb.rawValue)", json: body)
+    }
+
+    public func newSession(project: String, _ request: NewSessionRequest) async throws
+        -> Envelope<CommandBody>
+    {
+        try await post("projects/\(project)/sessions", json: request)
     }
 
     public func opStatus(_ op: String) async throws -> Envelope<OpStatusBody> {

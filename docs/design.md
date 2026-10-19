@@ -3542,6 +3542,23 @@ Built so far:
   timeline, and Close. Left out for now: take, the console, the plan
   review's feedback flow; a worker session is named but not opened,
   since the plain listing hides worker records.
+- **A session opened from the headset (2026-10-19).** The port takes
+  `POST projects/{id}/sessions` under `control` (spec §4.5): the
+  body's `op` the key, through the control socket's `session.new`,
+  a Claude Code, Codex or shell session named by the device, in the
+  project's root or a directory under it (`project_dir` in `app.rs`
+  refuses a path that steps out or is not a directory), an agent's
+  `prompt` its first turn on the command line. `info` lists `create`,
+  and `/ops/{op}` names what a done creation made, so a lost reply
+  still finds its record. The client offers a plus button on the
+  Sessions tab and "New session in this project" on a listed session
+  for a host that is connected, paired under `control` and serves
+  `create`; the sheet (`NewSessionView.swift`) picks the host, the
+  project by workspace, the kind, a name (defaulting to the kind's
+  word and a count), a directory and the first message, and Start
+  opens the session's window on the reply. Not from a device yet:
+  commands and services, environment sets on the new session, a new
+  project or workspace.
 - **Pairing by the typed code (2026-10-14).** visionOS gives an app
   no camera, so the QR code is never scanned on the headset. A
   discovered host that is not paired offers Pair on the Servers screen:
