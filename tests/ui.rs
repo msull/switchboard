@@ -305,9 +305,12 @@ fn the_rail_offers_a_newer_release_and_the_settings_menu_names_the_version() {
     harness.run_steps(2);
     click(&mut harness, "Update ↑");
     assert!(actions(&harness).contains(&AppAction::DownloadUpdate));
+    // The fake's download runs on a thread, so by now the release is
+    // either still downloading or already staged.
     assert!(matches!(
         harness.state().core().update(),
-        switchboard::core::updates::UpdateState::Downloading(r) if r.version == "9.9.9"
+        switchboard::core::updates::UpdateState::Downloading(r)
+        | switchboard::core::updates::UpdateState::Ready { release: r, .. } if r.version == "9.9.9"
     ));
     click(&mut harness, "Settings");
     harness.get_by_label(format!("Switchboard {}", env!("CARGO_PKG_VERSION")).as_str());
