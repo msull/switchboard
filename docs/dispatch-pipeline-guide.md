@@ -218,9 +218,11 @@ merge. It never merges anything itself. While it waits, its decision
 **A project that is not a repository.** `[project] root = "/path"`
 in place of `repo` works in that directory as it is, with no clone and
 no branch per ticket. `[source] kind = "task-file"` with `path` and
-`marker` takes tickets from the lines of a file that carry the marker.
-That shape gives up code review (step 2) and `without_lane` (step 4),
-both of which need a clone.
+`marker` names the lines of a file that carry the marker as its
+tickets, and `kind = "manual"` a ticket typed on the command line;
+both parse today, and nothing takes a ticket from either yet, so a
+GitHub issue is the only intake. That shape also gives up code review
+(step 2) and `without_lane` (step 4), both of which need a clone.
 [Pipeline: PTA](dispatch.md#pipeline-pta) is the worked example.
 
 ## 2. Code review
@@ -1581,7 +1583,141 @@ may = ["restart"]
   `dispatch restart <ticket> [<stage>]` on its own project's tickets.
   Omit the key rather than write it empty.
 
-## 9. Review checklist
+## 9. A research project
+
+Not every ticket ends in code. A research question ("find every place
+the code does X and say which are guarded") wants a document whose
+every claim was checked, and the stages above already hold the pieces:
+an investigator that reads the tree, a writer, and a code review stage
+that puts several reviewers on a branch at once. The document is
+committed on the lane's branch, so the code review stage reviews it
+the way it reviews code: a correctness reviewer opens each cited line,
+a style reviewer reads it as its reader would, and an editor addresses
+their points each round. The pull request lands the document in the
+repository, and `ready` and `merge` are as in step 1.
+
+Why the document is not a `{plan}` artifact: a workflow review stage
+(`review = ..`, `subject = "plan"`, step 1) takes one reviewer. The
+code review stage is the only stage that takes several, and it reviews
+a branch, so the document goes on a branch.
+
+Where questions come from: a GitHub issue on the repository with the
+pipeline's label. The file below is a second project on the same
+repository as step 1, with its own clone and its own label, so a
+research ticket and a feature ticket never share a queue.
+
+```toml
+version = 1
+
+[project]
+name = "Research"
+repo = "git@github.com:msull/switchboard.git"
+base = "main"
+space = "Dispatch · Research"
+
+[source]
+kind = "github"
+repo = "msull/switchboard"
+label = "research"
+
+[[lanes]]
+name = "repo"
+path = "."
+
+[operators.investigator]
+kind = "claude"
+#args = ["--mcp-config", "/path/to/research-mcp.json"]   # the tools a question needs beyond the tree: a wiki, a tracker
+guidance = "Read CLAUDE.md and docs/design.md first. Answer the question from this tree and the tools you are given, nothing else. Every finding carries where you saw it: a file and line as they are in this worktree, or a URL. Say what you looked for and did not find, so the writer can state what is absent. Write nothing but your notes, and write them before your last turn ends: a turn that ends with no notes file is read as a failure, however many background agents are still working for you."
+
+[operators.writer]
+kind = "claude"
+guidance = "Write the document for a reader who knows the repository but did not do the research. Open with the question and the answer in a paragraph, then the findings, one section per group, each claim followed by its source (file and line, or URL). A claim the notes do not support is marked Unverified, never dropped silently. End with a Sources section and a Not found section. Check every file and line against the worktree, not the notes."
+
+[operators.correctness]
+kind = "claude"
+guidance = "Review the document for truth only. Open the file and line each claim cites and read it; a claim the source does not bear out, a cited line that says something else, or a place the document missed that the tree holds is a finding. Preferences are not."
+
+[operators.style]
+kind = "claude"
+guidance = "Review the document as its reader: whether the opening answers the question, whether a section can be acted on, duplication, and length. Start every point with style:."
+
+[operators.editor]
+kind = "claude"
+guidance = "Address one round of review points in the document on this branch. For each point, change the document or say in your response why not; a correctness point is settled by re-reading the cited source, not by rewording. Commit the change."
+
+[[stages]]
+name = "investigate"
+operator = "investigator"
+context = "root"
+writes = ["notes"]
+prompt = "Research question #{issue.number}: {issue.title}\n\n{issue.body}\n\nInvestigate and write your findings to {notes}."
+
+[[stages]]
+name = "lanes"
+gate = { kind = "human", decision = "lanes" }   # one lane: auto below
+
+[[stages]]
+name = "write"
+operator = "writer"
+context = "each"
+writes = ["notes"]
+prompt = "Research question #{issue.number}: {issue.title}\n\n{issue.body}\n\nFrom the investigation at {inputs.notes}, write the document to docs/research/<slug>.md in this worktree, where <slug> is a few lowercase words from the question joined by hyphens. If docs/research/ is new, add one line for it to the Layout table in README.md. Commit on branch {branch}; do not push. Write the document's path to {notes}."
+gate = { kind = "command", in = "lane", argv = ["sh", "-c", "test -z \"$(git status --porcelain)\" && test -n \"$(git ls-files docs/research)\""] }   # committed, and a document exists
+
+[[stages]]
+name = "review-doc"             # the document on the branch is reviewed like code: both reviewers at once, an editor on their points
+context = "each"
+reviewers = ["correctness", "style"]
+implementer = "editor"
+cap = 3
+style_rounds = 2
+commits = "fold"
+gate = { kind = "command", like = "write" }
+
+[[stages]]
+name = "pr"
+operator = "writer"
+context = "each"
+writes = ["notes"]
+prompt = "The document at the path in {inputs.write.notes} on branch {branch} passed review. Push the branch and open a pull request against main with gh. The body is the document's opening paragraph, then one line naming the path. No tool attribution anywhere. Write the PR number to {notes}."
+gate = { kind = "command", in = "lane", argv = ["sh", "-c", "test -z \"$(git status --porcelain)\" && git fetch -q origin && test \"$(git rev-parse HEAD)\" = \"$(git rev-parse origin/$(git rev-parse --abbrev-ref HEAD))\""] }   # nothing uncommitted, and the branch is pushed
+
+[[stages]]
+name = "ready"
+context = "each"
+gate = { kind = "external", check = "pr-checks" }
+
+[[stages]]
+name = "merge"
+context = "each"
+gate = { kind = "external", check = "pr-merged", decision = "merge" }
+
+[policy]
+slots = 2
+waiting_on_me = 3
+rates = { "claude-sonnet-5" = [3.0, 15.0], "claude-opus-5-5" = [15.0, 75.0] }
+decisions = { lanes = "auto", review-code = "auto" }
+```
+
+- **The investigator's `args`** is where tools beyond the tree go: a
+  wiki, a tracker, a document store, each an MCP server named in a
+  `--mcp-config` file. The server's own permission rules still apply;
+  Dispatch adds none.
+- **`write`'s gate** is the stage's contract: the tree is committed
+  and a document exists. The review stage reuses it with `like`, so a
+  review that ends with an uncommitted edit is refused rather than
+  published.
+- **`reviewers`** on a document: the correctness reviewer's guidance
+  says to open each cited source, since a plausible claim with a wrong
+  line number is the usual failure. A reviewer named `style` counts as
+  wording for `style_rounds`, as in step 2.
+- **No `plan` and no `review`**: the question is the plan. A question
+  too wide to answer in one document is two issues.
+- **What to read while it runs:** `dispatch show <ticket>` names the
+  branch and each round's points; `dispatch tail <ticket>` shows the
+  agents; the pull request is the document.
+
+## 10. Review checklist
 
 Each row is a key from the steps above, and what goes wrong without it.
 

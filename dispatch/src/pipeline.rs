@@ -3158,7 +3158,7 @@ ports = [3100, 3199]
             keys_survive(&source, &parsed, "", block);
             checked += 1;
         }
-        assert_eq!(checked, 14, "toml blocks in the guide");
+        assert_eq!(checked, 15, "toml blocks in the guide");
     }
 
     fn back_half_refused(from: &str, to: &str, expected: &str) {
