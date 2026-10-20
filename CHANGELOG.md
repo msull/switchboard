@@ -8,6 +8,10 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+
+- The Mac app declares its `_switchboard._tcp` service and says why when macOS asks for the local network; allowing it is what lets the headset discover the host. The Apple Events prompt now says it brings a session's Ghostty window to the front.
+
 ## [0.3.0] - 2026-10-19
 
 ### Added

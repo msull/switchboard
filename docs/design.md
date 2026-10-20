@@ -3170,26 +3170,31 @@ Built so far:
   `_switchboard._tcp` through `mdns-sd` (`adapters/bonjour.rs`, a stub
   off macOS) while the port is on the local network, under the display
   name with a short id suffix and TXT `v`, `name` and `id`; a rename
-  re-advertises, loopback withdraws. The Swift package under `client/`
-  is the protocol (the wire views as `Codable`, decoded against
-  fixtures the Rust port writes and checks), the transport (`URLSession`
-  with a delegate that accepts only a certificate over the pinned
-  P-256 key, and `Network.framework` browsing), the core (known servers
-  apart from discovery, credentials in the Keychain for the apps and an
-  owner-only file for the command-line browser, one `ServerConnection`
-  actor per host with the §6.2 states, the per-key revision rule, the
-  epoch check, a key change dropping the token and keeping the entry,
-  and the unified store with source labels and offline marks) and a
-  SwiftUI browser. Measured on this Mac with two throwaway instances:
-  discovery finds both, the command-line browser pairs with each and
-  shows both hosts' sessions under distinct labels, a killed host's
-  items stay visible marked offline while the other keeps refreshing,
-  and the host back on another port is reconnected under the same pin
-  within one refresh, because a host that is not connected is resolved
-  again from its Bonjour record on every tick (a killed process sends
-  no goodbye). Not in A2: the visionOS and iPadOS app targets (an
-  Xcode project; the package builds for both), events (A3), and the
-  Swift tests are not in the pre-commit hook or CI.
+  re-advertises, loopback withdraws. Because `mdns-sd` multicasts from
+  the process's own socket, macOS 15 and later put the advertisement
+  behind the Local Network grant, so the bundle names the service and
+  the reason in `Info.plist` (as the visionOS app does, B1); a denial
+  is silent (the port still answers by address). The Swift package
+  under `client/` is the protocol (the wire views as `Codable`,
+  decoded against fixtures the Rust port writes and checks), the
+  transport (`URLSession` with a delegate that accepts only a
+  certificate over the pinned P-256 key, and `Network.framework`
+  browsing), the core (known servers apart from discovery, credentials
+  in the Keychain for the apps and an owner-only file for the
+  command-line browser, one `ServerConnection` actor per host with the
+  §6.2 states, the per-key revision rule, the epoch check, a key
+  change dropping the token and keeping the entry, and the unified
+  store with source labels and offline marks) and a SwiftUI browser.
+  Measured on this Mac with two throwaway instances: discovery finds
+  both, the command-line browser pairs with each and shows both hosts'
+  sessions under distinct labels, a killed host's items stay visible
+  marked offline while the other keeps refreshing, and the host back
+  on another port is reconnected under the same pin within one
+  refresh, because a host that is not connected is resolved again from
+  its Bonjour record on every tick (a killed process sends no
+  goodbye). Not in A2: the visionOS and iPadOS app targets (an Xcode
+  project; the package builds for both), events (A3), and the Swift
+  tests are not in the pre-commit hook or CI.
 - **A3, synchronization.** The revision moves from a read-model diff:
   `core::revision::Fingerprints` hashes every exported view (sessions
   with `quiet_secs` held still, sets, projects, spaces, and each

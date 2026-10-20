@@ -65,7 +65,13 @@ dependency pinned by revision; if cargo cannot fetch it because a git
 `~/.cargo/config.toml`) so the git CLI's credentials are used. The
 bundle declares microphone use (`NSMicrophoneUsageDescription`): a
 bundled app without it gets silence from the microphone, no prompt and
-no error, so listening looks dead.
+no error, so listening looks dead. It also declares the local network
+(`NSLocalNetworkUsageDescription`, `NSBonjourServices`): the host
+advertises over Bonjour from its own socket, so macOS asks for the
+local network, and a denied grant leaves the host reachable by address
+but invisible to discovery, with no error. `cargo run` has no bundle,
+so macOS attributes its multicast to the terminal app and discovery
+from it depends on that app's grant.
 
 Data lives in `~/Library/Application Support/Switchboard/`: one JSON file
 per project under `projects/` (with a `.bak` of the previous version;
@@ -183,7 +189,10 @@ first "Developer ID Application" identity (has a Team ID, so Keychain
 items stay allowed across rebuilds), else a "Switchboard Dev" or "Prompt
 Box Dev" certificate from Keychain Access (keeps the Accessibility grant,
 but the Keychain asks for its items again after each build), else ad-hoc
-(the grant is reset each rebuild). `scripts/icon.sh`
+(the grant is reset each rebuild). macOS may also ask for the local
+network again after a rebuild with another signature; the script cannot
+reset that grant, and it is re-allowed under System Settings > Privacy &
+Security > Local Network. `scripts/icon.sh`
 renders the SVG with AppKit into `assets/Switchboard.icns` for Finder and
 `assets/icon-256.rgba`, which `src/main.rs` embeds for the Dock, and the
 three layers of the visionOS icon (`assets/vision/*.svg`, the same

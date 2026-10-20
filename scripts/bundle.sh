@@ -13,7 +13,9 @@
 # "Switchboard Dev" or "Prompt Box Dev" from Keychain Access (which keeps
 # the Accessibility grant but asks for Keychain items after each build),
 # then ad-hoc, which resets the grant each build. CODESIGN_IDENTITY
-# overrides the search.
+# overrides the search. macOS may also ask for the local network again
+# after the signature changes; tccutil cannot reset that grant, which
+# lives under System Settings > Privacy & Security > Local Network.
 set -eu
 cd "$(dirname "$0")/.."
 DEST="${1:-$HOME/Applications}"
@@ -65,12 +67,22 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key> <string>$VERSION</string>
   <key>CFBundleExecutable</key>      <string>switchboard</string>
   <key>CFBundlePackageType</key>     <string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key> <string>6.0</string>
+  <key>CFBundleDevelopmentRegion</key>     <string>en</string>
+  <key>LSApplicationCategoryType</key>     <string>public.app-category.developer-tools</string>
   <key>LSMinimumSystemVersion</key>  <string>13.0</string>
   <key>NSHighResolutionCapable</key> <true/>
   <key>NSAppleEventsUsageDescription</key>
-  <string>Switchboard raises the terminal window of a session you return to.</string>
+  <string>Switchboard uses System Events to bring the Ghostty window of a session to the front.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Switchboard listens to your voice to dictate prompts to an agent.</string>
+  <!-- Bonjour advertising on macOS needs both: the service named and
+       the reason the system shows when it asks for the local network.
+       The service must match Advertisement::SERVICE in src/ports/remote.rs. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Switchboard announces this Mac to your Vision Pro and iPad on the local network and answers the ones you pair with.</string>
+  <key>NSBonjourServices</key>
+  <array><string>_switchboard._tcp</string></array>
 </dict>
 </plist>
 PLIST
@@ -90,6 +102,7 @@ if [ -z "$IDENTITY" ]; then
     fi
   done
 fi
+LOCAL_NETWORK_HINT="If the headset no longer finds this Mac, check Switchboard under System Settings > Privacy & Security > Local Network."
 if [ -n "$IDENTITY" ]; then
   codesign --force --deep --sign "$IDENTITY" "$APP"
   echo "Signed with \"$IDENTITY\"; Accessibility grants persist across rebuilds."
@@ -101,11 +114,13 @@ if [ -n "$IDENTITY" ]; then
     tccutil reset Accessibility "$ID" >/dev/null 2>&1 || true
     tccutil reset AppleEvents "$ID" >/dev/null 2>&1 || true
     echo "Signing identity changed: re-grant Accessibility when the app next asks."
+    echo "$LOCAL_NETWORK_HINT"
   fi
 else
   codesign --force --deep --sign - "$APP"
   tccutil reset Accessibility "$ID" >/dev/null 2>&1 || true
   echo "Ad-hoc signed: re-grant Accessibility on next launch."
+  echo "$LOCAL_NETWORK_HINT"
 fi
 rm -rf "$PREVIOUS"
 if [ -d "$FINAL" ]; then
