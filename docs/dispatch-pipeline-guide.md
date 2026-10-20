@@ -1695,6 +1695,7 @@ gate = { kind = "external", check = "pr-merged", decision = "merge" }
 [policy]
 slots = 2
 waiting_on_me = 3
+trust_folders = true      # every fresh worktree asks once; answered for the project's agents
 rates = { "claude-sonnet-5" = [3.0, 15.0], "claude-opus-5-5" = [15.0, 75.0] }
 decisions = { lanes = "auto", review-code = "auto" }
 ```
@@ -1711,6 +1712,9 @@ decisions = { lanes = "auto", review-code = "auto" }
   says to open each cited source, since a plausible claim with a wrong
   line number is the usual failure. A reviewer named `style` counts as
   wording for `style_rounds`, as in step 2.
+- **`trust_folders`** is not optional here in practice: every ticket
+  is a fresh worktree, and without it the investigator waits on the
+  folder trust question before it reads a line.
 - **No `plan` and no `review`**: the question is the plan. A question
   too wide to answer in one document is two issues.
 - **What to read while it runs:** `dispatch show <ticket>` names the
