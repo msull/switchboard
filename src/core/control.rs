@@ -792,6 +792,11 @@ impl AppCore {
                 .and_then(super::StopPending::next_wakeup)
                 .and_then(epoch_ms),
             held_until_ms: s.held_until().and_then(epoch_ms),
+            transcript: s
+                .resume
+                .as_ref()
+                .and_then(super::ResumeHandle::transcript)
+                .cloned(),
         })
     }
 

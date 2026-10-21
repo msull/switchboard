@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 27;
+pub const RECORD_VERSION: u32 = 28;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -133,6 +133,12 @@ impl DataDir {
     #[must_use]
     pub fn ticket_file(&self, id: &str) -> PathBuf {
         self.root.join("tickets").join(format!("{id}.json"))
+    }
+
+    /// A ticket's counts cache, beside its files.
+    #[must_use]
+    pub fn usage_file(&self, id: &str) -> PathBuf {
+        self.ticket_dir(id).join("usage.json")
     }
 
     /// The ticket's own directory: its pipeline copy and every attempt's
@@ -598,6 +604,12 @@ pub fn migrate(mut value: Value) -> Value {
         // defaults. Nothing is transformed. A build that would drop them
         // must refuse the record, or a swept directory would be listed
         // again and a drop asked for at close would be lost.
+        //
+        // 27 to 28: a ticket gains `transcripts`, and an attempt gains
+        // `run_sessions` and `agent`, empty and absent from their serde
+        // defaults. Nothing is transformed. A build that would drop them
+        // must refuse the record, or a report would lose the transcripts
+        // that a `/clear` or a removed session record no longer names.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -623,6 +635,44 @@ fn settle_from_verdicts(value: &mut Value) {
             .is_some_and(|e| [LOST, INTERRUPTED, REMOVED, NOT_REPEATED, HARMLESS].contains(&e));
         op.insert("settled".into(), verdict.into());
     }
+}
+
+/// The format of a ticket's `usage.json` this build reads and writes;
+/// one written by a newer `dispatch` is refused, as a record is.
+pub const USAGE_VERSION: u32 = 1;
+
+/// A ticket's counts cache: the transcripts' rows read so far. Absent
+/// reads as empty.
+pub fn read_usage(path: &Path) -> Result<crate::usage::Cache> {
+    if !record_exists(path) {
+        return Ok(crate::usage::Cache::default());
+    }
+    let cache: crate::usage::Cache = read_json(path)?;
+    refuse_newer_usage(path, cache.version)?;
+    Ok(cache)
+}
+
+/// A counts cache a newer dispatch wrote is neither read nor written
+/// over, as `refuse_newer` does for a record.
+fn refuse_newer_usage(path: &Path, version: u32) -> Result<()> {
+    if version > USAGE_VERSION {
+        bail!(
+            "{} is version {version}, written by a newer dispatch; update this one",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Write a ticket's counts cache stamped with this build's version,
+/// refusing one read from a newer build.
+pub fn write_usage(path: &Path, cache: &crate::usage::Cache) -> Result<()> {
+    refuse_newer_usage(path, cache.version)?;
+    let stamped = crate::usage::Cache {
+        version: USAGE_VERSION,
+        ..cache.clone()
+    };
+    write_json(path, &stamped)
 }
 
 /// Write a ticket record stamped with this build's version; one read
@@ -1312,6 +1362,77 @@ mod tests {
         assert_eq!(written["attempts"][0]["evidence"]["name"], "evidence");
         assert_eq!(written["close"]["closed_ms"], 5_000);
         assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
+    fn a_version_twenty_seven_record_migrates_with_no_transcripts_or_run_sessions() {
+        let attempt = r#"{"stage": "review", "n": 1, "context": "root", "kind": "workflow", "state": "running", "project": null, "session": "s-1", "run": "r-1", "artifacts": {}, "settle": {}, "stop_at_ms": null, "head": null, "started_ms": 1000, "ended_ms": null}"#;
+        let text = TICKET_V0
+            .replacen('{', "{\n  \"version\": 27,", 1)
+            .replacen(
+                r#""attempts": [],"#,
+                &format!(r#""attempts": [{attempt}],"#),
+                1,
+            );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert!(t.transcripts.is_empty());
+        assert!(t.attempts[0].run_sessions.is_empty());
+        assert_eq!(t.attempts[0].agent, None);
+        t.transcripts.insert(
+            "s-1".into(),
+            vec![crate::ticket::TranscriptRef {
+                agent: "claude".into(),
+                provider_id: "u-1".into(),
+                path: Some("/c/u-1.jsonl".into()),
+                seen_ms: 2_000,
+            }],
+        );
+        t.attempts[0].run_sessions.insert(
+            "planner".into(),
+            crate::ticket::RunSession {
+                session: "s-1".into(),
+                agent: "claude".into(),
+            },
+        );
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["transcripts"]["s-1"][0]["provider_id"], "u-1");
+        assert_eq!(
+            written["attempts"][0]["run_sessions"]["planner"]["agent"],
+            "claude"
+        );
+        assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
+    fn the_usage_cache_round_trips_and_a_newer_one_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t").join("usage.json");
+        assert_eq!(read_usage(&path).unwrap(), crate::usage::Cache::default());
+        let mut cache = crate::usage::Cache::default();
+        cache.files.insert(
+            "/c/a.jsonl".into(),
+            crate::usage::FileUsage {
+                size: 10,
+                read_ms: 3,
+                ..Default::default()
+            },
+        );
+        write_usage(&path, &cache).unwrap();
+        let read = read_usage(&path).unwrap();
+        assert_eq!(read.version, USAGE_VERSION);
+        assert_eq!(read.files, cache.files);
+        // Written again, the first is kept as `.bak`, as a record's is.
+        write_usage(&path, &read).unwrap();
+        assert!(with_suffix(&path, "bak").exists());
+        let newer = format!(r#"{{"version": {}, "files": {{}}}}"#, USAGE_VERSION + 1);
+        fs::write(&path, newer).unwrap();
+        let err = read_usage(&path).unwrap_err();
+        assert!(format!("{err:#}").contains("newer dispatch"), "{err:#}");
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //! without knowing how they are stored, and a runner on another
 //! machine looks the same through a forwarded socket.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -105,6 +106,9 @@ pub enum Body {
     /// the runner's next pass does the work, which asks the caller's own
     /// control socket.
     SupervisorFresh { project: String },
+    /// A ticket's tokens by model and its agents' time, per session,
+    /// attempt and stage, read from the transcripts its sessions wrote.
+    Usage { ticket: String },
 }
 
 impl Body {
@@ -123,6 +127,7 @@ impl Body {
             Self::Worktrees { .. } => "worktrees",
             Self::Events { .. } => "events",
             Self::SupervisorFresh { .. } => "supervisor-fresh",
+            Self::Usage { .. } => "usage",
         }
     }
 }
@@ -138,7 +143,137 @@ pub enum Reply {
     Taken(TicketView),
     Worktrees(WorktreesView),
     Events(EventsView),
+    Usage(UsageView),
     Failed { reason: String },
+}
+
+/// Tokens one model spent, summed over the messages counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tokens {
+    /// Uncached input; cache writes and reads are counted apart.
+    pub input: u64,
+    /// Output, thinking included.
+    pub output: u64,
+    /// Written to the prompt cache, both lifetimes.
+    pub cache_write: u64,
+    /// The part of `cache_write` kept for an hour, which costs more.
+    pub cache_write_1h: u64,
+    /// Read from the prompt cache.
+    pub cache_read: u64,
+    /// Messages counted, each once however many records it spanned.
+    pub messages: u64,
+}
+
+impl Tokens {
+    /// `other` added into these.
+    pub fn add(&mut self, other: &Tokens) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_write += other.cache_write;
+        self.cache_write_1h += other.cache_write_1h;
+        self.cache_read += other.cache_read;
+        self.messages += other.messages;
+    }
+}
+
+/// Every model's tokens in `from` added into `into`.
+pub fn add_models(into: &mut BTreeMap<String, Tokens>, from: &BTreeMap<String, Tokens>) {
+    for (model, t) in from {
+        into.entry(model.clone()).or_default().add(t);
+    }
+}
+
+/// Where a session's figures came from, or why it has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UsageSource {
+    /// Read from its transcripts.
+    #[default]
+    Transcript,
+    /// A transcript is gone; its figures are the ones read before.
+    Record,
+    /// No transcript was ever recorded or read for it.
+    NotFound,
+    /// A Codex or command session: only its span is known.
+    NotCounted,
+    /// Neither the record nor the pipeline copy says what ran it.
+    KindUnknown,
+}
+
+/// One session a ticket started, as counted.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionUsage {
+    /// `agent`, `rebaser`, `plan reviewer`, `planner`, `round N
+    /// reviewer <name>`, `round N fixer` or `rewriter`.
+    pub role: String,
+    /// `claude`, `codex` or `command`; empty when unknown.
+    pub kind: String,
+    /// The kind was read from the ticket's pipeline copy, which a
+    /// restart may have replaced since.
+    pub kind_from_pipeline: bool,
+    /// Switchboard's record id; none for a command reviewer.
+    pub session: Option<String>,
+    /// Where the figures came from, or why there are none.
+    pub source: UsageSource,
+    /// Tokens by model name.
+    pub models: BTreeMap<String, Tokens>,
+    /// First to last counted record; for a session not counted, its
+    /// round's or attempt's span.
+    pub span_ms: u64,
+    /// Inside turns, less the time an `AskUserQuestion` waited.
+    pub active_ms: u64,
+    /// `AskUserQuestion` calls waiting on their answers.
+    pub asking_ms: u64,
+    /// Between turns.
+    pub idle_ms: u64,
+}
+
+/// One attempt's sessions, and their tokens added up.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AttemptUsage {
+    /// The attempt's stage.
+    pub stage: String,
+    /// The attempt's number within its stage.
+    pub n: u32,
+    /// The attempt's context.
+    pub context: String,
+    /// Its sessions' tokens by model name.
+    pub models: BTreeMap<String, Tokens>,
+    /// In the order the attempt names them.
+    pub sessions: Vec<SessionUsage>,
+}
+
+/// One stage's tokens, its attempts added up.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StageUsage {
+    /// The stage's name.
+    pub stage: String,
+    /// Its attempts' tokens by model name.
+    pub models: BTreeMap<String, Tokens>,
+}
+
+/// A ticket's usage, rolled up for a reader.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UsageView {
+    /// The ticket's id.
+    pub ticket: String,
+    /// Across every attempt.
+    pub models: BTreeMap<String, Tokens>,
+    /// In the order the stages first ran.
+    pub stages: Vec<StageUsage>,
+    /// In attempt order.
+    pub attempts: Vec<AttemptUsage>,
+    /// Sessions whose source is `NotCounted`.
+    pub not_counted: u32,
+    /// Sessions whose source is `NotFound`.
+    pub not_found: u32,
+    /// Sessions whose source is `KindUnknown`.
+    pub kind_unknown: u32,
 }
 
 /// A ticket's events after a cursor, from the runner's log.
@@ -1009,6 +1144,73 @@ mod tests {
             withdrawn: vec![40],
         });
         assert_eq!(Reply::parse(reply.to_line().trim_end()), Ok(reply));
+    }
+
+    #[test]
+    fn the_usage_read_round_trips_through_a_line() {
+        let request = Request::new(
+            "u",
+            Body::Usage {
+                ticket: "t1".into(),
+            },
+        );
+        assert_eq!(request.body.kind(), "usage");
+        assert!(request.to_line().contains(r#""kind":"usage""#));
+        assert_eq!(Request::parse(request.to_line().trim_end()), Ok(request));
+        let models = BTreeMap::from([(
+            "claude-opus-5-5".to_owned(),
+            Tokens {
+                input: 1,
+                output: 2,
+                cache_write: 3,
+                cache_write_1h: 2,
+                cache_read: 4,
+                messages: 1,
+            },
+        )]);
+        let reply = Reply::Usage(UsageView {
+            ticket: "t1".into(),
+            models: models.clone(),
+            stages: vec![StageUsage {
+                stage: "plan".into(),
+                models: models.clone(),
+            }],
+            attempts: vec![AttemptUsage {
+                stage: "plan".into(),
+                n: 1,
+                context: "repo".into(),
+                models: models.clone(),
+                sessions: vec![
+                    SessionUsage {
+                        role: "agent".into(),
+                        kind: "claude".into(),
+                        session: Some("s1".into()),
+                        models,
+                        span_ms: 10,
+                        active_ms: 5,
+                        asking_ms: 2,
+                        idle_ms: 3,
+                        ..SessionUsage::default()
+                    },
+                    SessionUsage {
+                        role: "round 1 reviewer lint".into(),
+                        kind: "command".into(),
+                        source: UsageSource::NotCounted,
+                        ..SessionUsage::default()
+                    },
+                ],
+            }],
+            not_counted: 1,
+            not_found: 0,
+            kind_unknown: 0,
+        });
+        let line = reply.to_line();
+        assert!(line.contains(r#""source":"not-counted""#), "{line}");
+        assert_eq!(Reply::parse(line.trim_end()), Ok(reply));
+        let Reply::Usage(v) = Reply::parse(r#"{"reply":"usage"}"#).unwrap() else {
+            panic!("usage")
+        };
+        assert_eq!(v, UsageView::default());
     }
 
     #[test]

@@ -348,7 +348,7 @@ fn close_ticket(app: &mut SwitchboardApp, id: &str) -> Result<(), String> {
 /// asked Dispatch for it.
 fn ticket_tab(app: &mut SwitchboardApp, id: &str, tab: &str) -> Result<(), String> {
     let tab = crate::ui::ticket::TicketTab::parse(tab)
-        .ok_or("ticket-tab <id> timeline|issue|plan|notes|review|changes")?;
+        .ok_or("ticket-tab <id> timeline|issue|plan|notes|review|changes|usage")?;
     if !app.await_dispatch_status(std::time::Duration::from_secs(10)) {
         return Err("no status from Dispatch".into());
     }

@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use dispatch_control::{AttemptUsage, Tokens, add_models};
+
 use crate::git::RangeSize;
 use crate::pipeline::Pipeline;
 use crate::review::{
@@ -32,6 +34,8 @@ pub struct StageTime {
     pub waiting_ms: u64,
     /// Nudges typed into its agents' sessions, its rounds' included.
     pub nudges: u32,
+    /// Tokens its sessions spent, by model.
+    pub tokens: BTreeMap<String, Tokens>,
 }
 
 /// One round of a review: the points it raised that no earlier round
@@ -131,6 +135,17 @@ pub struct TicketReport {
     pub evidence_files: u32,
     /// Their size in bytes.
     pub evidence_bytes: u64,
+    /// Each attempt's sessions with their tokens and time; empty in a
+    /// total.
+    pub usage: Vec<AttemptUsage>,
+    /// Tokens across every session, by model.
+    pub tokens: BTreeMap<String, Tokens>,
+    /// Sessions only timed: Codex, or a command reviewer.
+    pub not_counted: u32,
+    /// Claude sessions with no transcript recorded or read.
+    pub not_found: u32,
+    /// Sessions whose kind neither the record nor the pipeline says.
+    pub kind_unknown: u32,
 }
 
 /// The plan review's round files beside `subject`: `<stem>.feedback-<n>.md`.
@@ -218,9 +233,11 @@ pub fn pr_range(t: &Ticket) -> Option<(String, String, String)> {
 /// stage names in order; `read` reads a round file or the plan;
 /// `rounds` lists the plan review round numbers beside a reviewed copy
 /// (`plan_round_numbers`); `range`
-/// is git's size of the PR's range when it could be read; `now_ms` ends
-/// a stage still open.
+/// is git's size of the PR's range when it could be read; `usage` is
+/// each attempt's sessions as `usage::of` counted them; `now_ms` ends a
+/// stage still open.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn of(
     t: &Ticket,
     p: Option<&Pipeline>,
@@ -228,6 +245,7 @@ pub fn of(
     read: &dyn Fn(&Path) -> Option<String>,
     rounds: &dyn Fn(&Path) -> Vec<u32>,
     range: Option<RangeSize>,
+    usage: Vec<AttemptUsage>,
     now_ms: u64,
 ) -> TicketReport {
     let mut r = TicketReport {
@@ -260,14 +278,25 @@ pub fn of(
             .iter()
             .map(|a| a.nudges.len() + a.rounds.iter().map(|x| x.nudges.len()).sum::<usize>())
             .sum();
+        let mut tokens = BTreeMap::new();
+        for a in usage.iter().filter(|a| &a.stage == name) {
+            add_models(&mut tokens, &a.models);
+        }
         r.stages.push(StageTime {
             stage: name.clone(),
             attempts: u32::try_from(mine.len()).unwrap_or(u32::MAX),
             ms: start.zip(end).map_or(0, |(s, e)| e.saturating_sub(s)),
             waiting_ms,
             nudges: u32::try_from(nudges).unwrap_or(u32::MAX),
+            tokens,
         });
     }
+    let rolled = crate::usage::view(&t.id, usage);
+    r.tokens = rolled.models;
+    r.not_counted = rolled.not_counted;
+    r.not_found = rolled.not_found;
+    r.kind_unknown = rolled.kind_unknown;
+    r.usage = rolled.attempts;
     for (lane, _, path) in lane_files(t, p, "plan") {
         if let Some(text) = read(path) {
             r.plans.push(PlanSize {
@@ -450,7 +479,12 @@ pub fn total(reports: &[TicketReport]) -> TicketReport {
             e.nudges += s.nudges;
             e.ms += s.ms;
             e.waiting_ms += s.waiting_ms;
+            add_models(&mut e.tokens, &s.tokens);
         }
+        add_models(&mut sum.tokens, &r.tokens);
+        sum.not_counted += r.not_counted;
+        sum.not_found += r.not_found;
+        sum.kind_unknown += r.kind_unknown;
         sum.plan_lines = add(sum.plan_lines, r.plan_lines);
         sum.plan_bytes = add(sum.plan_bytes, r.plan_bytes);
         sum.plan_rounds += r.plan_rounds;
@@ -482,6 +516,16 @@ pub fn total(reports: &[TicketReport]) -> TicketReport {
         .filter_map(|name| stages.remove(&name))
         .collect();
     sum
+}
+
+/// Every model's tokens added into one.
+#[must_use]
+pub fn all_models(models: &BTreeMap<String, Tokens>) -> Tokens {
+    let mut all = Tokens::default();
+    for t in models.values() {
+        all.add(t);
+    }
+    all
 }
 
 fn add<T: std::ops::Add<Output = T>>(a: Option<T>, b: Option<T>) -> Option<T> {
@@ -700,7 +744,16 @@ mod tests {
         t.lanes = vec![rebased, clean];
         t.attempts
             .push(attempt(REFRESH, 1, AttemptKind::Agent, 10_000, 11_000));
-        let r = of(&t, None, &stages(), &files(&[]), &none, None, 99_000);
+        let r = of(
+            &t,
+            None,
+            &stages(),
+            &files(&[]),
+            &none,
+            None,
+            Vec::new(),
+            99_000,
+        );
         assert_eq!(r.rebases, 2);
     }
 
@@ -737,7 +790,7 @@ prompt = "Write {plan}."
             ));
         }
         let read = files(&[("/A.md", "a\nb\n"), ("/B.md", "c\n")]);
-        let r = of(&t, Some(&p), &[], &read, &none, None, 0);
+        let r = of(&t, Some(&p), &[], &read, &none, None, Vec::new(), 0);
         let size = |lane: &str, lines, bytes| PlanSize {
             lane: Some(lane.into()),
             lines,
@@ -771,7 +824,16 @@ prompt = "Write {plan}."
             insertions: 40,
             deletions: 2,
         };
-        let r = of(&t, None, &stages(), &read, &listed, Some(range), 99_000);
+        let r = of(
+            &t,
+            None,
+            &stages(),
+            &read,
+            &listed,
+            Some(range),
+            Vec::new(),
+            99_000,
+        );
         assert_eq!((r.plan_lines, r.plan_bytes), (Some(3), Some(18)));
         assert_eq!(
             r.plans,
@@ -797,7 +859,16 @@ prompt = "Write {plan}."
             Some(("backend".into(), "base0000".into(), "fold0001".into()))
         );
 
-        let r = of(&t, None, &stages(), &read, &listed, None, 99_000);
+        let r = of(
+            &t,
+            None,
+            &stages(),
+            &read,
+            &listed,
+            None,
+            Vec::new(),
+            99_000,
+        );
         assert_eq!(r.commits, Some(1), "the rewrite's count when git has none");
         assert_eq!(r.range, None);
     }
@@ -835,6 +906,7 @@ prompt = "Write {plan}."
             &files(&docs),
             &listed_in(&docs),
             None,
+            Vec::new(),
             99_000,
         );
         let rounds = &r.plan_reviews[0].rounds;
@@ -885,7 +957,7 @@ prompt = "Write {plan}."
             ("/r3.md", "No open points.\n"),
             ("/a2r1.md", "## Open\n\n- a1/r1/style-1 (style): rename\n"),
         ]);
-        let r = of(&t, None, &stages(), &read, &none, None, 50);
+        let r = of(&t, None, &stages(), &read, &none, None, Vec::new(), 50);
         assert_eq!(r.code_points, 2);
         assert_eq!(
             r.code_points_by_reviewer,
@@ -917,7 +989,7 @@ prompt = "Write {plan}."
                 "## Open\n\n- r1/correctness-1 (correctness): the base's guard is gone\n",
             ),
         ]);
-        let r = of(&t, None, &stages(), &read, &none, None, 50);
+        let r = of(&t, None, &stages(), &read, &none, None, Vec::new(), 50);
         assert_eq!((r.code_rounds, r.code_points, r.fix_passes), (2, 1, 1));
         assert_eq!(
             r.code_points_by_reviewer,
@@ -933,7 +1005,16 @@ prompt = "Write {plan}."
         let mut a = attempt("review-code", 1, AttemptKind::Review, 0, 10);
         a.rounds = vec![round(1, RoundState::Fixed, 1, "/gone.md", true)];
         t.attempts = vec![a];
-        let r = of(&t, None, &stages(), &files(&[]), &none, None, 50);
+        let r = of(
+            &t,
+            None,
+            &stages(),
+            &files(&[]),
+            &none,
+            None,
+            Vec::new(),
+            50,
+        );
         assert!(r.code_incomplete);
         assert_eq!(r.code_reviews[0].rounds[0].new, None);
     }
@@ -965,11 +1046,77 @@ prompt = "Write {plan}."
             answered("d2", "supervisor"),
             answered("d3", "supervisor"),
         ];
-        let r = of(&t, None, &[], &|_| None, &none, None, 0);
+        let r = of(&t, None, &[], &|_| None, &none, None, Vec::new(), 0);
         assert_eq!(r.answered_by.get("you"), Some(&1));
         assert_eq!(r.answered_by.get("supervisor"), Some(&2));
         let sum = total(&[r.clone(), r]);
         assert_eq!(sum.answered_by.get("supervisor"), Some(&4));
+    }
+
+    fn tokens(output: u64) -> BTreeMap<String, Tokens> {
+        BTreeMap::from([(
+            "claude-opus-5-5".to_owned(),
+            Tokens {
+                output,
+                messages: 1,
+                ..Tokens::default()
+            },
+        )])
+    }
+
+    fn counted(stage: &str, output: u64, source: dispatch_control::UsageSource) -> AttemptUsage {
+        AttemptUsage {
+            stage: stage.into(),
+            n: 1,
+            context: "backend".into(),
+            models: tokens(output),
+            sessions: vec![dispatch_control::SessionUsage {
+                role: "agent".into(),
+                source,
+                models: tokens(output),
+                ..Default::default()
+            }],
+        }
+    }
+
+    /// Each stage carries its attempts' tokens by model, the ticket all
+    /// of them, and the sessions without tokens are counted by source.
+    #[test]
+    fn usage_lands_on_its_stages_and_the_ticket_and_totals_add_it() {
+        use dispatch_control::UsageSource;
+        let t = closed_ticket();
+        let usage = vec![
+            counted("plan", 10, UsageSource::Transcript),
+            counted("implement", 5, UsageSource::Record),
+            AttemptUsage {
+                sessions: vec![
+                    dispatch_control::SessionUsage {
+                        source: UsageSource::NotCounted,
+                        ..Default::default()
+                    },
+                    dispatch_control::SessionUsage {
+                        source: UsageSource::NotFound,
+                        ..Default::default()
+                    },
+                ],
+                ..counted("review-code", 0, UsageSource::KindUnknown)
+            },
+        ];
+        let r = of(&t, None, &stages(), &files(&[]), &none, None, usage, 99_000);
+        let stage = |name: &str| r.stages.iter().find(|s| s.stage == name).unwrap();
+        assert_eq!(stage("plan").tokens["claude-opus-5-5"].output, 10);
+        assert_eq!(stage("implement").tokens["claude-opus-5-5"].output, 5);
+        assert!(stage("merge").tokens.is_empty());
+        assert_eq!(r.tokens["claude-opus-5-5"].output, 15);
+        assert_eq!((r.not_counted, r.not_found, r.kind_unknown), (1, 1, 0));
+        assert_eq!(r.usage.len(), 3);
+        let sum = total(&[r.clone(), r]);
+        assert_eq!(sum.tokens["claude-opus-5-5"].output, 30);
+        assert_eq!(sum.tokens["claude-opus-5-5"].messages, 6);
+        let plan = sum.stages.iter().find(|s| s.stage == "plan").unwrap();
+        assert_eq!(plan.tokens["claude-opus-5-5"].output, 20);
+        assert_eq!((sum.not_counted, sum.not_found), (2, 2));
+        assert_eq!(all_models(&sum.tokens).output, 30);
     }
 
     #[test]

@@ -14,6 +14,15 @@ use switchboard_control::{
     Request, RunState, RunView, SessionKind, SessionView, SetView, SpaceView,
 };
 
+/// A transcript with one prompt and one message of 100 tokens out, at
+/// a time past any test clock's.
+pub const TRANSCRIPT: &str = concat!(
+    r#"{"type":"user","timestamp":"2099-01-01T00:00:00Z","message":{"role":"user","content":"go"}}"#,
+    "\n",
+    r#"{"type":"assistant","timestamp":"2099-01-01T00:00:05Z","message":{"id":"m1","model":"claude-haiku-5-5","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000}}}"#,
+    "\n",
+);
+
 #[derive(Debug, Clone)]
 pub struct LogLine {
     pub op: String,
@@ -91,6 +100,9 @@ pub struct FakeSwitchboard {
     /// Answer `session.prompt` as an app from before it does: a bad
     /// request, never logged.
     pub old_app: bool,
+    /// Each new agent session's transcript is written here, named by
+    /// its resume id, holding `TRANSCRIPT`, and named on its view.
+    pub transcripts: Option<std::path::PathBuf>,
     counter: u64,
 }
 
@@ -207,6 +219,17 @@ impl FakeSwitchboard {
         op: &str,
     ) -> String {
         let id = self.id("s");
+        let resume = format!("resume-{id}");
+        let transcript = self
+            .transcripts
+            .as_ref()
+            .filter(|_| matches!(kind, SessionKind::Claude | SessionKind::Codex))
+            .map(|dir| {
+                let path = dir.join(format!("{resume}.jsonl"));
+                std::fs::create_dir_all(dir).unwrap();
+                std::fs::write(&path, TRANSCRIPT).unwrap();
+                path
+            });
         self.sessions.push(SessionView {
             id: id.clone(),
             project: project.into(),
@@ -224,11 +247,12 @@ impl FakeSwitchboard {
             waiting_reason: None,
             trust_question: false,
             prompt_refusal: None,
-            resume_id: Some(format!("resume-{id}")),
+            resume_id: Some(resume),
             op: Some(op.into()),
             pending: Vec::new(),
             wakeup_at_ms: None,
             held_until_ms: None,
+            transcript,
         });
         self.resumable.push(id.clone());
         id

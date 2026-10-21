@@ -1,6 +1,6 @@
 //! One Dispatch ticket's page: its header and the decisions pending on
 //! it, then tabs for its timeline, issue, plan with its review rounds,
-//! notes, code review and branch changes. Everything shown came through
+//! notes, code review, branch changes and usage. Everything shown came through
 //! Dispatch's port as a view or was read from the ticket's tree on a
 //! thread; a button is an action the core turns into one call.
 
@@ -21,7 +21,8 @@ use crate::core::dispatch::{
 use crate::core::{AppAction, RecordId};
 use crate::ports::changes::Changes;
 use crate::ports::dispatch::{
-    AttemptView, DecisionView, LaneView, RewriteView, TicketView, nudged,
+    AttemptView, DecisionView, LaneView, RewriteView, SessionUsage, TicketView, Tokens,
+    UsageSource, nudged,
 };
 
 /// The ticket page's tabs.
@@ -34,17 +35,19 @@ pub enum TicketTab {
     Notes,
     Review,
     Changes,
+    Usage,
 }
 
 impl TicketTab {
     /// Every tab, in the strip's order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Timeline,
         Self::Issue,
         Self::Plan,
         Self::Notes,
         Self::Review,
         Self::Changes,
+        Self::Usage,
     ];
 
     /// The tab's name on its button and in a script line.
@@ -57,6 +60,7 @@ impl TicketTab {
             Self::Notes => "Notes",
             Self::Review => "Review",
             Self::Changes => "Changes",
+            Self::Usage => "Usage",
         }
     }
 
@@ -128,6 +132,7 @@ pub fn ticket(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: &str) {
                 TicketTab::Notes => notes(cx, ui, &t, now),
                 TicketTab::Review => review(cx, ui, &t),
                 TicketTab::Changes => changes(cx, ui, &t, now),
+                TicketTab::Usage => usage(cx, ui, &t),
             }
         });
 }
@@ -556,6 +561,188 @@ fn review(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
         if let Some(text) = a.rewrite.as_ref().and_then(rewrite_label) {
             ui.label(theme::meta_text(ui, text));
         }
+    }
+}
+
+/// The tokens the ticket's sessions spent by model, then each attempt's
+/// sessions with their tokens and time, as the runner counted them from
+/// the transcripts. Read only while this tab is drawn, once per change
+/// of the ticket, since a cold read goes through every transcript.
+fn usage(cx: &mut DrawCtx<'_>, ui: &mut Ui, t: &TicketView) {
+    if cx.core.usage_read_due(&t.id, t.updated_ms) {
+        cx.dispatch(AppAction::DispatchReadUsage {
+            ticket: t.id.clone(),
+            updated_ms: t.updated_ms,
+        });
+    }
+    let fetch = cx
+        .core
+        .dispatch_state()
+        .usage
+        .get(&t.id)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(reason) = &fetch.failed {
+        ui.label(theme::meta_text(
+            ui,
+            format!("Usage could not be read: {reason}"),
+        ));
+    }
+    let Some(v) = fetch.view else {
+        if fetch.unavailable {
+            ui.label(theme::meta_text(ui, "This runner does not report usage."));
+        } else if fetch.failed.is_none() && !not_running(cx, ui) {
+            ui.label(theme::meta_text(ui, "Reading the transcripts…"));
+        }
+        return;
+    };
+    let p = theme::palette(ui);
+    theme::section(ui, "Tokens by model");
+    if v.models.is_empty() {
+        ui.label(theme::meta_text(ui, "No tokens counted."));
+    } else {
+        egui::Grid::new(("usage-models", &t.id))
+            .num_columns(6)
+            .spacing(egui::vec2(12.0, 2.0))
+            .show(ui, |ui| {
+                for head in [
+                    "Model",
+                    "In",
+                    "Out",
+                    "Cache write (1h)",
+                    "Cache read",
+                    "Messages",
+                ] {
+                    theme::kicker(ui, head, p.n600);
+                }
+                ui.end_row();
+                for (model, tokens) in &v.models {
+                    ui.label(theme::mono_text(ui, model.clone()));
+                    token_cells(ui, tokens);
+                    ui.label(tokens.messages.to_string());
+                    ui.end_row();
+                }
+            });
+    }
+    for a in &v.attempts {
+        theme::section(ui, &format!("{} #{} {}", a.stage, a.n, a.context));
+        egui::Grid::new(("usage-attempt", &t.id, &a.stage, a.n, &a.context))
+            .num_columns(10)
+            .spacing(egui::vec2(12.0, 2.0))
+            .show(ui, |ui| {
+                for head in [
+                    "Role",
+                    "Model",
+                    "In",
+                    "Out",
+                    "Cache write (1h)",
+                    "Cache read",
+                    "Active",
+                    "Asking",
+                    "Idle",
+                    "Source",
+                ] {
+                    theme::kicker(ui, head, p.n600);
+                }
+                ui.end_row();
+                for session in &a.sessions {
+                    session_rows(ui, session);
+                }
+            });
+    }
+    if v.not_found > 0 {
+        ui.label(theme::meta_text(
+            ui,
+            format!(
+                "{} session(s) not found: `dispatch report {} --refresh` asks Switchboard for their transcripts.",
+                v.not_found, t.id
+            ),
+        ));
+    }
+}
+
+/// One session's rows: one per model it used, its time and source on
+/// the first, or one row with no model when it counted none.
+fn session_rows(ui: &mut Ui, s: &SessionUsage) {
+    let none = Tokens::default();
+    let models: Vec<(&str, &Tokens)> = if s.models.is_empty() {
+        vec![("", &none)]
+    } else {
+        s.models.iter().map(|(m, t)| (m.as_str(), t)).collect()
+    };
+    for (i, (model, tokens)) in models.into_iter().enumerate() {
+        let first = i == 0;
+        ui.label(if first { s.role.clone() } else { String::new() });
+        ui.label(theme::mono_text(ui, model.to_owned()));
+        if model.is_empty() {
+            for _ in 0..4 {
+                ui.label("");
+            }
+        } else {
+            token_cells(ui, tokens);
+        }
+        if first {
+            let counted = matches!(s.source, UsageSource::Transcript | UsageSource::Record);
+            for ms in [s.active_ms, s.asking_ms, s.idle_ms] {
+                ui.label(if counted {
+                    time_text(ms)
+                } else {
+                    String::new()
+                });
+            }
+            ui.label(theme::meta_text(ui, source_text(s)));
+        }
+        ui.end_row();
+    }
+}
+
+/// In, out, cache write with its hour-long part, cache read.
+fn token_cells(ui: &mut Ui, t: &Tokens) {
+    ui.label(count_text(t.input));
+    ui.label(count_text(t.output));
+    ui.label(format!(
+        "{} ({})",
+        count_text(t.cache_write),
+        count_text(t.cache_write_1h)
+    ));
+    ui.label(count_text(t.cache_read));
+}
+
+/// Where a session's figures came from, in words; a session counted
+/// only by its span says how long that was.
+fn source_text(s: &SessionUsage) -> String {
+    let word = match s.source {
+        UsageSource::Transcript => "transcript".to_owned(),
+        UsageSource::Record => "transcript gone, from the record".to_owned(),
+        UsageSource::NotFound => "not found".to_owned(),
+        UsageSource::NotCounted => format!("not counted, {}", time_text(s.span_ms)),
+        UsageSource::KindUnknown => "kind unknown".to_owned(),
+    };
+    let kind = match (s.kind.as_str(), s.kind_from_pipeline) {
+        ("", _) => String::new(),
+        (kind, false) => format!(" · {kind}"),
+        (kind, true) => format!(" · {kind}, kind from the pipeline copy"),
+    };
+    format!("{word}{kind}")
+}
+
+/// "950", "12.3k", "4.1M", as `dispatch report` prints them.
+fn count_text(n: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let f = n as f64;
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{:.1}k", f / 1e3),
+        _ => format!("{:.1}M", f / 1e6),
+    }
+}
+
+/// "45 s", "3 min", "1 h 5 min".
+fn time_text(ms: u64) -> String {
+    if ms < 60_000 {
+        format!("{} s", ms / 1_000)
+    } else {
+        duration_text(ms)
     }
 }
 

@@ -261,6 +261,7 @@ gate = { kind = "command", argv = ["true"], in = "lane" }
             entered: Vec::new(),
             holds: Vec::new(),
             services: Vec::new(),
+            transcripts: BTreeMap::new(),
             created_ms: 0,
             updated_ms: 0,
         }

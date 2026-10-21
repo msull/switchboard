@@ -304,6 +304,16 @@ pub enum OperatorKind {
 /// What each kind of agent needs from its launch. A new kind is one
 /// variant here plus these answers; the scheduler asks, never matches.
 impl OperatorKind {
+    /// The kind as records spell it: `claude`, `codex` or `command`.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Command => "command",
+        }
+    }
+
     /// Whether a reviewer of this kind works in the ticket's tree, where
     /// the code is and where the tree's trust was already granted, or
     /// must sit in the attempt directory because it can only write

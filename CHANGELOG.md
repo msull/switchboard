@@ -8,6 +8,10 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+
+- Dispatch reports each ticket's tokens by model and agent time, per attempt, stage and ticket, in `dispatch report` and a Usage tab on the ticket page.
+
 ## [0.3.0] - 2026-10-19
 
 ### Added

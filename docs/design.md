@@ -3601,6 +3601,70 @@ the bundle after the process exits, keeps the old one aside for a
 failed copy, and relaunches. A pre-release or unparsable tag is never
 offered; a bare binary or an unsigned bundle refuses to install.
 
+## Token and time accounting (2026-10-20)
+
+`dispatch report` and the ticket page's Usage tab show every session a
+ticket started with its tokens by model (input, output, cache write
+with its hour-long part, cache read) and its time: span, active (inside
+turns), asking (an `AskUserQuestion` waiting on its answer) and idle
+(between turns). The counts roll up per attempt, per stage and per
+ticket, and across tickets in `report --project`. They are read from
+Claude Code's transcripts after the fact; only counts, model names and
+timestamps are kept, never message content.
+
+The record keeps what the transcripts cannot be found again without.
+`Ticket.transcripts` lists, per Switchboard record id, every
+`TranscriptRef` (kind, provider id, path, when first seen), a `/clear`
+adding one rather than replacing the last. `Attempt.run_sessions` keeps
+a plan review's reviewer and planner, which only the workflow run names,
+and `Attempt.agent` the kind of operator an agent attempt launched.
+`SessionView.transcript` carries the path from the resume handle. The
+runner notes a ref whenever it reads a session: the stage agent's poll
+(`watched_view`), every review, fixer and rewriter poll (`seen`), the
+first read of a run's sessions in `poll_workflow`, and
+`retire_processes`, which notes a session before judging whether it
+still runs, so one that exited long ago is still recorded at park and
+close. `report --refresh` asks Switchboard once for a ticket from before
+these fields and adds what it finds under the lock.
+
+Each session counts within a window: from its attempt's start (its
+round's, for a round's sessions) to where the next naming of the same
+record id starts. The start drops a clone's copied history, whose
+timestamps come before its attempt, and splits one session that two
+attempts name. A plan review attempt's own `session` is the card's face
+and is left to `run_sessions`. A message is written once per content
+block with the usage growing, so the last record per `message.id` is
+the message; `<synthetic>` is skipped; Agent-tool subagents' files under
+`<transcript minus .jsonl>/subagents/` fold into their parent's tokens,
+not its time. A session's kind is the one recorded beside its id, else
+any ref's, else its operator in the ticket's pipeline copy, marked as
+such. Codex and command sessions are not counted and show their round's
+or attempt's span; a Claude session with no transcript read is "not
+found", and one whose kind nothing says is "kind unknown", never zero.
+
+The rows are cached in `<data>/tickets/<id>/usage.json`
+(`store::USAGE_VERSION`, refused when newer), one entry per file with
+its size, mtime and `read_ms`, so the counts outlive Claude Code's
+deletion of transcripts after `cleanupPeriodDays`; a vanished file's
+entry is kept and marked `gone`. A changed file is read again. Files
+are read with the writer lock not held, and the lock is taken only to
+merge by `read_ms` and write, so two writers keep each other's newer
+entries. The close reads the counts once its processes are retired,
+letting the runner's held lock go around the read as the tree removal
+does. The port answers `usage` from the cache brought up to date, never
+asking Switchboard.
+
+Known gaps: a permission prompt's wait counts as active. A running
+agent's counts on the tab are as of the ticket's last change. Codex is
+not counted. A cold Usage read of a large open ticket holds the port's
+handler for its duration. A ticket from before this change takes a
+session's kind from its pipeline copy, which a restart may have
+replaced. There are no prices: `Policy.rates` cannot price cache
+writes and reads, and the cache keeps the hour-long split and `speed`
+for a price table later. The session page's own token figure sums every
+record and is inflated until its separate fix, so it and the Usage tab
+disagree.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

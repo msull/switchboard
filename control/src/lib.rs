@@ -681,6 +681,10 @@ pub struct SessionView {
     /// when nothing is pending; an older app omits it.
     #[serde(default)]
     pub held_until_ms: Option<u64>,
+    /// The agent's transcript file as last seen, for a reader that
+    /// counts what the session spent. An older app omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -951,6 +955,7 @@ mod tests {
             pending: vec!["shell".into(), "wakeup".into()],
             wakeup_at_ms: Some(2),
             held_until_ms: Some(3),
+            transcript: Some("/t/uuid.jsonl".into()),
         }
     }
 
@@ -1229,8 +1234,18 @@ mod tests {
         // A view from an older app has no refusal, which reads as none.
         let mut line = serde_json::to_value(session()).unwrap();
         line.as_object_mut().unwrap().remove("prompt_refusal");
+        // Nor a transcript, which reads as none and is not written back.
+        line.as_object_mut().unwrap().remove("transcript");
         let view: SessionView = serde_json::from_value(line).unwrap();
         assert_eq!(view.prompt_refusal, None);
+        assert_eq!(view.transcript, None);
+        assert!(
+            !serde_json::to_value(&view)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("transcript")
+        );
         // A resume starts a paid turn: recovery never repeats it.
         assert_eq!(
             Body::SessionResume {
