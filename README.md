@@ -480,6 +480,7 @@ vendor/egui_term/        embedded terminal widget (Harzu/egui_term @ 31bbc7ab, e
 firmware/nunchuk/        CircuitPython for the Feather that reports the nunchuk's buttons and stick
 docs/research/           answers to one research question each, every claim cited to a file and line
 spikes/                  Spike 0 evidence, and later spikes such as 13-dispatch-service (a Dispatch service as a Switchboard service session; which bind sees a dev server's port) 15-paste-buffer (a multi-line send as one tmux paste, bracketed only for a pane that asked) 16-base-pipeline (a merged pull request's merge commit and the base's run on it) 17-prompt-origin (telling a typed prompt from a task notification or a harness reminder) 18-tmux-argv (keeping spawn's environment values off every process's argv) 19-structured-ask (a card's answer reaching the pane as its next prompt) 20-stop-pending (what a Stop lists as background work and wakeups still in flight) and 21-evidence-writes (which writes reach an evidence directory without a permission prompt)
+experiments/plan-trial/  the planning trial on a second Mac: two issues, twelve plans each (the pipeline at three models and a single session at three, twice over); a runbook, the arm pipelines, the scripts that take, run, collect and blind, and the rubric
 ```
 
 The flow for any feature: the UI dispatches an `AppAction`; the core

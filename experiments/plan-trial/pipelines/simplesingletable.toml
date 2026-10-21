@@ -1,0 +1,140 @@
+# The simplesingletable pipeline as a plan trial project. make-arms.sh writes one copy
+# per arm with PROJECT and MODEL filled in; the live pipeline file it was
+# taken from is the one under Dispatch's data directory. Differences from
+# it: no supervisor, one slot, a cap of six review rounds, the model set
+# on the investigator, planner and reviewer, and trust_folders on.
+version = 1
+
+[project]
+name = "PROJECT"
+repo = "git@github.com:msull/simplesingletable.git"
+base = "main"
+space = "Plan trial · simplesingletable"
+
+[source]
+kind = "github"
+repo = "msull/simplesingletable"
+label = "dispatch"
+
+[[lanes]]
+name = "repo"
+path = "."
+setup = ["uv", "sync", "--extra", "dev"]
+
+[operators.investigator]
+kind = "claude"
+args = ["--model", "MODEL"]
+guidance = "Read CLAUDE.md and AGENT_KNOWLEDGE.md first. Find the code the issue touches in src/simplesingletable and the tests that cover it in tests/. Say what behaviour changes, which public API is affected, and whether it is a bug fix or an enhancement for the CHANGELOG. Write nothing but your notes."
+
+[operators.planner]
+kind = "claude"
+args = ["--model", "MODEL"]
+guidance = "Write a plan a second engineer could implement without asking questions: the files to change, the new or changed public API with signatures, the tests to add in tests/ (they run against DynamoDB Local), and the CHANGELOG entry under ## [Unreleased]. Do not plan a version bump or a release; inv fullrelease does both."
+
+[operators.reviewer]
+kind = "claude"   # Claude Code as the reviewer until Codex gets an improvement pass
+args = ["--model", "MODEL"]
+guidance = "Hold the plan to the conventions in CLAUDE.md."
+[operators.reviewer.review]
+reviewer = "claude"
+review_first = "The plan at {plan} is for the repository at {worktree}, on branch {branch}. Review it against that repository's CLAUDE.md and AGENT_KNOWLEDGE.md: Pydantic models and type hints throughout, custom exceptions from exceptions.py, tests against DynamoDB Local for every behaviour change, a CHANGELOG entry under ## [Unreleased] and never a hand-written version header, no version bump. Check the plan keeps existing single-table key formats and GSI behaviour compatible unless the issue asks otherwise. Write numbered objections to {feedback}. If there are none, write exactly this line alone: {no_feedback}"
+review_round = "The planner answered at {response} and updated the plan at {plan} (for the repository at {worktree}). Re-read the plan, reply to each point at {feedback}, and if you are satisfied write exactly this line alone: {no_feedback}"
+respond = "Feedback on your plan is at {feedback}. The plan under review is the copy at {plan}. First read that file, then edit it and only it, leaving the earlier plan untouched. Re-read it to confirm each edit is in the file before you write a word of the response: a response that describes an edit the file does not contain costs a whole round. Then answer each point at {response}, each answer naming the section of the plan that changed, or saying why the plan did not change."
+respond_to_user = "The user says: {text}. Edit the copy at {plan} and only that file, then answer at {response}."
+handoff = "The plan at {plan} was reviewed and is final."
+no_feedback = "No further feedback."
+cap = 6
+
+[operators.correctness]
+kind = "claude"
+guidance = "You review a branch of simplesingletable for correctness: DynamoDB access patterns that do not match the resource's keys and indexes, versioning and conditional writes that can lose an update, tests that do not exercise the change, a CHANGELOG entry missing under Unreleased. Read CLAUDE.md first. Say where and why; do not restate the diff."
+
+[operators.style]
+kind = "claude"
+guidance = "You review a branch of simplesingletable against its conventions: typing and docstrings on public API, no behaviour hidden in helpers, README and docs updated for new API. Say where and why; do not restate the diff."
+
+[operators.implementer]
+kind = "claude"
+guidance = "Implement the finalized plan on the branch. Tests need Docker for DynamoDB Local: uv run --frozen pytest. Lint with uv run --frozen inv lint. Add the CHANGELOG entry under ## [Unreleased]; do not bump the version. Commit messages carry no tool attribution. Do not push or open a pull request; a later stage does that once the branch passed code review."
+
+[operators.fixer]
+kind = "claude"
+guidance = "You wrote this branch. When its PR checks are red, read the failed run and fix the cause; when reviewers raised points, address each on the branch or say in your response why not. Keep this change's intent, run uv run --frozen inv lint and uv run --frozen pytest, commit, then push. Fix the change, not the checks, unless the check itself is what this change adds. Never merge."
+
+[operators.rebaser]
+kind = "claude"
+guidance = "You wrote this branch; another PR merged first. Rebase onto the base, keep both sides' CHANGELOG entries under ## [Unreleased], resolve code conflicts keeping this change's intent, run uv run --frozen inv lint and uv run --frozen pytest, then push with --force-with-lease. Never merge."
+
+[[stages]]
+name = "investigate"
+operator = "investigator"
+context = "root"
+writes = ["notes"]
+prompt = "Issue #{issue.number}: {issue.title}\n\n{issue.body}\n\nInvestigate and write your findings to {notes}."
+
+[[stages]]
+name = "lanes"
+gate = { kind = "human", decision = "lanes" }   # one lane: auto below
+
+[[stages]]
+name = "plan"
+operator = "planner"
+context = "each"
+writes = ["plan"]
+prompt = "Using the investigation at {inputs.notes}, write a plan for issue #{issue.number} ({issue.title}) to {plan}. The issue text:\n\n{issue.body}"
+
+[[stages]]
+name = "review"
+review = "reviewer"
+context = "each"
+subject = "plan"
+gate = { kind = "external", check = "review-finalized" }
+
+[[stages]]
+name = "implement"
+operator = "implementer"
+context = "each"
+writes = ["notes"]
+prompt = "The plan at {inputs.plan} was reviewed and finalized. Implement it on branch {branch} in this worktree, commit, and write your notes to {notes}. Do not push or open a pull request."
+gate = { kind = "command", argv = ["sh", "-c", "docker info >/dev/null 2>&1 || { echo \"the Docker daemon is not running (colima start); pytest needs it for DynamoDB Local\"; exit 1; }; uv run --frozen inv lint && uv run --frozen pytest"], in = "lane" }
+
+[[stages]]
+name = "review-code"
+context = "each"
+reviewers = ["correctness", "style"]
+implementer = "fixer"
+cap = 3
+commits = "fold"             # each fix round folds into the commits it amends; the tree is unchanged, so the checks are not run again
+gate = { kind = "command", like = "implement" }
+
+[[stages]]
+name = "pr"                    # the reviewed branch is published once: one CI run, nothing unreviewed in a PR
+operator = "implementer"
+context = "each"
+writes = ["notes"]
+prompt = "The branch {branch} in this worktree was implemented from the plan at {inputs.plan} and passed code review. Push it and open a pull request against main with gh. The body has four sections: what it does and how; Public API (every added or changed public class, method or field with its signature, or None); Beyond the issue (one line per thing the branch does that the issue did not ask for and which review round asked for it, or Nothing); and the tests that pin each behaviour. It describes the branch as it is now, after review. No tool attribution anywhere. Write the PR number to {notes}."
+gate = { kind = "command", in = "lane", argv = ["sh", "-c", "test -z \"$(git status --porcelain)\" && git fetch -q origin && test \"$(git rev-parse HEAD)\" = \"$(git rev-parse origin/$(git rev-parse --abbrev-ref HEAD))\""] }   # nothing uncommitted, and the branch is pushed
+
+[[stages]]
+name = "inspect"                 # your look at the branch before it goes further; rerun with a note sends it back to implement
+context = "each"
+gate = { kind = "human", decision = "inspect" }
+
+[[stages]]
+name = "ready"
+context = "each"
+gate = { kind = "external", check = "pr-checks" }   # GitHub Actions lint + test on the PR head
+
+[[stages]]
+name = "merge"
+context = "each"
+gate = { kind = "external", check = "pr-merged", decision = "merge" }
+
+
+[policy]
+slots = 1                    # one ticket per trial project
+waiting_on_me = 3
+trust_folders = true         # a fresh worktree's folder-trust question, answered for the trial's agents
+fixer = "fixer"
+rebaser = "rebaser"
+decisions = { lanes = "auto", finalize = "ask", review-code = "auto" }

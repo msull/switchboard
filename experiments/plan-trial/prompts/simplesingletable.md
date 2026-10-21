@@ -1,0 +1,1 @@
+Write a plan a second engineer could implement without asking questions: the files to change, the new or changed public API with signatures, the tests to add in tests/ (they run against DynamoDB Local), and the CHANGELOG entry under ## [Unreleased]. Do not plan a version bump or a release; inv fullrelease does both.

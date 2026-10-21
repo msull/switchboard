@@ -1,0 +1,143 @@
+# The Switchboard pipeline as a plan trial project. make-arms.sh writes one copy
+# per arm with PROJECT and MODEL filled in; the live pipeline file it was
+# taken from is the one under Dispatch's data directory. Differences from
+# it: no supervisor, one slot, a cap of six review rounds, the model set
+# on the investigator, planner and reviewer, and trust_folders on.
+version = 1
+
+[project]
+name = "PROJECT"
+repo = "git@github.com:msull/switchboard.git"
+base = "main"
+space = "Plan trial · Switchboard"
+
+[source]
+kind = "github"
+repo = "msull/switchboard"
+label = "dispatch"            # marking an issue with it is the handover
+
+[[lanes]]
+name = "repo"
+path = "."
+# The tree builds in its own target directory: ~/.cargo/config.toml shares
+# one across every checkout, and cargo then reuses one worktree's build of
+# a workspace crate for another. The config file is excluded from status
+# through the clone's info/exclude, which every worktree of it shares.
+setup = ["sh", "-c", "mkdir -p .cargo && printf '[build]\\ntarget-dir = \"target\"\\n' > .cargo/config.toml && x=\"$(git rev-parse --git-common-dir)/info/exclude\" && (grep -qx .cargo/config.toml \"$x\" 2>/dev/null || echo .cargo/config.toml >> \"$x\") && cargo fetch --locked"]
+
+[operators.investigator]
+kind = "claude"
+args = ["--model", "MODEL"]
+guidance = "Read CLAUDE.md, docs/design.md and docs/lessons.md first. Find the code the issue touches, name the files with line numbers as they are in this worktree, and say what the on-disk record and rehydration would be before what the pane looks like. Write nothing but your notes, and write them before your last turn ends: a turn that ends with no notes file is read as a failure, however many background agents are still working for you. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live."
+
+[operators.planner]
+kind = "claude"
+args = ["--model", "MODEL"]
+guidance = "Write the plan the way docs/design.md sections are written: a heading Where this departs from the issue first (each claim in the issue the code does not bear out and what the plan does instead, or the one line Nothing), then the record, the signals, the actions and effects, the UI, the tests. One commit, README and design status updated, the app runs at every step. Every file and line reference is checked against the worktree you are in, not the notes; name the schema versions as they are today. A version number in a plan is a snapshot: write the bump as: from the value in store.rs or model.rs at implementation time, plus one, because a ticket landing in parallel may take the next number first. Size the plan to the change: a section with nothing to say (no record change, no new signal, no UI) is one line saying so, not a heading with prose under it; a small issue gets a short plan. End with a one-line commit message and the list of contract additions, which the implementer copies. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live."
+
+[operators.reviewer]
+kind = "claude"   # Claude Code as the reviewer until Codex gets an improvement pass
+args = ["--model", "MODEL"]
+guidance = "Hold the plan to the layering in src/lib.rs and the hard rules in CLAUDE.md. Work in this session only: launch no background agents or subagents, and write your file before you end your turn."
+[operators.reviewer.review]
+reviewer = "claude"
+review_first = "The plan at {plan} is for the repository at {worktree}, on branch {branch}. Review it against that repository's CLAUDE.md and docs/design.md: no keystroke injection, no writes into a project's dot-directories, additive contract, schema bump for any serialized change, and that its line references and schema versions match the worktree as it is now, not an older main. Write numbered objections to {feedback}: things the plan gets wrong or leaves out, not preferences. If there are none, write exactly this line alone: {no_feedback}"
+review_round = "The planner answered at {response} and updated the plan at {plan} (for the repository at {worktree}). Re-read the plan, reply to each point at {feedback} in one line each, and raise a new point only if the answer to an old one created it. If you are satisfied write exactly this line alone: {no_feedback}"
+respond = "Feedback on your plan is at {feedback}. The plan under review is the copy at {plan}. First read that file, then edit it and only it, leaving the earlier plan untouched. Re-read it to confirm each edit is in the file before you write a word of the response: a response that describes an edit the file does not contain costs a whole round. Then answer each point at {response}, each answer naming the section of the plan that changed, or saying why the plan did not change."
+respond_to_user = "The user says: {text}. Edit the copy at {plan} and only that file, then answer at {response}."
+handoff = "The plan at {plan} was reviewed and is final."
+no_feedback = "No further feedback."
+cap = 6
+
+[operators.correctness]
+kind = "claude"
+guidance = "You review a branch of Switchboard for correctness only: logic that does not do what the plan says, a state the core can reach that the UI cannot show, an effect that runs twice or never, a record change without its SCHEMA_VERSION step, a test that passes for the wrong reason. Read docs/design.md's binding sections and CLAUDE.md first. Say where and why, with the failing input or state; do not restate the diff. After the first round, read only the change since the head you last reviewed plus your open points; withdraw a settled point in one line and do not reopen it. Wording and layout are the style reviewer's, not yours. Work in this session only: launch no background agents or subagents. Write your feedback file with the Write tool before you end your turn; a turn that ends without it fails the round and stops the other reviewer too. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live."
+
+[operators.style]
+kind = "claude"
+guidance = "You review a branch of Switchboard against CLAUDE.md's Style and Architecture sections: comments that narrate instead of explain, logic under ui/, I/O or clocks in the core, missing doc comments on public items, clever code where simple would do, debris a fix round left (a value nothing reads, a block left from moving code, a doubled doc comment), README and design.md not updated for what changed. Say where and why; do not restate the diff. After the first round, read only the change since the head you last reviewed plus your open points; withdraw a settled point in one line. When every point you have left is wording, say so in your first line so the round can close on it. Work in this session only: launch no background agents or subagents. Write your feedback file with the Write tool before you end your turn; a turn that ends without it fails the round and stops the other reviewer too. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live."
+
+[operators.implementer]
+kind = "claude"
+guidance = "Implement the finalized plan on the branch in the commits the plan names, with the plan's commit message and its list of contract additions. Before each commit: cargo fmt --all, cargo clippy --locked --workspace --all-targets -- -D warnings, cargo test --locked --workspace. Commit messages carry no tool attribution. Do not push and do not open a pull request: the branch is reviewed first and published by a later stage. Write to your notes what you built, the commits, and anything the plan got wrong. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live. The stage is not done until git status is empty: commit before your last turn ends, and check it. A dirty tree fails the attempt. Before bumping RECORD_VERSION or SCHEMA_VERSION, read the value in your worktree: the plan was written against an older main, so bump from what is there and write the migrate step for that pair. If your change touches a cfg(target_os) arm or anything else that compiles only on one platform, also run cargo clippy --locked -p dispatch --all-targets --target x86_64-unknown-linux-gnu -- -D warnings (the Linux std target is installed; the whole workspace cannot be cross-checked, only the dispatch crate), because CI runs on Linux and a scoped allow or an unused import there fails the PR."
+
+[operators.fixer]
+kind = "claude"
+guidance = "You address one round of code review points on a Switchboard branch. For each point: fix it, or say in your response why not. Commit with git commit --fixup=<sha> naming the implementation commit the fix amends when that is clear; otherwise a plain commit, which Dispatch folds into the head this round reviewed. When your fix renames or removes something the implementation commit message names (its contract list, a function, a test), use git commit --squash=<sha> instead, with a body that states the corrected name, so the folded message stays true. Leave nothing behind from the fix: everything you add is read by something, no block or indirection is left from moving code, every doc comment sits on one item. Run cargo fmt --all, cargo clippy --locked --workspace --all-targets -- -D warnings and cargo test --locked --workspace, then commit with a message that says what changed, never the round number. Commit messages carry no tool attribution. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live. If your change touches a cfg(target_os) arm or anything else that compiles only on one platform, also run cargo clippy --locked -p dispatch --all-targets --target x86_64-unknown-linux-gnu -- -D warnings (the Linux std target is installed; the whole workspace cannot be cross-checked, only the dispatch crate), because CI runs on Linux and a scoped allow or an unused import there fails the PR."
+
+[operators.rebaser]
+kind = "claude"
+args = ["--model", "sonnet"]
+guidance = "You rebase a Switchboard branch onto its moved base. Keep the change's intent on every conflict; when main changed the same code for its own reasons, keep both intents. After resolving, run cargo fmt --all --check, cargo clippy --locked --workspace --all-targets -- -D warnings and cargo test --locked --workspace in the worktree, and say in your notes which hunks had both sides kept. If the branch has a pull request, the rebase must leave its body true: fix any claim the rebase changed with gh pr edit, and when you kept both sides of a conflict add one line saying where. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live."
+
+[[stages]]
+name = "investigate"
+operator = "investigator"
+context = "root"
+writes = ["notes"]
+prompt = "Issue #{issue.number}: {issue.title}\n\n{issue.body}\n\nInvestigate and write your findings to {notes}."
+
+[[stages]]
+name = "lanes"
+gate = { kind = "human", decision = "lanes" }   # one lane: auto below
+
+[[stages]]
+name = "plan"
+operator = "planner"
+context = "each"
+writes = ["plan"]
+prompt = "Issue #{issue.number}: {issue.title}\n\n{issue.body}\n\nUsing the investigation at {inputs.notes}, write a plan for it to {plan}."
+
+[[stages]]
+name = "review"
+review = "reviewer"
+context = "each"
+subject = "plan"
+# A Switchboard plan review on a copy of the plan: the plan attempt's
+# session is the source. Done when the run is finalized, which is the
+# `finalize` decision below unless the dial says auto. Writes `plan`.
+gate = { kind = "external", check = "review-finalized" }
+
+[[stages]]
+name = "implement"
+operator = "implementer"
+context = "each"
+writes = ["notes"]
+prompt = "The plan at {inputs.plan} was reviewed and finalized. Implement it on branch {branch} in this worktree, commit, and write your notes to {notes}. Do not push or open a pull request."
+gate = { kind = "command", argv = ["sh", "-c", "cargo fmt --all -- --check && cargo clippy --locked --workspace --all-targets -- -D warnings && cargo test --locked --workspace"], in = "lane" }
+
+[[stages]]
+name = "review-code"           # two reviewers read the branch at once; a fresh implementer addresses their points; implement's checks at the accepted head
+context = "each"
+reviewers = ["correctness", "style"]
+implementer = "fixer"
+cap = 3
+commits = "fold"             # as the stage completes, each fix round folds into the commits it amends; the tree is unchanged, so the checks are not run again
+gate = { kind = "command", like = "implement" }
+
+[[stages]]
+name = "pr"                    # the reviewed branch is published once: one CI run, nothing unreviewed in a PR
+operator = "implementer"
+context = "each"
+writes = ["notes"]
+prompt = "The branch {branch} in this worktree was implemented from the plan at {inputs.plan} and passed code review. Push it and open a pull request against main with gh. The body has four sections: what it does and how; Contract additions (every added action, effect, port method, model field or wire field, and any schema bump, or None); Beyond the issue (one line per thing the branch does that the issue did not ask for and which review round asked for it, or Nothing); and the tests that pin each behaviour. It describes the branch as it is now, after review. No tool attribution anywhere. Write the PR number to {notes}."
+gate = { kind = "command", in = "lane", argv = ["sh", "-c", "test -z \"$(git status --porcelain)\" && git fetch -q origin && test \"$(git rev-parse HEAD)\" = \"$(git rev-parse origin/$(git rev-parse --abbrev-ref HEAD))\""] }   # nothing uncommitted, and the branch is pushed
+
+[[stages]]
+name = "ready"
+context = "each"
+gate = { kind = "external", check = "pr-checks" }   # at the branch head; pending is waiting, not failure
+
+[[stages]]
+name = "merge"
+context = "each"
+gate = { kind = "external", check = "pr-merged", decision = "merge" }   # pending on you until GitHub says merged; rebundle is yours
+
+
+[policy]
+slots = 1                    # one ticket per trial project
+waiting_on_me = 3
+trust_folders = true         # a fresh worktree's folder-trust question, answered for the trial's agents
+rebaser = "rebaser"
+max_rebases = 2
+decisions = { lanes = "auto", finalize = "ask", review-code = "auto" }
