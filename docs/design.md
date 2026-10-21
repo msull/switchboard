@@ -3661,9 +3661,13 @@ handler for its duration. A ticket from before this change takes a
 session's kind from its pipeline copy, which a restart may have
 replaced. There are no prices: `Policy.rates` cannot price cache
 writes and reads, and the cache keeps the hour-long split and `speed`
-for a price table later. The session page's own token figure sums every
-record and is inflated until its separate fix, so it and the Usage tab
-disagree.
+for a price table later. The session page counts each `message.id`
+once and skips `<synthetic>`, as the tab does, but it reads only the
+main transcript and counts an assistant record with no `message.id`
+once, which the tab drops. The two agree only for a session with no
+subagent files whose records all carry an id; a session whose
+Agent-tool subagents wrote their own files shows fewer tokens on the
+session page.
 
 ## Open questions
 

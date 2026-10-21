@@ -3,6 +3,8 @@
 //! final response. The adapter (`adapters::transcript`) knows the file
 //! format; the UI only sees this.
 
+use std::collections::BTreeMap;
+use std::ops::AddAssign;
 use std::time::SystemTime;
 
 use crate::core::ResumeHandle;
@@ -12,6 +14,8 @@ use crate::core::ResumeHandle;
 pub struct Conversation {
     /// The name the user gave the session (`/rename`), if any.
     pub title: Option<String>,
+    /// The model of the last main-chain message, the one whose context
+    /// `last_usage` measures.
     pub model: Option<String>,
     /// Agent program version.
     pub version: Option<String>,
@@ -19,8 +23,15 @@ pub struct Conversation {
     pub start: Option<SystemTime>,
     pub end: Option<SystemTime>,
     pub turns: Vec<Turn>,
+    /// Token counts over every assistant message, each `message.id`
+    /// once: a message written as one record per content block repeats
+    /// its usage on each.
     pub usage: Usage,
-    /// Usage of the last assistant message: what the model currently
+    /// `usage` split by model id. A message that names no model counts
+    /// in `usage` only, so the entries can add up to less; Claude Code's
+    /// `<synthetic>` is never here.
+    pub models: BTreeMap<String, Usage>,
+    /// Usage of the last main-chain message: what the model currently
     /// holds in context, as opposed to the running total in `usage`.
     pub last_usage: Option<Usage>,
 }
@@ -141,13 +152,22 @@ pub struct ToolDetail {
 /// Character cap for [`ToolDetail`] input and result.
 pub const DETAIL_CAP: usize = 4000;
 
-/// Token counts summed over every assistant message.
+/// Token counts of assistant messages.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Usage {
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
     pub cache_create: u64,
+}
+
+impl AddAssign for Usage {
+    fn add_assign(&mut self, other: Self) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_create += other.cache_create;
+    }
 }
 
 /// What a transcript file was at a read: its size and modification
