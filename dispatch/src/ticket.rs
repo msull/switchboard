@@ -361,8 +361,42 @@ pub struct Attempt {
     /// The evidence directory the stage declared, when it keeps one.
     #[serde(default)]
     pub evidence: Option<Evidence>,
+    /// A plan review's sessions by role (`reviewer`, `planner`), as its
+    /// workflow run named them: the run, not the ticket, holds them, so
+    /// a report read offline finds them here.
+    #[serde(default)]
+    pub run_sessions: BTreeMap<String, RunSession>,
+    /// `claude` or `codex`: the kind of operator an agent attempt
+    /// launched, so a report tells a Codex agent from a missing Claude
+    /// one without the pipeline.
+    #[serde(default)]
+    pub agent: Option<String>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+/// One session of a plan review's workflow run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunSession {
+    /// The Switchboard record id.
+    pub session: String,
+    /// `claude` or `codex`, from the session view's kind; empty when
+    /// the record was gone before it was asked.
+    pub agent: String,
+}
+
+/// One transcript a ticket's session wrote, as Switchboard named it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptRef {
+    /// `claude` or `codex`, from the session view's kind.
+    pub agent: String,
+    /// The provider's session id (`SessionView.resume_id`).
+    pub provider_id: String,
+    /// The main transcript file; `None` from an app too old to say.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// When Dispatch first saw it, in ms.
+    pub seen_ms: u64,
 }
 
 /// The evidence directory a stage declared: made before the launch,
@@ -1134,6 +1168,11 @@ pub struct Ticket {
     /// The lanes served for its stages, every record kept once stopped.
     #[serde(default)]
     pub services: Vec<ServiceRecord>,
+    /// Every transcript its sessions wrote, by Switchboard record id,
+    /// oldest first: a `/clear` adds one rather than replacing it, and
+    /// the list outlives the session's record.
+    #[serde(default)]
+    pub transcripts: BTreeMap<String, Vec<TranscriptRef>>,
     pub created_ms: u64,
     pub updated_ms: u64,
 }
@@ -1724,6 +1763,7 @@ pub(crate) fn blank() -> Ticket {
         entered: vec![],
         holds: Vec::new(),
         services: Vec::new(),
+        transcripts: BTreeMap::new(),
         created_ms: 0,
         updated_ms: 0,
     }

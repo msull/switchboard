@@ -20,8 +20,8 @@ use crate::scheduler::{
     Ask, DirtyStep, GateStop, NO_SUCH_SESSION, Owner, RESOLUTION, Runner, SocketDown, asks_again,
     busy, checks_env, confine_for, dirty_step, env_for, find_attempt, find_attempt_mut,
     gate_network, guidance_prelude, held_in, hold_if_held, idle_polls, lane_gate_argv, lane_plans,
-    latest_attempt, may_rerun, new_attempt, next_n, primary_tree, record_of, rework_key, sent_back,
-    session_kind, settle_file, still_listed, stopped_after_nudges, vars_for,
+    latest_attempt, may_rerun, new_attempt, next_n, note_transcript, primary_tree, record_of,
+    rework_key, sent_back, session_kind, settle_file, still_listed, stopped_after_nudges, vars_for,
 };
 use crate::template::Vars;
 use crate::ticket::{
@@ -314,12 +314,7 @@ impl Runner {
             let feedback = dir.join("feedback.md");
             reviewers.push(ReviewerRun {
                 name: name.clone(),
-                kind: match op.kind {
-                    OperatorKind::Claude => "claude",
-                    OperatorKind::Codex => "codex",
-                    OperatorKind::Command => "command",
-                }
-                .into(),
+                kind: op.kind.word().into(),
                 dir,
                 feedback,
                 session: None,
@@ -1118,7 +1113,7 @@ impl Runner {
             return Ok(());
         };
         record_of(t, &key.0, key.1).held.remove(&session);
-        let view = match self.seen(&session)? {
+        let view = match self.seen(t, &session, now_ms)? {
             Seen::View(v) => *v,
             Seen::Gone => {
                 reviewer_mut(t, key, round_n, &r.name).result = Some(ReviewerResult::Failed {
@@ -1205,9 +1200,14 @@ impl Runner {
 
     /// A session's view, or that Switchboard says it is gone, or that
     /// the query failed for a reason that says nothing about it.
-    fn seen(&mut self, session: &str) -> Result<Seen> {
+    /// A view's transcript is noted on `t`, so every polled session's
+    /// `/clear` is seen while it runs.
+    fn seen(&mut self, t: &mut Ticket, session: &str, now_ms: u64) -> Result<Seen> {
         Ok(match self.session_view(session)? {
-            Ok(v) => Seen::View(Box::new(v)),
+            Ok(v) => {
+                note_transcript(t, session, &v, now_ms);
+                Seen::View(Box::new(v))
+            }
             Err(reason) if reason == NO_SUCH_SESSION => Seen::Gone,
             Err(reason) => {
                 log::warn!("session {session}: query failed: {reason}; asking again");
@@ -1374,7 +1374,7 @@ impl Runner {
             return Ok(());
         };
         record_of(t, &key.0, key.1).held.remove(&session);
-        let view = match self.seen(&session)? {
+        let view = match self.seen(t, &session, now_ms)? {
             Seen::View(v) => *v,
             Seen::Gone => {
                 let reason = format!("round {}: the implementer's session is gone", round.n);
@@ -2601,7 +2601,7 @@ impl Runner {
         now_ms: u64,
     ) -> Result<()> {
         record_of(t, &key.0, key.1).held.remove(session);
-        let view = match self.seen(session)? {
+        let view = match self.seen(t, session, now_ms)? {
             Seen::View(v) => *v,
             Seen::Gone => {
                 return self.message_failed(
@@ -2943,7 +2943,7 @@ impl Runner {
         else {
             return Ok(());
         };
-        if let Seen::View(v) = self.seen(&session)?
+        if let Seen::View(v) = self.seen(t, &session, now_ms)?
             && v.liveness == wire::Liveness::Running
         {
             self.send(

@@ -250,6 +250,20 @@ pub struct FakeDispatch {
     /// The text an artifact read answers, by path; any other path is
     /// `no such file`.
     pub artifacts: HashMap<PathBuf, String>,
+    /// What a usage read answers, by ticket; any other ticket is
+    /// answered as a runner from before usage was served.
+    pub usage: HashMap<String, dispatch_control::UsageView>,
+}
+
+impl FakeDispatch {
+    /// The usage set for `ticket`, else the answer of a runner from
+    /// before usage was served.
+    fn usage_reply(&self, ticket: &str) -> DispatchReply {
+        self.usage.get(ticket).cloned().map_or_else(
+            || DispatchReply::failed("bad request: unknown variant `usage`"),
+            DispatchReply::Usage,
+        )
+    }
 }
 
 impl DispatchPort for FakeDispatch {
@@ -299,6 +313,7 @@ impl DispatchPort for FakeDispatch {
                     withdrawn: Vec::new(),
                 })
             }
+            DispatchBody::Usage { ticket } => self.usage_reply(ticket),
             DispatchBody::Artifact { path, .. } => self.artifacts.get(path).map_or_else(
                 || DispatchReply::failed("no such file"),
                 |text| DispatchReply::Artifact { text: text.clone() },

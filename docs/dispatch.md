@@ -2417,14 +2417,24 @@ a PR that moves after sign-off asking again.
 
 ## Budget
 
-Budgets are reporting, not enforcement. Switchboard reads token counts
-from transcripts; Dispatch multiplies them by the `rates` table for
-the model each session ran with, counted from the attempt's start so a
-cloned transcript's history is not charged twice. A session whose
-usage cannot be read is shown as unknown, not zero. Crossing an
-operator's or the project's budget is a decision that blocks the
-*next* launch for the ticket; it never stops a running agent.
-Operator budgets are per ticket across the operator's attempts.
+Budgets are reporting, not enforcement. Dispatch reads each session's
+tokens by model from its Claude Code transcripts, counted from the
+attempt's start so a cloned transcript's history is not counted twice,
+and keeps the counts in the ticket's `usage.json` so they outlive the
+transcripts. `dispatch report` and the ticket page's Usage tab show
+them per session, attempt, stage and ticket, with each session's
+active, asking and idle time. A session whose usage cannot be read is
+shown as not found, not zero; a Codex or command session is shown as
+not counted, with its span. `dispatch report <ticket> --refresh` (or
+`--project <name> --refresh`) asks Switchboard once for the transcripts
+of a ticket that ran before they were recorded.
+
+The counts are reported; prices are not yet. `rates` is parsed but
+nothing reads it, and its `[input, output]` pair cannot price cache
+writes and reads. When prices come, crossing an operator's or the
+project's budget is a decision that blocks the *next* launch for the
+ticket; it never stops a running agent. Operator budgets are per
+ticket across the operator's attempts.
 
 ## Control port
 

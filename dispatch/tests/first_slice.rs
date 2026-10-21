@@ -20067,6 +20067,7 @@ fn a_secret_artifact_is_private_and_never_read_into_a_view_a_report_or_the_log()
         &|p| std::fs::read_to_string(p).ok(),
         &dispatch::report::plan_round_numbers,
         None,
+        Vec::new(),
         env.now,
     );
     assert!(!serde_json::to_string(&report).unwrap().contains(TOKEN));
@@ -22053,4 +22054,354 @@ fn drop_evidence_on_a_closing_ticket_is_saved_for_the_finisher() {
         matches!(t.state, TicketState::Closed { .. })
     });
     assert!(!dir.exists());
+}
+
+impl Env {
+    /// Every agent session from now on writes `support::TRANSCRIPT` to a
+    /// file of its own and names it on its view.
+    fn with_transcripts(&self) -> PathBuf {
+        let dir = self.data.root.join("transcripts");
+        self.sb().transcripts = Some(dir.clone());
+        dir
+    }
+
+    /// `session` ran `/clear`: a new provider id and a new file.
+    fn clear(&self, session: &str, dir: &std::path::Path) -> PathBuf {
+        let mut sb = self.sb();
+        let s = sb.session_mut(session);
+        let resume = format!("{}-cleared", s.resume_id.clone().unwrap());
+        let path = dir.join(format!("{resume}.jsonl"));
+        std::fs::write(&path, support::TRANSCRIPT).unwrap();
+        s.resume_id = Some(resume);
+        s.transcript = Some(path.clone());
+        path
+    }
+}
+
+/// A stage agent's transcript is recorded once however often it is
+/// polled, with its operator's kind on the attempt, and a `/clear` adds
+/// a second transcript rather than replacing the first.
+#[test]
+fn a_stage_agents_transcript_is_recorded_once_and_a_clear_adds_another() {
+    let mut env = Env::new();
+    let dir = env.with_transcripts();
+    let id = env.take(7).id;
+    env.step();
+    env.step();
+    env.step();
+    let t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    assert_eq!(t.attempts[0].agent.as_deref(), Some("claude"));
+    let refs = &t.transcripts[&investigator];
+    assert_eq!(refs.len(), 1, "{refs:?}");
+    assert_eq!(refs[0].agent, "claude");
+    assert_eq!(refs[0].provider_id, format!("resume-{investigator}"));
+    assert_eq!(
+        refs[0].path,
+        Some(dir.join(format!("resume-{investigator}.jsonl")))
+    );
+    let cleared = env.clear(&investigator, &dir);
+    env.step();
+    let refs = env.ticket(&id).transcripts[&investigator].clone();
+    assert_eq!(refs.len(), 2);
+    assert_eq!(refs[1].path, Some(cleared));
+}
+
+/// A code review's reviewer is polled through `seen`, which notes its
+/// transcript and a `/clear` as the stage agent's poll does; a reviewer
+/// that has exited is given its ref by the park and close that retire
+/// it, without being killed.
+#[test]
+fn a_reviewers_transcripts_are_noted_by_its_poll_and_at_close() {
+    let mut env = Env::new();
+    let dir = env.with_transcripts();
+    let id = at_review(&mut env);
+    let style = reviewer(&env.ticket(&id), 1, "style").session.unwrap();
+    env.step();
+    assert_eq!(env.ticket(&id).transcripts[&style].len(), 1);
+    env.clear(&style, &dir);
+    env.step();
+    assert_eq!(env.ticket(&id).transcripts[&style].len(), 2);
+    // It exits, then clears again where no poll sees it.
+    let late = env.clear(&style, &dir);
+    env.sb().session_mut(&style).liveness = Liveness::Exited { code: Some(0) };
+    let now = env.tick();
+    env.runner.request_park(&id, None, now).unwrap();
+    env.steps_until(&id, "parked", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    let now = env.tick();
+    env.runner.request_close(&id, None, false, now).unwrap();
+    env.steps_until(&id, "closed", |t, _| {
+        matches!(t.state, TicketState::Closed { .. })
+    });
+    let t = env.ticket(&id);
+    assert_eq!(t.transcripts[&style].len(), 3);
+    assert_eq!(t.transcripts[&style][2].path, Some(late.clone()));
+    assert!(!env.sb().killed.contains(&style));
+    // The close read the counts into the cache, which outlives the files.
+    let cache = dispatch::store::read_usage(&env.data.usage_file(&id)).unwrap();
+    let entry = &cache.files[late.to_string_lossy().as_ref()];
+    assert_eq!(entry.messages[0].output, 100);
+    std::fs::remove_dir_all(&dir).unwrap();
+    let now = env.tick();
+    let cache = dispatch::usage::bring_up_to_date(&env.data, &t, now).unwrap();
+    assert!(cache.files.values().all(|f| f.gone));
+    let p = env.runner.pipeline_of(&t).ok();
+    let usage = dispatch::usage::of(&t, p.as_ref(), &cache, now);
+    let style_usage = usage
+        .iter()
+        .flat_map(|a| &a.sessions)
+        .find(|s| s.session.as_deref() == Some(style.as_str()))
+        .unwrap();
+    assert_eq!(style_usage.source, dispatch_control::UsageSource::Record);
+    // Three transcripts of one message each.
+    assert_eq!(style_usage.models["claude-haiku-5-5"].output, 300);
+}
+
+/// A ticket write that lands while the lock is let go for the scan is
+/// not lost: the close reads the project again after it. The
+/// transcript is a named pipe, so the scan's read waits on the taker,
+/// which takes with the scan in the gap, then puts the real file in
+/// place and lets the read finish.
+#[test]
+fn a_take_while_a_closing_tickets_transcripts_are_scanned_is_kept() {
+    use std::io::Write;
+    let mut env = Env::new();
+    let dir = env.with_transcripts();
+    let a = closing_with_nothing_running(&mut env);
+    let investigator = session_of(&env.ticket(&a), "investigate");
+    let path = dir.join(format!("resume-{investigator}.jsonl"));
+    std::fs::remove_file(&path).unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let cli = Cli::of(&env);
+    let now = env.now;
+    let taker = std::thread::spawn(move || {
+        // Opening for writing waits until the scan opens it to read.
+        let mut pipe = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let b = take_issue(&mut cli.runner(), &cli.data, 8, now + 500).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, support::TRANSCRIPT).unwrap();
+        pipe.write_all(support::TRANSCRIPT.as_bytes()).unwrap();
+        b.id
+    });
+    env.step();
+    let b = taker.join().unwrap();
+    assert!(matches!(env.ticket(&a).state, TicketState::Closed { .. }));
+    let ps = env.runner.load_project(PROJECT).unwrap();
+    assert_eq!(ps.queue, vec![b], "the take was lost: {ps:#?}");
+    let cache = dispatch::store::read_usage(&env.data.usage_file(&a)).unwrap();
+    assert!(!cache.files.is_empty(), "the scan read nothing");
+}
+
+/// A plan review's sessions are recorded on its attempt by role, each
+/// with the kind its view reports, and their transcripts noted.
+#[test]
+fn a_plan_review_records_its_run_sessions_with_their_kinds() {
+    let mut env = Env::new();
+    env.with_transcripts();
+    let id = through_plan(&mut env, 7);
+    let t = env.ticket(&id);
+    env.finish(
+        &session_of(&t, "plan"),
+        &artifact_of(&t, "plan", "plan"),
+        "# plan\nsteps",
+    );
+    env.steps_until(&id, "the run's sessions", |t, _| {
+        t.attempts_of("review")
+            .last()
+            .is_some_and(|a| a.run_sessions.len() == 2)
+    });
+    let t = env.ticket(&id);
+    let a = t.attempts_of("review").last().unwrap();
+    let run = env.sb().runs[0].clone();
+    assert_eq!(a.run_sessions["reviewer"].session, run.reviewer);
+    assert_eq!(a.run_sessions["reviewer"].agent, "codex");
+    assert_eq!(
+        Some(&a.run_sessions["planner"].session),
+        run.planner.as_ref()
+    );
+    assert_eq!(a.run_sessions["planner"].agent, "claude");
+    assert_eq!(t.transcripts[&run.reviewer][0].agent, "codex");
+    // The reviewer is Codex: not counted, and never read as Claude.
+    let now = env.tick();
+    let cache = dispatch::usage::bring_up_to_date(&env.data, &t, now).unwrap();
+    let p = env.runner.pipeline_of(&t).ok();
+    let usage = dispatch::usage::of(&t, p.as_ref(), &cache, now);
+    let review = usage.iter().find(|a| a.stage == "review").unwrap();
+    let roles: Vec<(&str, dispatch_control::UsageSource)> = review
+        .sessions
+        .iter()
+        .map(|s| (s.role.as_str(), s.source))
+        .collect();
+    assert_eq!(
+        roles,
+        [
+            ("planner", dispatch_control::UsageSource::Transcript),
+            ("plan reviewer", dispatch_control::UsageSource::NotCounted),
+        ]
+    );
+}
+
+/// A plan review session whose record is gone before the poll asks
+/// for it is recorded with no kind, so later polls do not ask again,
+/// and the report takes its kind from the pipeline copy.
+#[test]
+fn a_plan_review_session_gone_before_it_is_asked_is_asked_once() {
+    let mut env = Env::new();
+    env.with_transcripts();
+    let id = through_plan(&mut env, 7);
+    let t = env.ticket(&id);
+    env.finish(
+        &session_of(&t, "plan"),
+        &artifact_of(&t, "plan", "plan"),
+        "# plan\nsteps",
+    );
+    env.steps_until(&id, "the run's sessions", |t, _| {
+        t.attempts_of("review")
+            .last()
+            .is_some_and(|a| a.run_sessions.len() == 2)
+    });
+    let reviewer = env.sb().runs[0].reviewer.clone();
+    let mut t = env.ticket(&id);
+    for a in &mut t.attempts {
+        a.run_sessions.remove("reviewer");
+    }
+    t.transcripts.remove(&reviewer);
+    let now = env.tick();
+    env.data
+        .with_lock(|| dispatch::store::write_ticket_stamped(&env.data, &mut t, now))
+        .unwrap();
+    env.sb().sessions.retain(|s| s.id != reviewer);
+    env.step();
+    let t = env.ticket(&id);
+    let a = t.attempts_of("review").last().unwrap();
+    assert_eq!(a.run_sessions["reviewer"].session, reviewer);
+    assert_eq!(a.run_sessions["reviewer"].agent, "");
+    let asks = |env: &Env| {
+        env.sb()
+            .calls
+            .iter()
+            .filter(|r| matches!(&r.body, Body::Session { session } if session == &reviewer))
+            .count()
+    };
+    let before = asks(&env);
+    env.step();
+    env.step();
+    assert_eq!(asks(&env), before, "asked again");
+    let p = env.runner.pipeline_of(&t).ok();
+    let usage = dispatch::usage::of(&t, p.as_ref(), &dispatch::usage::Cache::default(), now);
+    let s = usage
+        .iter()
+        .flat_map(|a| &a.sessions)
+        .find(|s| s.role == "plan reviewer")
+        .unwrap();
+    assert_eq!(s.kind, "codex");
+    assert!(s.kind_from_pipeline);
+}
+
+/// A transcript first seen from an app too old to name its file is
+/// asked again by `report --refresh`, which fills the path in.
+#[test]
+fn report_refresh_fills_a_transcript_path_an_old_app_left_out() {
+    let mut env = Env::new();
+    let dir = env.with_transcripts();
+    let id = env.take(7).id;
+    env.step();
+    let mut t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    for r in t.transcripts.values_mut().flatten() {
+        r.path = None;
+    }
+    let now = env.tick();
+    env.data
+        .with_lock(|| dispatch::store::write_ticket_stamped(&env.data, &mut t, now))
+        .unwrap();
+    env.sb().session_mut(&investigator).transcript = None;
+    env.step();
+    assert_eq!(env.ticket(&id).transcripts[&investigator][0].path, None);
+    env.sb().session_mut(&investigator).transcript =
+        Some(dir.join(format!("resume-{investigator}.jsonl")));
+    let now = env.tick();
+    let removed = env.runner.refresh_usage(&id, now).unwrap();
+    assert!(removed.is_empty(), "{removed:?}");
+    let refs = &env.ticket(&id).transcripts[&investigator];
+    assert_eq!(refs.len(), 1, "{refs:?}");
+    assert_eq!(
+        refs[0].path,
+        Some(dir.join(format!("resume-{investigator}.jsonl")))
+    );
+}
+
+/// A rebaser reaches `launch_agent` without `start_agent`, and still
+/// records its operator's kind.
+#[test]
+fn a_rebaser_attempt_records_its_operators_kind() {
+    let mut env = Env::new();
+    let (_, _, rebase) = rebaser_at_pr(&mut env);
+    assert_eq!(rebase.agent.as_deref(), Some("claude"));
+}
+
+/// `report --refresh` on a ticket from before refs were recorded asks
+/// Switchboard and fills them; a session it no longer has is a line.
+/// The report then carries tokens by model per stage and ticket.
+#[test]
+fn report_refresh_fills_a_ticket_without_refs_and_the_report_carries_tokens() {
+    let mut env = Env::new();
+    env.with_transcripts();
+    let id = through_plan(&mut env, 7);
+    let mut t = env.ticket(&id);
+    let investigator = session_of(&t, "investigate");
+    let planner = session_of(&t, "plan");
+    t.transcripts.clear();
+    for a in &mut t.attempts {
+        a.agent = None;
+    }
+    let now = env.tick();
+    env.data
+        .with_lock(|| dispatch::store::write_ticket_stamped(&env.data, &mut t, now))
+        .unwrap();
+    env.sb().sessions.retain(|s| s.id != planner);
+    let now = env.tick();
+    let removed = env.runner.refresh_usage(&id, now).unwrap();
+    assert_eq!(removed, ["plan #1 agent: session record removed"]);
+    let t = env.ticket(&id);
+    assert_eq!(t.transcripts[&investigator].len(), 1);
+    assert!(!t.transcripts.contains_key(&planner));
+    let now = env.tick();
+    let cache = dispatch::usage::bring_up_to_date(&env.data, &t, now).unwrap();
+    let p = env.runner.pipeline_of(&t).ok();
+    let usage = dispatch::usage::of(&t, p.as_ref(), &cache, now);
+    let report = dispatch::report::of(
+        &t,
+        p.as_ref(),
+        &dispatch::events::stage_names(&t),
+        &|p| std::fs::read_to_string(p).ok(),
+        &dispatch::report::plan_round_numbers,
+        None,
+        usage,
+        now,
+    );
+    assert_eq!(report.tokens["claude-haiku-5-5"].output, 100);
+    assert_eq!(report.not_found, 1, "the planner's transcript is unknown");
+    let investigate = report
+        .stages
+        .iter()
+        .find(|s| s.stage == "investigate")
+        .unwrap();
+    assert_eq!(investigate.tokens["claude-haiku-5-5"].cache_read, 1000);
+    let json = serde_json::to_value(&report).unwrap();
+    assert!(json["tokens"].is_object());
+    assert_eq!(json["usage"][0]["sessions"][0]["role"], "agent");
+    // The investigator's kind came from its ref; the planner's, with
+    // neither a ref nor a recorded kind, from the pipeline copy, which
+    // it says.
+    assert_eq!(json["usage"][0]["sessions"][0]["kind_from_pipeline"], false);
+    assert_eq!(json["usage"][1]["stage"], "plan");
+    assert_eq!(json["usage"][1]["sessions"][0]["kind_from_pipeline"], true);
+    assert_eq!(json["usage"][1]["sessions"][0]["source"], "not-found");
 }

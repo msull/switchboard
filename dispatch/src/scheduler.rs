@@ -34,8 +34,8 @@ use crate::ticket::{
     Attempt, AttemptKind, AttemptState, CheckGroup, CloseProgress, Decision, DecisionKind,
     DecisionState, Evidence, EvidenceFile, Forgotten, GateRun, Held, LaneRecord, MergeWait,
     Operation, OrphanKill, ProjectState, PullRequestRecord, PullRequestSource, RefreshConflict,
-    Refreshed, Released, SETTLE_POLLS, STOP_IDLE_POLLS, STUCK, ServiceState, Settle,
-    SourceSnapshot, Ticket, TicketState, WaitUntil,
+    Refreshed, Released, RunSession, SETTLE_POLLS, STOP_IDLE_POLLS, STUCK, ServiceState, Settle,
+    SourceSnapshot, Ticket, TicketState, TranscriptRef, WaitUntil,
 };
 
 /// A day in ms: how often the evidence sweep runs, and the unit of
@@ -647,6 +647,7 @@ impl Runner {
             entered: Vec::new(),
             holds: Vec::new(),
             services: Vec::new(),
+            transcripts: BTreeMap::new(),
             created_ms: now_ms,
             updated_ms: now_ms,
         };
@@ -2068,7 +2069,7 @@ impl Runner {
             log::info!("ticket {} closing: a check is still running", t.id);
             return Ok(());
         }
-        if !self.retire_processes(t, ps, &t.processes.clone(), now_ms)? {
+        if !self.retire_keeping_usage(t, ps, now_ms)? {
             log::info!("ticket {} closing: a process is still alive", t.id);
             return Ok(());
         }
@@ -2214,6 +2215,138 @@ impl Runner {
         Ok(())
     }
 
+    /// Every process of a closing ticket retired, then, once none is
+    /// left running, its counts kept (`keep_usage`). True when none is
+    /// running any more.
+    fn retire_keeping_usage(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        now_ms: u64,
+    ) -> Result<bool> {
+        if !self.retire_processes(t, ps, &t.processes.clone(), now_ms)? {
+            return Ok(false);
+        }
+        self.keep_usage(t, ps, now_ms)?;
+        Ok(true)
+    }
+
+    /// The counts read into `usage.json` as the ticket closes, its
+    /// sessions retired and their transcripts noted, so the counts
+    /// outlive the transcripts Claude Code deletes. The files are read
+    /// with the writer lock let go, as `remove_trees` does, and merged
+    /// under it again; the project is read again after, so a `take` or
+    /// a reorder that landed in the gap is not written over. A failure
+    /// to read or write the counts is logged and never holds the close.
+    fn keep_usage(&mut self, t: &mut Ticket, ps: &mut ProjectState, now_ms: u64) -> Result<()> {
+        let path = self.data.usage_file(&t.id);
+        let cache = match crate::store::read_usage(&path) {
+            Ok(cache) => cache,
+            Err(e) => {
+                log::warn!("ticket {}: usage not kept: {e:#}", t.id);
+                return Ok(());
+            }
+        };
+        if self.load_ticket(&t.id)? != *t {
+            self.save_ticket(t, now_ms)?;
+        }
+        if self.load_project(&ps.name)? != *ps {
+            self.save_project(ps)?;
+        }
+        let state = t.state.clone();
+        let refs = t.transcripts.clone();
+        let scanned =
+            self.unlocked(|_| crate::usage::rescan(&cache, &refs, &crate::usage::RealDisk, now_ms));
+        *ps = self.load_project(&ps.name)?;
+        let scanned = scanned?;
+        self.reread_unchanged(t, &state)?;
+        if scanned.files.is_empty() {
+            return Ok(());
+        }
+        let written = self.write_record(|| crate::usage::merge_and_write(&path, scanned).map(drop));
+        if let Err(e) = written {
+            log::warn!("ticket {}: usage not kept: {e:#}", t.id);
+        }
+        Ok(())
+    }
+
+    /// `report --refresh`: the transcripts and plan review sessions a
+    /// ticket does not yet record, asked of Switchboard with no lock
+    /// held, then added under the lock to the record as it stands
+    /// then, so a pass in the gap is never written over. Returns a line
+    /// for each session Switchboard no longer has.
+    pub fn refresh_usage(&mut self, id: &str, now_ms: u64) -> Result<Vec<String>> {
+        let t = self.load_ticket(id)?;
+        let p = self.pipeline_of(&t).ok();
+        let mut removed = Vec::new();
+        let mut runs: Vec<((String, u32), String, RunSession)> = Vec::new();
+        let mut views: Vec<(String, wire::SessionView)> = Vec::new();
+        for a in t.attempts.iter().filter(|a| a.run_sessions.is_empty()) {
+            let Some(run) = a.run.clone() else {
+                continue;
+            };
+            let Reply::Workflow { run } = self.ask(Body::Workflow { run })? else {
+                removed.push(format!(
+                    "{} #{} plan review: run record removed",
+                    a.stage, a.n
+                ));
+                continue;
+            };
+            let roles = std::iter::once(("reviewer", run.reviewer))
+                .chain(run.planner.map(|x| ("planner", x)));
+            for (role, session) in roles {
+                if let Ok(view) = self.session_view(&session)? {
+                    runs.push((
+                        (a.stage.clone(), a.n),
+                        role.to_owned(),
+                        RunSession {
+                            session: session.clone(),
+                            agent: kind_word(view.kind).to_owned(),
+                        },
+                    ));
+                    views.push((session, view));
+                }
+            }
+        }
+        for x in crate::usage::sessions_of(&t, p.as_ref()) {
+            let Some(session) = x.session else {
+                continue;
+            };
+            let recorded = t.transcripts.get(&session).is_some_and(|refs| {
+                // A ref from an app too old to name its file is asked
+                // again, so the path can be filled in.
+                refs.iter().any(|r| r.agent != "claude" || r.path.is_some())
+            });
+            if recorded || views.iter().any(|(s, _)| s == &session) {
+                continue;
+            }
+            match self.session_view(&session)? {
+                Ok(view) => views.push((session, view)),
+                Err(reason) if reason == NO_SUCH_SESSION => removed.push(format!(
+                    "{} #{} {}: session record removed",
+                    x.stage, x.n, x.role
+                )),
+                Err(reason) => log::warn!("session {session}: query failed: {reason}"),
+            }
+        }
+        if runs.is_empty() && views.is_empty() {
+            return Ok(removed);
+        }
+        self.data.with_lock(|| {
+            let mut t = self.load_ticket(id)?;
+            for ((stage, n), role, run) in runs {
+                if let Some(a) = find_attempt_mut(&mut t, &stage, n) {
+                    a.run_sessions.entry(role).or_insert(run);
+                }
+            }
+            for (session, view) in &views {
+                note_transcript(&mut t, session, view, now_ms);
+            }
+            write_ticket_stamped(&self.data, &mut t, now_ms)
+        })?;
+        Ok(removed)
+    }
+
     /// `t` read again after the writer lock was let go, refused unless
     /// it is still in `state`. Only the finisher holding the ticket's
     /// `closing.lock` writes a ticket being closed or retried, so a
@@ -2223,7 +2356,7 @@ impl Runner {
         *t = self.load_ticket(&t.id)?;
         if &t.state != state {
             bail!(
-                "ticket {} changed while its trees were removed: {}",
+                "ticket {} changed while the writer lock was let go: {}",
                 t.id,
                 t.state.label()
             );
@@ -3020,10 +3153,17 @@ impl Runner {
     ) -> Result<bool> {
         let mut all_gone = true;
         for id in ids {
-            let running = matches!(
-                self.ask(Body::Session { session: id.clone() })?,
-                Reply::Session { session } if session.liveness == wire::Liveness::Running
-            );
+            // Every session's transcript is noted before its liveness
+            // is judged, so one that exited long ago still gets its ref.
+            let running = match self.ask(Body::Session {
+                session: id.clone(),
+            })? {
+                Reply::Session { session } => {
+                    note_transcript(t, id, &session, now_ms);
+                    session.liveness == wire::Liveness::Running
+                }
+                _ => false,
+            };
             if !running {
                 continue;
             }
@@ -6214,6 +6354,7 @@ impl Runner {
         attempt.project = Some(project.clone());
         attempt.pr = spec.pr;
         attempt.evidence = spec.evidence;
+        attempt.agent = Some(operator.kind.word().to_owned());
         // Not saved here: `send` writes the attempt and its request in
         // one go, so no record ever shows the one without the other.
         t.attempts.push(attempt);
@@ -6713,7 +6854,10 @@ impl Runner {
         now_ms: u64,
     ) -> Result<Option<wire::SessionView>> {
         match self.session_view(session)? {
-            Ok(view) => Ok(Some(view)),
+            Ok(view) => {
+                note_transcript(t, session, &view, now_ms);
+                Ok(Some(view))
+            }
             Err(reason) if reason == NO_SUCH_SESSION => {
                 self.fail_attempt(
                     t,
@@ -7554,6 +7698,42 @@ impl Runner {
         )
     }
 
+    /// The run, not the ticket, names a plan review's sessions: each is
+    /// recorded on attempt `idx` once, with the kind its view reports,
+    /// so a report finds it offline. One ask per session for the
+    /// ticket's life: a session whose record is gone is recorded with
+    /// no kind, and one whose ask failed otherwise is asked again.
+    fn note_run_sessions(
+        &mut self,
+        t: &mut Ticket,
+        idx: usize,
+        view: &wire::RunView,
+        now_ms: u64,
+    ) -> Result<()> {
+        let roles = std::iter::once(("reviewer", view.reviewer.clone()))
+            .chain(view.planner.clone().map(|id| ("planner", id)));
+        for (role, id) in roles {
+            if t.attempts[idx].run_sessions.contains_key(role) {
+                continue;
+            }
+            let agent = match self.session_view(&id)? {
+                Ok(session) => {
+                    note_transcript(t, &id, &session, now_ms);
+                    kind_word(session.kind).to_owned()
+                }
+                Err(reason) if reason == NO_SUCH_SESSION => String::new(),
+                Err(reason) => {
+                    log::warn!("session {id}: query failed: {reason}");
+                    continue;
+                }
+            };
+            t.attempts[idx]
+                .run_sessions
+                .insert(role.to_owned(), RunSession { session: id, agent });
+        }
+        Ok(())
+    }
+
     fn poll_workflow(
         &mut self,
         t: &mut Ticket,
@@ -7612,6 +7792,7 @@ impl Runner {
                 t.processes.push(id.clone());
             }
         }
+        self.note_run_sessions(t, idx, &view, now_ms)?;
         self.save_ticket(t, now_ms)?;
         let subject = stage.subject.clone().unwrap_or_default();
         match view.state {
@@ -10047,6 +10228,47 @@ fn gate_mut<'t>(t: &'t mut Ticket, a: &Attempt) -> Option<&'t mut GateRun> {
     find_attempt_mut(t, &a.stage, a.n).and_then(|x| x.gate.as_mut())
 }
 
+/// A session's kind as records spell it.
+#[must_use]
+pub fn kind_word(kind: wire::SessionKind) -> &'static str {
+    match kind {
+        wire::SessionKind::Claude => "claude",
+        wire::SessionKind::Codex => "codex",
+        wire::SessionKind::Shell => "shell",
+        wire::SessionKind::Command => "command",
+        wire::SessionKind::Service => "service",
+    }
+}
+
+/// The transcript `view` names, added to the ticket's list for
+/// `record` when the list does not hold it yet: a `/clear` adds a
+/// second one rather than replacing the first. A ref seen first from an
+/// app too old to name the file gets its path when one does. Only an
+/// agent's session writes a transcript.
+pub(crate) fn note_transcript(t: &mut Ticket, record: &str, view: &wire::SessionView, now_ms: u64) {
+    let agent = match view.kind {
+        wire::SessionKind::Claude | wire::SessionKind::Codex => kind_word(view.kind),
+        _ => return,
+    };
+    let Some(provider_id) = view.resume_id.clone() else {
+        return;
+    };
+    let refs = t.transcripts.entry(record.to_owned()).or_default();
+    match refs.iter_mut().find(|r| r.provider_id == provider_id) {
+        Some(r) => {
+            if r.path.is_none() {
+                r.path.clone_from(&view.transcript);
+            }
+        }
+        None => refs.push(TranscriptRef {
+            agent: agent.to_owned(),
+            provider_id,
+            path: view.transcript.clone(),
+            seen_ms: now_ms,
+        }),
+    }
+}
+
 /// A fresh attempt record.
 pub(crate) fn new_attempt(
     stage_name: &str,
@@ -10083,6 +10305,8 @@ pub(crate) fn new_attempt(
         waits: None,
         held: BTreeMap::new(),
         evidence: None,
+        run_sessions: BTreeMap::new(),
+        agent: None,
         settle: BTreeMap::new(),
         stop_at_ms: None,
         polls_since_stop: 0,
@@ -11387,6 +11611,7 @@ network = "deny"
             entered: Vec::new(),
             holds: Vec::new(),
             services: Vec::new(),
+            transcripts: BTreeMap::new(),
             created_ms: 0,
             updated_ms: 0,
         };
@@ -11540,6 +11765,7 @@ gate = { kind = "human", decision = "inspect" }
             entered: Vec::new(),
             holds: Vec::new(),
             services: Vec::new(),
+            transcripts: BTreeMap::new(),
             created_ms: 0,
             updated_ms: 0,
         }
@@ -11950,6 +12176,7 @@ gate = { kind = "human", decision = "each" }
             entered: vec![],
             holds: vec![],
             services: vec![],
+            transcripts: BTreeMap::new(),
             created_ms: 0,
             updated_ms: 0,
         }

@@ -5716,6 +5716,96 @@ fn a_ticket_tab_click_dispatches_nothing_but_the_reads_it_draws() {
             "{tab}: {sent:?}"
         );
     }
+    // Usage reads the ticket's usage and nothing else.
+    harness.state_mut().dispatched.clear();
+    click(&mut harness, "Usage");
+    let sent = actions(&harness);
+    assert!(
+        sent.iter()
+            .any(|a| matches!(a, AppAction::DispatchReadUsage { ticket, .. } if ticket == "t1")),
+        "Usage: {sent:?}"
+    );
+    assert!(
+        sent.iter().all(|a| matches!(
+            a,
+            AppAction::DispatchReadUsage { .. } | AppAction::DispatchReplied { .. }
+        )),
+        "Usage: {sent:?}"
+    );
+    // The fake answers as a runner from before usage was served.
+    harness.run_steps(2);
+    harness.get_by_label("This runner does not report usage.");
+}
+
+/// The Usage tab draws the ticket's tokens by model, then each
+/// attempt's sessions, naming the ones not counted and not found.
+#[test]
+fn the_usage_tab_draws_models_sessions_and_what_was_not_counted() {
+    use switchboard::ports::dispatch::{SessionUsage, Tokens, UsageSource, UsageView};
+    let (mut dispatch, edit) = ticket_with_documents();
+    let opus = std::collections::BTreeMap::from([(
+        "claude-opus-5-5".to_owned(),
+        Tokens {
+            input: 12,
+            output: 34_500,
+            cache_write: 2_000,
+            cache_write_1h: 1_500,
+            cache_read: 1_200_000,
+            messages: 9,
+        },
+    )]);
+    dispatch.usage.insert(
+        "t1".into(),
+        UsageView {
+            ticket: "t1".into(),
+            models: opus.clone(),
+            attempts: vec![switchboard::ports::dispatch::AttemptUsage {
+                stage: "review-code".into(),
+                n: 1,
+                context: "repo".into(),
+                models: opus.clone(),
+                sessions: vec![
+                    SessionUsage {
+                        role: "round 1 fixer".into(),
+                        kind: "claude".into(),
+                        session: Some("s1".into()),
+                        models: opus,
+                        span_ms: 600_000,
+                        active_ms: 300_000,
+                        asking_ms: 60_000,
+                        idle_ms: 240_000,
+                        ..SessionUsage::default()
+                    },
+                    SessionUsage {
+                        role: "round 1 reviewer lint".into(),
+                        kind: "command".into(),
+                        source: UsageSource::NotCounted,
+                        span_ms: 45_000,
+                        ..SessionUsage::default()
+                    },
+                    SessionUsage {
+                        role: "round 1 reviewer style".into(),
+                        kind: "claude".into(),
+                        source: UsageSource::NotFound,
+                        ..SessionUsage::default()
+                    },
+                ],
+            }],
+            not_counted: 1,
+            not_found: 1,
+            ..UsageView::default()
+        },
+    );
+    let mut harness = ticket_page_on(dispatch, Changes::default(), edit);
+    click(&mut harness, "Usage");
+    harness.run_steps(2);
+    assert_eq!(harness.query_all_by_label("claude-opus-5-5").count(), 2);
+    assert_eq!(harness.query_all_by_label("1.2M").count(), 2);
+    harness.get_by_label("round 1 fixer");
+    harness.get_by_label("5 min");
+    harness.get_by_label_contains("not counted, 45 s");
+    harness.get_by_label("not found · claude");
+    harness.get_by_label_contains("dispatch report t1 --refresh");
 }
 
 /// The plan review's rounds are listed under the plan, folded.
@@ -6050,6 +6140,18 @@ fn the_ticket_tab_script_line_opens_the_tab() {
         Some(&switchboard::ui::ticket::TicketTab::Changes)
     );
     harness.get_by_label("No branch.");
+}
+
+/// `ticket-tab <id> usage` opens the Usage tab.
+#[test]
+fn the_ticket_tab_script_line_opens_the_usage_tab() {
+    let mut status = dispatch_status();
+    status.tickets[0].decisions.clear();
+    let harness = scripted_harness(status, false, "ticket-tab t1 usage");
+    assert_eq!(
+        harness.state().ui_state.dispatch_ticket_tabs.get("t1"),
+        Some(&switchboard::ui::ticket::TicketTab::Usage)
+    );
 }
 
 /// A harness whose app ran `script` at startup, before any frame, as

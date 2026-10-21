@@ -53,8 +53,8 @@ dispatch wait <ticket> [--for decision|stage|pr|closed|move|any] [--since <seq>]
 dispatch subscribe <ticket> [--for move] [--since <seq>]   the runner types the ticket's moves into the supervisor's pane
 dispatch unsubscribe <ticket>                     stop that
 dispatch subscriptions <project>                  each subscription, what it has not delivered, and why it waits
-dispatch report <ticket> [--json]                 how a ticket went: stage time, review points, fix passes, size
-dispatch report --project <name> [--since YYYY-MM-DD] [--json]
+dispatch report <ticket> [--refresh] [--json]     how a ticket went: stage time, tokens by model, review points, fix passes, size
+dispatch report --project <name> [--since YYYY-MM-DD] [--refresh] [--json]
 dispatch tail <ticket> [--lines N]                what the ticket's running agents show
 ```
 
@@ -322,8 +322,13 @@ its decisions waited on the owner apart, the plan's size (one
 review's rounds and points, the code review's rounds and points (each
 point once, however many rounds it stayed open, split by reviewer),
 fix passes, rebases (at least: a lane keeps only its last clean
-bring-up), and the commits and diff at the PR. Cost and
-turns read `not recorded`: Dispatch does not see them. A count marked
+bring-up), and the commits and diff at the PR. Under each stage are
+its tokens by model, and the roles of its sessions that are `not
+counted` (Codex, a command reviewer), `not found` (no transcript read)
+or of `kind unknown`; the ticket's tokens by model follow. Cost reads
+`not priced`. `--refresh` asks Switchboard for the transcripts of a
+ticket from before they were recorded; a session it no longer has is
+named as removed. A count marked
 incomplete is missing a round's file. A resolution review (the
 `resolution` pass after a conflicted rebase) is code review work on the
 branch: its rounds, points and fix count in those totals, and it is

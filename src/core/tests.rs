@@ -1744,6 +1744,22 @@ fn a_stop_keeps_what_it_listed_until_the_session_starts_or_ends() {
     assert_eq!(core.session(id).unwrap().pending_at_stop, None);
 }
 
+/// A reader that counts what a session spent finds its transcript on
+/// the view; a record with no resume handle names none.
+#[test]
+fn the_session_view_names_the_transcript_of_its_resume_handle() {
+    let (core, id) = resumable_agent();
+    let view = core.session_view(id, Clock::at(1_000).wall).unwrap();
+    assert_eq!(
+        view.transcript,
+        Some(PathBuf::from("/tmp/transcript.jsonl"))
+    );
+    let (core, _, ids) = with_records(&[agent()], |_| None);
+    let view = core.session_view(ids[0], Clock::at(1_000).wall).unwrap();
+    assert_eq!(view.resume_id, None);
+    assert_eq!(view.transcript, None);
+}
+
 #[test]
 fn the_session_view_says_what_the_stop_listed_and_until_when_it_holds() {
     let (mut core, _, ids) = with_records(&[agent()], |s| Some(running(s.id)));
@@ -9807,6 +9823,102 @@ mod dispatch_page {
         core.dispatch(AppAction::DispatchStatus(None), Clock::at(7));
         assert!(!core.events_read_due("t1", 52) && !core.ticket_read_due("t1", 52));
         assert_eq!(core.ticket_details("t1"), Some(&full), "kept while gone");
+    }
+
+    /// The Usage tab asks once per `updated_ms` and never twice at
+    /// once; the reply lands on the ticket, and a runner that does not
+    /// serve usage marks it unavailable with no notice, until a runner
+    /// reconnects.
+    #[test]
+    fn a_tickets_usage_is_read_once_per_change_and_an_old_runner_is_quiet() {
+        let mut core = connected();
+        let read = |updated_ms| AppAction::DispatchReadUsage {
+            ticket: "t1".into(),
+            updated_ms,
+        };
+        let replied = |result| AppAction::DispatchReplied {
+            body: Body::Usage {
+                ticket: "t1".into(),
+            },
+            result,
+        };
+        assert_eq!(
+            core.dispatch(read(50), Clock::at(2)),
+            vec![Effect::DispatchCall(Body::Usage {
+                ticket: "t1".into()
+            })]
+        );
+        assert!(
+            core.dispatch(read(50), Clock::at(3)).is_empty(),
+            "in flight"
+        );
+        assert!(
+            core.dispatch(read(51), Clock::at(3)).is_empty(),
+            "in flight"
+        );
+        let view = crate::ports::dispatch::UsageView {
+            ticket: "t1".into(),
+            not_found: 1,
+            ..Default::default()
+        };
+        core.dispatch(replied(Ok(Reply::Usage(view.clone()))), Clock::at(4));
+        assert_eq!(core.dispatch_state().usage["t1"].view, Some(view.clone()));
+        assert!(
+            core.dispatch(read(50), Clock::at(5)).is_empty(),
+            "asked at 50"
+        );
+        assert_eq!(core.dispatch(read(51), Clock::at(6)).len(), 1);
+        core.dispatch(
+            replied(Ok(Reply::failed("bad request: unknown variant `usage`"))),
+            Clock::at(7),
+        );
+        assert!(core.notices().is_empty(), "{:?}", core.notices());
+        let u = &core.dispatch_state().usage["t1"];
+        assert!(u.unavailable);
+        assert_eq!(u.view, Some(view), "the last view is kept");
+        assert!(core.dispatch(read(52), Clock::at(8)).is_empty());
+        core.dispatch(AppAction::DispatchStatus(None), Clock::at(9));
+        core.dispatch(AppAction::DispatchStatus(Some(status(None))), Clock::at(10));
+        assert_eq!(core.dispatch(read(52), Clock::at(11)).len(), 1);
+    }
+
+    /// A runner that reports usage but cannot read this ticket's says
+    /// why, without a notice, and is asked again once the ticket
+    /// changes; a read that works clears the reason.
+    #[test]
+    fn a_usage_read_that_fails_keeps_its_reason_and_asks_again_on_a_change() {
+        let mut core = connected();
+        let read = |updated_ms| AppAction::DispatchReadUsage {
+            ticket: "t1".into(),
+            updated_ms,
+        };
+        let replied = |result| AppAction::DispatchReplied {
+            body: Body::Usage {
+                ticket: "t1".into(),
+            },
+            result,
+        };
+        assert_eq!(core.dispatch(read(50), Clock::at(2)).len(), 1);
+        core.dispatch(
+            replied(Ok(Reply::failed("usage.json is version 9, newer"))),
+            Clock::at(3),
+        );
+        assert!(core.notices().is_empty(), "{:?}", core.notices());
+        let u = &core.dispatch_state().usage["t1"];
+        assert!(!u.unavailable);
+        assert_eq!(u.failed.as_deref(), Some("usage.json is version 9, newer"));
+        assert!(
+            core.dispatch(read(50), Clock::at(4)).is_empty(),
+            "asked at 50"
+        );
+        assert_eq!(core.dispatch(read(51), Clock::at(5)).len(), 1);
+        core.dispatch(
+            replied(Ok(Reply::Usage(
+                crate::ports::dispatch::UsageView::default(),
+            ))),
+            Clock::at(6),
+        );
+        assert_eq!(core.dispatch_state().usage["t1"].failed, None);
     }
 
     /// The timeline is the event log's, newest first in stage groups,

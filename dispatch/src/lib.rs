@@ -17,6 +17,8 @@
 //!   `store`, and the check of both sockets.
 //! - `report`: how a ticket went, from its record and round files;
 //!   pure.
+//! - `usage`: tokens by model and time in turns, counted from the
+//!   transcripts its sessions wrote and cached beside the ticket.
 //! - `port`, `git`, `github`, `bitbucket`: the outside world behind
 //!   traits with fakes.
 //! - `template`: prompt fields filled from a map; pure.
@@ -62,6 +64,7 @@ pub mod subscribe;
 pub mod supervisor;
 pub mod template;
 pub mod ticket;
+pub mod usage;
 pub mod view;
 
 /// Milliseconds since the epoch, the one time format the records use.
@@ -139,8 +142,10 @@ Supervising (see docs/dispatch-agent-guide.md):
   dispatch subscriptions <project>         each subscription, what it has not delivered, and why it waits
   dispatch show <ticket> [--json]          one ticket: stage, lanes, attempts, decisions, files
   dispatch evidence <ticket> [<stage>]     the files each attempt kept in its evidence directory
-  dispatch report <ticket> [--json]        how a ticket went
-  dispatch report --project <name> [--since YYYY-MM-DD] [--json]
+  dispatch report <ticket> [--refresh] [--json]
+                                           how a ticket went, tokens by model included;
+                                           --refresh asks Switchboard for transcripts not yet recorded
+  dispatch report --project <name> [--since YYYY-MM-DD] [--refresh] [--json]
   dispatch tail <ticket> [--lines N]       what its running agents' panes show
   dispatch health [--timeout <secs>] [--stale <secs>] [--verbose] [--json]
                                            is the runner alive and getting on (exit 1 if not);

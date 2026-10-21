@@ -654,6 +654,12 @@ pub enum AppAction {
         id: String,
         updated_ms: u64,
     },
+    /// Read a ticket's tokens and agents' time, once per `updated_ms`
+    /// the page sees, as `DispatchReadTicket`.
+    DispatchReadUsage {
+        ticket: String,
+        updated_ms: u64,
+    },
     /// Read one file's diff over the lane's base, unless it is held for
     /// this range or already on its way.
     ReadFileDiff {
@@ -1334,6 +1340,7 @@ impl AppCore {
             | AppAction::DispatchReadArtifact { .. }
             | AppAction::DispatchReadEvents { .. }
             | AppAction::DispatchReadTicket { .. }
+            | AppAction::DispatchReadUsage { .. }
             | AppAction::DispatchResume(_)
             | AppAction::DispatchSupervisorFresh(_)
             | AppAction::DispatchClose(_)

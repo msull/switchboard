@@ -21,6 +21,7 @@ use dispatch::subscribe;
 use dispatch::supervisor::{self, Actor};
 use dispatch::ticket::{DecisionState, REFUSALS_KEPT, Refusal, ServiceState, Ticket, TicketState};
 use dispatch::{USAGE, UsageError};
+use dispatch_control::UsageSource;
 use std::io::Write as _;
 use switchboard_control::RunnerVerb;
 
@@ -1256,6 +1257,14 @@ fn report_of(runner: &Runner, t: &dispatch::ticket::Ticket) -> TicketReport {
         let dir = runner.lane_clone(p, p.lane(&lane)?);
         runner.git.range_size(&dir, &base, &head).ok()
     });
+    let now = now_ms();
+    // The counts are read as far as they can be: a cache that cannot be
+    // brought up to date still says what it held.
+    let cache = dispatch::usage::bring_up_to_date(&runner.data, t, now).unwrap_or_else(|e| {
+        eprintln!("ticket {}: usage not read: {e:#}", t.id);
+        dispatch::store::read_usage(&runner.data.usage_file(&t.id)).unwrap_or_default()
+    });
+    let usage = dispatch::usage::of(t, pipeline.as_ref(), &cache, now);
     report::of(
         t,
         pipeline.as_ref(),
@@ -1263,18 +1272,34 @@ fn report_of(runner: &Runner, t: &dispatch::ticket::Ticket) -> TicketReport {
         &|p| std::fs::read_to_string(p).ok(),
         &report::plan_round_numbers,
         range,
-        now_ms(),
+        usage,
+        now,
     )
 }
 
+/// `report --refresh`: each ticket's missing transcripts asked of
+/// Switchboard and recorded, a line for each session it no longer has.
+fn refresh_usage(tickets: &[String]) -> Result<()> {
+    let mut runner = runner()?;
+    for id in tickets {
+        for line in runner.refresh_usage(id, now_ms())? {
+            say!("{id} {line}");
+        }
+    }
+    Ok(())
+}
+
 fn report(args: &[&str]) -> Result<()> {
-    let f = Flags::parse(args, &["--project", "--since"], &["--json"]);
+    let f = Flags::parse(args, &["--project", "--since"], &["--json", "--refresh"]);
     let json = f.on("--json");
     let runner = offline_runner()?;
     match (&f.rest[..], f.value("--project")) {
         ([ticket], None) => {
             if f.value("--since").is_some() {
                 usage();
+            }
+            if f.on("--refresh") {
+                refresh_usage(&[(*ticket).to_owned()])?;
             }
             let r = report_of(&runner, &runner.load_ticket(ticket)?);
             if json {
@@ -1296,6 +1321,14 @@ fn report(args: &[&str]) -> Result<()> {
                 .into_iter()
                 .filter(|t| t.project == project && t.created_ms >= since)
                 .collect();
+            if f.on("--refresh") {
+                let ids: Vec<String> = tickets.iter().map(|t| t.id.clone()).collect();
+                refresh_usage(&ids)?;
+                tickets = tickets
+                    .iter()
+                    .map(|t| runner.load_ticket(&t.id))
+                    .collect::<Result<_>>()?;
+            }
             tickets.sort_by_key(|t| t.created_ms);
             let rows: Vec<TicketReport> = tickets.iter().map(|t| report_of(&runner, t)).collect();
             let total = report::total(&rows);
@@ -1308,12 +1341,17 @@ fn report(args: &[&str]) -> Result<()> {
                 );
                 return Ok(());
             }
-            say!("ticket    time      plan  code  fixes  rebases  commits  title");
+            say!(
+                "ticket    time      out       cache read  plan  code  fixes  rebases  commits  title"
+            );
             let row = |id: &str, r: &TicketReport, title: &str| -> Result<()> {
+                let all = report::all_models(&r.tokens);
                 say!(
-                    "{:<9} {:<9} {:<5} {:<5} {:<6} {:<8} {:<8} {}",
+                    "{:<9} {:<9} {:<9} {:<11} {:<5} {:<5} {:<6} {:<8} {:<8} {}",
                     id,
                     span(r.stages.iter().map(|s| s.ms).sum()),
+                    count(all.output),
+                    count(all.cache_read),
                     r.plan_points,
                     format!(
                         "{}{}",
@@ -1369,6 +1407,7 @@ fn print_report(r: &TicketReport) -> Result<()> {
             s.attempts,
             span(s.waiting_ms)
         );
+        stage_usage(r, s)?;
     }
     let per_lane: Vec<_> = r
         .plans
@@ -1448,8 +1487,80 @@ fn print_report(r: &TicketReport) -> Result<()> {
             say!("  PR: {url}, {size}");
         }
     }
-    say!("  cost and turns: not recorded");
+    ticket_usage(r)
+}
+
+/// Under a stage's line: its tokens per model, then the roles of its
+/// sessions that have none, by why.
+fn stage_usage(r: &TicketReport, s: &report::StageTime) -> Result<()> {
+    for (model, t) in &s.tokens {
+        say!("    {model}: {}", tokens_line(t));
+    }
+    let roles = |source: UsageSource| -> Vec<String> {
+        r.usage
+            .iter()
+            .filter(|a| a.stage == s.stage)
+            .flat_map(|a| &a.sessions)
+            .filter(|x| x.source == source)
+            .map(|x| x.role.clone())
+            .collect()
+    };
+    for (label, source) in [
+        ("not counted", UsageSource::NotCounted),
+        ("not found", UsageSource::NotFound),
+        ("kind unknown", UsageSource::KindUnknown),
+    ] {
+        let roles = roles(source);
+        if !roles.is_empty() {
+            say!("    {label}: {}", roles.join(", "));
+        }
+    }
     Ok(())
+}
+
+/// The ticket's tokens per model, and what to do about sessions not
+/// found. Prices are not kept, so no cost is shown.
+fn ticket_usage(r: &TicketReport) -> Result<()> {
+    if r.tokens.is_empty() {
+        say!("  tokens: none counted");
+    }
+    for (model, t) in &r.tokens {
+        say!("  tokens {model}: {}", tokens_line(t));
+    }
+    if r.not_found > 0 {
+        say!(
+            "  {} session(s) not found; `dispatch report {} --refresh` asks Switchboard",
+            r.not_found,
+            r.id
+        );
+    }
+    say!("  cost: not priced");
+    Ok(())
+}
+
+/// One model's tokens on a line.
+fn tokens_line(t: &dispatch_control::Tokens) -> String {
+    format!(
+        "in {}, out {}, cache write {} (1h {}), cache read {}, {} message(s)",
+        count(t.input),
+        count(t.output),
+        count(t.cache_write),
+        count(t.cache_write_1h),
+        count(t.cache_read),
+        t.messages
+    )
+}
+
+/// A token count, shortened past a thousand as the Usage tab's
+/// `count_text` does: "950", "12.3k", "4.1M".
+fn count(n: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let f = n as f64;
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{:.1}k", f / 1e3),
+        _ => format!("{:.1}M", f / 1e6),
+    }
 }
 
 /// What a ticket's running agents show. Asks Switchboard, so this takes

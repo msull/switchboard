@@ -16,7 +16,7 @@ use super::model::{
     SpaceId,
 };
 use crate::ports::dispatch::{
-    Body, DecisionView, EventView, ProjectView, Reply, Status, TicketView,
+    Body, DecisionView, EventView, ProjectView, Reply, Status, TicketView, UsageView,
 };
 use crate::ports::host::Liveness;
 
@@ -243,6 +243,25 @@ pub struct Fetched {
     pub in_flight: bool,
 }
 
+/// A ticket's usage as read through the port. Transient, like
+/// `Fetched`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UsageFetch {
+    /// The last reply, kept until the next replaces it.
+    pub view: Option<UsageView>,
+    /// The ticket's `updated_ms` at the last ask, as on `TicketEvents`.
+    pub asked_at: Option<u64>,
+    /// A read is on its way; nothing more is asked until it answers.
+    pub in_flight: bool,
+    /// The runner does not report usage (an older build); asked again
+    /// once a runner reconnects.
+    pub unavailable: bool,
+    /// Why the last read failed on a runner that does report usage (a
+    /// cache it cannot read, a ticket it cannot load); asked again once
+    /// the ticket changes.
+    pub failed: Option<String>,
+}
+
 /// One artifact's reads that have not brought its current text yet.
 /// Transient, like `TicketEvents`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -435,6 +454,8 @@ pub struct DispatchState {
     pub events: HashMap<String, TicketEvents>,
     /// Single-ticket replies by ticket id.
     pub details: HashMap<String, Fetched>,
+    /// Usage replies by ticket id.
+    pub usage: HashMap<String, UsageFetch>,
     /// Artifact reads not yet answered with text, by path: a first read,
     /// or a re-read while the older text stays in `artifacts`.
     pub artifact_reads: HashMap<PathBuf, ArtifactRead>,
@@ -738,6 +759,18 @@ impl AppCore {
                 .details
                 .get(id)
                 .is_none_or(|f| !f.in_flight && f.asked_at != Some(updated_ms))
+    }
+
+    /// Whether the ticket page should ask for ticket `id`'s usage, as
+    /// `events_read_due` decides for its events.
+    #[must_use]
+    pub fn usage_read_due(&self, id: &str, updated_ms: u64) -> bool {
+        self.dispatch.connected
+            && self
+                .dispatch
+                .usage
+                .get(id)
+                .is_none_or(|u| !u.in_flight && !u.unavailable && u.asked_at != Some(updated_ms))
     }
 
     /// Whether the ticket page should ask for the artifact at `path` of
@@ -1271,6 +1304,9 @@ impl AppCore {
             AppAction::DispatchReadTicket { id, updated_ms } => {
                 self.read_ticket(id, updated_ms, out);
             }
+            AppAction::DispatchReadUsage { ticket, updated_ms } => {
+                self.read_usage(ticket, updated_ms, out);
+            }
             AppAction::DispatchReplied { body, result } => {
                 self.dispatch_replied(body, result, now);
             }
@@ -1309,6 +1345,12 @@ impl AppCore {
                 if e.unavailable {
                     e.unavailable = false;
                     e.asked_at = None;
+                }
+            }
+            for u in self.dispatch.usage.values_mut() {
+                if u.unavailable {
+                    u.unavailable = false;
+                    u.asked_at = None;
                 }
             }
         }
@@ -1365,12 +1407,21 @@ impl AppCore {
         out.push(Effect::DispatchCall(Body::Ticket { id }));
     }
 
-    /// What a call to Dispatch's port came back with: an error marks
-    /// the runner gone, a failure is a notice, and an answer lands on
-    /// the status it belongs to.
-    fn dispatch_replied(&mut self, body: Body, result: Result<Reply, String>, now: Clock) {
-        let failed = result.is_err();
-        match &body {
+    /// A ticket page's read of the ticket's usage, as `read_events`.
+    fn read_usage(&mut self, ticket: String, updated_ms: u64, out: &mut Out) {
+        if !self.usage_read_due(&ticket, updated_ms) {
+            return;
+        }
+        let u = self.dispatch.usage.entry(ticket.clone()).or_default();
+        u.asked_at = Some(updated_ms);
+        u.in_flight = true;
+        out.push(Effect::DispatchCall(Body::Usage { ticket }));
+    }
+
+    /// A read's reply, whatever it says, ends its flight; one that
+    /// never reached the runner is asked again.
+    fn read_landed(&mut self, body: &Body, failed: bool) {
+        match body {
             Body::Events { ticket, .. } => {
                 if let Some(e) = self.dispatch.events.get_mut(ticket) {
                     e.in_flight = false;
@@ -1387,6 +1438,14 @@ impl AppCore {
                     }
                 }
             }
+            Body::Usage { ticket } => {
+                if let Some(u) = self.dispatch.usage.get_mut(ticket) {
+                    u.in_flight = false;
+                    if failed {
+                        u.asked_at = None;
+                    }
+                }
+            }
             Body::Artifact { path, .. } => {
                 if let Some(r) = self.dispatch.artifact_reads.get_mut(path) {
                     r.in_flight = false;
@@ -1397,6 +1456,13 @@ impl AppCore {
             }
             _ => {}
         }
+    }
+
+    /// What a call to Dispatch's port came back with: an error marks
+    /// the runner gone, a failure is a notice, and an answer lands on
+    /// the status it belongs to.
+    fn dispatch_replied(&mut self, body: Body, result: Result<Reply, String>, now: Clock) {
+        self.read_landed(&body, result.is_err());
         match (body, result) {
             (Body::Events { ticket, .. }, Ok(Reply::Events(v))) => {
                 let e = self.dispatch.events.entry(ticket).or_default();
@@ -1411,6 +1477,23 @@ impl AppCore {
             }
             (Body::Ticket { id }, Ok(Reply::Ticket(t))) => {
                 self.dispatch.details.entry(id).or_default().view = Some(t);
+            }
+            (Body::Usage { ticket }, Ok(Reply::Usage(v))) => {
+                let u = self.dispatch.usage.entry(ticket).or_default();
+                u.view = Some(v);
+                u.failed = None;
+            }
+            // A runner older than the usage read answers it as a bad
+            // request, and the tab says the runner does not report
+            // usage; one that does says why it could not. Either quietly.
+            (Body::Usage { ticket }, Ok(Reply::Failed { reason })) => {
+                let u = self.dispatch.usage.entry(ticket).or_default();
+                if reason.starts_with("bad request") {
+                    u.unavailable = true;
+                    u.failed = None;
+                } else {
+                    u.failed = Some(reason);
+                }
             }
             // The page says why under the artifact's name; a notes file
             // not written yet is no reason for a notice.

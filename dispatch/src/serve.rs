@@ -30,6 +30,7 @@ use crate::ticket::{
     Attempt, AttemptKind, AttemptState, Decision, DecisionState, PullRequestSource, SourceSnapshot,
     Ticket, TicketState,
 };
+use crate::usage;
 
 /// A Unix socket path may be at most 104 bytes on macOS (108 on Linux);
 /// binding a longer one fails obscurely, so it is refused with a reason.
@@ -52,6 +53,18 @@ impl Handler {
         }
     }
 
+    /// A ticket's usage, its cache brought up to date first. Switchboard
+    /// is never asked: the refs are what the runner recorded.
+    fn usage(&self, ticket: &str, now_ms: u64) -> Result<dispatch_control::UsageView> {
+        let t = self.runner.load_ticket(ticket)?;
+        let p = self.runner.pipeline_of(&t).ok();
+        let cache = usage::bring_up_to_date(&self.runner.data, &t, now_ms)?;
+        Ok(usage::view(
+            &t.id,
+            usage::of(&t, p.as_ref(), &cache, now_ms),
+        ))
+    }
+
     fn answer(&mut self, body: &Body, now_ms: u64) -> Result<Reply> {
         Ok(match body {
             Body::Status => Reply::Status(status(&self.runner)?),
@@ -71,6 +84,7 @@ impl Handler {
                 }
                 Reply::Ticket(view)
             }
+            Body::Usage { ticket } => Reply::Usage(self.usage(ticket, now_ms)?),
             Body::Events { ticket, since } => Reply::Events(ticket_events(
                 &events::log_path(&self.runner.data),
                 ticket,
