@@ -395,7 +395,7 @@ src/adapters/
   scrollback.rs          read the pipe-pane stream back as plain text (cold sessions); the masked tail with its overlap and the log's version for the remote port
   artifacts.rs           a run's declared outputs: glob under the cwd, modified since the run began
   agents.rs              Claude Code / Codex launch, resume, preflight, discovery
-  transcript.rs          Claude Code transcript (JSONL) -> Conversation turns; `read_masked` runs the mask over every text before the parser's caps
+  transcript.rs          Claude Code transcript (JSONL) -> Conversation turns and token totals per model, one per `message.id`, `<synthetic>` skipped; `read_masked` runs the mask over every text before the parser's caps
   ghostty.rs             open, reveal, Ghostty window launch and raise
   fakes.rs               test doubles for every port
 src/app.rs               SwitchboardApp: owns core + adapters; runs effects; polls host and events; answers control-port queries (`session.screen` with the project's secret values redacted); serves the remote port (the views on the frame, a screen through the content worker with the policy resolved on the frame, the watch set, the revision per content key, and the control scope's `send`, `resume` and `trust` through the control socket's `serve` so the op is the idempotency key)

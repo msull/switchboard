@@ -12,6 +12,10 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 - Dispatch reports each ticket's tokens by model and agent time, per attempt, stage and ticket, in `dispatch report` and a Usage tab on the ticket page.
 
+### Fixed
+
+- The session page's token count counts each message once, not once per content block, skips Claude Code's synthetic messages, and names each model when a session used more than one.
+
 ## [0.3.0] - 2026-10-19
 
 ### Added

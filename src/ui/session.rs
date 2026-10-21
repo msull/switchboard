@@ -957,7 +957,19 @@ fn meta_line(c: &Conversation) -> String {
     }
     parts.extend(c.version.as_ref().map(|v| format!("v{v}")));
     parts.extend(c.branch.clone());
-    parts.push(format!("out {:.1}k tok", f64_from(c.usage.output) / 1000.0));
+    let mut out = format!("out {:.1}k tok", f64_from(c.usage.output) / 1000.0);
+    if c.models.len() > 1 {
+        let split: Vec<String> = c
+            .models
+            .iter()
+            .map(|(m, u)| {
+                let name = m.strip_prefix("claude-").unwrap_or(m);
+                format!("{name} {:.1}k", f64_from(u.output) / 1000.0)
+            })
+            .collect();
+        out = format!("{out} ({})", split.join(", "));
+    }
+    parts.push(out);
     parts.push(format!(
         "cache read {:.1}M",
         f64_from(c.usage.cache_read) / 1e6

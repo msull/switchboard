@@ -6,6 +6,7 @@
 // Tests assert emptiness with `assert!` throughout.
 #![allow(clippy::assert_is_empty)]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1980,6 +1981,13 @@ fn two_turns() -> Conversation {
             output: 18,
             ..Usage::default()
         },
+        models: BTreeMap::from([(
+            "claude-fable-5-1".into(),
+            Usage {
+                output: 18,
+                ..Usage::default()
+            },
+        )]),
         last_usage: Some(Usage {
             input: 4_000,
             output: 12,
@@ -1987,6 +1995,30 @@ fn two_turns() -> Conversation {
             cache_create: 0,
         }),
     }
+}
+
+#[test]
+fn session_meta_names_each_model_when_there_are_several() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    harness.state_mut().conversations.seed(id, two_turns());
+    showing(&mut harness, View::Session(id));
+    // One model: the line has no split.
+    assert!(harness.query_by_label_contains(" tok (").is_none());
+
+    let output = |n| Usage {
+        output: n,
+        ..Usage::default()
+    };
+    let mut conversation = two_turns();
+    conversation.models = BTreeMap::from([
+        ("claude-fable-5-1".into(), output(15_000)),
+        ("claude-haiku-4-5".into(), output(3_000)),
+    ]);
+    conversation.usage = output(18_000);
+    harness.state_mut().conversations.seed(id, conversation);
+    harness.run_steps(2);
+    harness.get_by_label_contains("out 18.0k tok (fable-5-1 15.0k, haiku-4-5 3.0k)");
 }
 
 #[test]

@@ -9,7 +9,7 @@
 //! turns. Unparsable lines are skipped: the file is appended live, so
 //! the last line may be half-written.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -288,7 +288,13 @@ fn parse_with(text: &str, mask: &dyn Fn(&str) -> String) -> Conversation {
         {
             conv.title = Some(mask(title));
         }
-        if r.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+        let sidechain = r.get("isSidechain").and_then(Value::as_bool) == Some(true);
+        // Tokens count wherever they were spent: a subagent's sidechain
+        // and a record before the first prompt cost as much as any other.
+        if kind == Some("assistant") {
+            totals.add(r, !sidechain && !conv.turns.is_empty());
+        }
+        if sidechain {
             continue;
         }
         let at = str_field(r, "timestamp").and_then(parse_time);
@@ -335,7 +341,7 @@ fn parse_with(text: &str, mask: &dyn Fn(&str) -> String) -> Conversation {
         };
         match kind {
             Some("assistant") => {
-                assistant_record(cur, &mut totals, r, &results, at, mask);
+                assistant_record(cur, r, &results, at, mask);
             }
             Some("system") if str_field(r, "subtype") != Some("bridge_status") => {
                 if let Some(c) = str_field(r, "content").filter(|c| !c.trim().is_empty()) {
@@ -346,9 +352,7 @@ fn parse_with(text: &str, mask: &dyn Fn(&str) -> String) -> Conversation {
             _ => {}
         }
     }
-    conv.model = totals.model;
-    conv.usage = totals.usage;
-    conv.last_usage = totals.last_usage;
+    totals.finish(&mut conv);
 
     // The final response is also the last text activity: show it once.
     // (The viewer only drops it when it is the very last line; a hook
@@ -399,43 +403,86 @@ fn index_tool_results(
     results
 }
 
+/// The model name Claude Code gives the messages it writes itself (an
+/// API error, an interrupted turn); no model ran, so nothing is counted.
+const SYNTHETIC: &str = "<synthetic>";
+
 /// What the assistant messages add up to over a conversation.
 #[derive(Default)]
 struct Totals {
     model: Option<String>,
-    usage: Usage,
     last_usage: Option<Usage>,
+    /// Each message's model and usage by `message.id`. A message with
+    /// several content blocks is written as one record per block, each
+    /// carrying the message's usage repeated (the last record wins).
+    by_id: HashMap<String, (Option<String>, Usage)>,
+    /// Records with usage but no `message.id`, each counted once.
+    loose: Vec<(Option<String>, Usage)>,
 }
 
-/// One assistant message: token usage, the model name, and its blocks
-/// (thinking, text, tool calls) applied to the current turn.
+impl Totals {
+    /// Count one assistant record. Only a `main_chain` record says what
+    /// the model holds in context now and which model that is.
+    fn add(&mut self, r: &Value, main_chain: bool) {
+        let msg = r.get("message").unwrap_or(&Value::Null);
+        let model = str_field(msg, "model");
+        let synthetic = model == Some(SYNTHETIC);
+        if let Some(u) = msg.get("usage") {
+            let this = Usage {
+                input: num(u, "input_tokens"),
+                output: num(u, "output_tokens"),
+                cache_read: num(u, "cache_read_input_tokens"),
+                cache_create: num(u, "cache_creation_input_tokens"),
+            };
+            if main_chain {
+                self.last_usage = Some(this);
+            }
+            if !synthetic {
+                let entry = (model.map(str::to_owned), this);
+                match str_field(msg, "id") {
+                    Some(id) => {
+                        self.by_id.insert(id.to_owned(), entry);
+                    }
+                    None => self.loose.push(entry),
+                }
+            }
+        }
+        if main_chain
+            && !synthetic
+            && let Some(m) = model
+        {
+            self.model = Some(m.to_owned());
+        }
+    }
+
+    /// Set `conv`'s model, total, total per model and last main-chain
+    /// usage. A message that names no model counts in the total only.
+    fn finish(self, conv: &mut Conversation) {
+        let mut usage = Usage::default();
+        let mut models: BTreeMap<String, Usage> = BTreeMap::new();
+        for (model, u) in self.by_id.into_values().chain(self.loose) {
+            usage += u;
+            if let Some(m) = model {
+                *models.entry(m).or_default() += u;
+            }
+        }
+        conv.model = self.model;
+        conv.usage = usage;
+        conv.models = models;
+        conv.last_usage = self.last_usage;
+    }
+}
+
+/// One assistant message's blocks (thinking, text, tool calls) applied
+/// to the current turn.
 fn assistant_record(
     cur: &mut Turn,
-    totals: &mut Totals,
     r: &Value,
     results: &HashMap<String, ToolResult>,
     at: Option<SystemTime>,
     mask: &dyn Fn(&str) -> String,
 ) {
     let msg = r.get("message").cloned().unwrap_or(Value::Null);
-    if let Some(u) = msg.get("usage") {
-        let this = Usage {
-            input: num(u, "input_tokens"),
-            output: num(u, "output_tokens"),
-            cache_read: num(u, "cache_read_input_tokens"),
-            cache_create: num(u, "cache_creation_input_tokens"),
-        };
-        totals.usage.input += this.input;
-        totals.usage.output += this.output;
-        totals.usage.cache_read += this.cache_read;
-        totals.usage.cache_create += this.cache_create;
-        // A multi-block turn is several records with the same usage, so
-        // the last one seen is the current context.
-        totals.last_usage = Some(this);
-    }
-    if totals.model.is_none() {
-        totals.model = str_field(&msg, "model").map(str::to_owned);
-    }
     cur.assistant_msgs += 1;
     cur.end = at.or(cur.end);
     let blocks = match msg.get("content") {
@@ -894,6 +941,122 @@ mod tests {
         let c = parse(text);
         assert_eq!(c.usage.input, 30);
         assert_eq!(c.context_tokens(), Some(20 + 200 + 7));
+    }
+
+    /// An assistant record with an id, a model, and the given blocks
+    /// and usage figures.
+    fn assistant(id: &str, model: &str, blocks: &str, usage: &str, extra: &str) -> String {
+        format!(
+            r#"{{"type":"assistant"{extra},"message":{{"id":"{id}","model":"{model}","content":[{blocks}],"usage":{{{usage}}}}}}}"#
+        )
+    }
+
+    const PROMPT: &str = r#"{"type":"user","message":{"role":"user","content":"hi"}}"#;
+
+    #[test]
+    fn one_message_in_several_records_counts_once() {
+        let u = r#""input_tokens":1,"output_tokens":30,"cache_read_input_tokens":1000,"cache_creation_input_tokens":0"#;
+        let text = [
+            PROMPT.to_owned(),
+            assistant("msg1", "m", r#"{"type":"thinking","thinking":"hm"}"#, u, ""),
+            assistant("msg1", "m", r#"{"type":"text","text":"looking"}"#, u, ""),
+            assistant(
+                "msg1",
+                "m",
+                r#"{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/a"}}"#,
+                u,
+                "",
+            ),
+        ]
+        .join("\n");
+        let c = parse(&text);
+        assert_eq!(c.usage.output, 30);
+        assert_eq!(c.usage.cache_read, 1000);
+        assert_eq!(c.models.len(), 1);
+        assert_eq!(c.models["m"], c.usage);
+        let t = &c.turns[0];
+        assert_eq!(t.thinking, 1);
+        assert_eq!(t.tools, 1);
+        assert_eq!(t.final_text, "looking");
+    }
+
+    #[test]
+    fn synthetic_records_are_not_counted() {
+        let text = [
+            PROMPT.to_owned(),
+            assistant(
+                "s1",
+                "<synthetic>",
+                r#"{"type":"text","text":"x"}"#,
+                r#""input_tokens":7,"output_tokens":7"#,
+                "",
+            ),
+            assistant(
+                "r1",
+                "real",
+                r#"{"type":"text","text":"y"}"#,
+                r#""input_tokens":2,"output_tokens":3"#,
+                "",
+            ),
+        ]
+        .join("\n");
+        let c = parse(&text);
+        assert_eq!(c.usage.input, 2);
+        assert_eq!(c.usage.output, 3);
+        assert_eq!(c.models.keys().collect::<Vec<_>>(), ["real"]);
+        assert_eq!(c.model.as_deref(), Some("real"));
+    }
+
+    #[test]
+    fn totals_are_kept_per_model() {
+        let text = [
+            PROMPT.to_owned(),
+            assistant("a", "m1", "", r#""output_tokens":10"#, ""),
+            assistant("b", "m2", "", r#""output_tokens":5"#, ""),
+        ]
+        .join("\n");
+        let c = parse(&text);
+        assert_eq!(c.models["m1"].output, 10);
+        assert_eq!(c.models["m2"].output, 5);
+        assert_eq!(c.usage.output, 15);
+        assert_eq!(c.model.as_deref(), Some("m2"));
+    }
+
+    #[test]
+    fn sidechain_and_pre_prompt_records_count_tokens_only() {
+        let text = [
+            assistant(
+                "pre",
+                "main",
+                "",
+                r#""input_tokens":1,"output_tokens":100"#,
+                "",
+            ),
+            PROMPT.to_owned(),
+            assistant(
+                "a",
+                "main",
+                "",
+                r#""input_tokens":4,"output_tokens":10"#,
+                "",
+            ),
+            assistant(
+                "side",
+                "sub",
+                "",
+                r#""input_tokens":9,"output_tokens":20"#,
+                r#","isSidechain":true"#,
+            ),
+        ]
+        .join("\n");
+        let c = parse(&text);
+        assert_eq!(c.usage.output, 130);
+        assert_eq!(c.models["main"].output, 110);
+        assert_eq!(c.models["sub"].output, 20);
+        assert_eq!(c.model.as_deref(), Some("main"));
+        assert_eq!(c.last_usage.map(|u| u.input), Some(4));
+        assert_eq!(c.turns.len(), 1);
+        assert_eq!(c.turns[0].assistant_msgs, 1);
     }
 
     #[test]
