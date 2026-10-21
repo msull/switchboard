@@ -1661,7 +1661,7 @@ name = "write"
 operator = "writer"
 context = "each"
 writes = ["notes"]
-prompt = "Research question #{issue.number}: {issue.title}\n\n{issue.body}\n\nFrom the investigation at {inputs.notes}, write the document to docs/research/<slug>.md in this worktree, where <slug> is a few lowercase words from the question joined by hyphens. If docs/research/ is new, add one line for it to the Layout table in README.md. Commit on branch {branch}; do not push. Write the document's path to {notes}."
+prompt = "Research question #{issue.number}: {issue.title}\n\n{issue.body}\n\nFrom the investigation at {inputs.notes}, write the document to docs/research/<date>-<slug>.md in this worktree, where <date> is today as YYYY-MM-DD and <slug> is a few lowercase words from the question joined by hyphens. Open it with a Provenance paragraph: the date, and each repository read with the commit it was read at (git rev-parse HEAD in its worktree, before you commit), so every file and line reference has a commit. If docs/research/ is new, add one line for it to the Layout table in README.md. Commit on branch {branch}; do not push. Write the document's path to {notes}."
 gate = { kind = "command", in = "lane", argv = ["sh", "-c", "test -z \"$(git status --porcelain)\" && test -n \"$(git ls-files docs/research)\""] }   # committed, and a document exists
 
 [[stages]]
@@ -1715,6 +1715,10 @@ decisions = { lanes = "auto", review-code = "auto" }
 - **`trust_folders`** is not optional here in practice: every ticket
   is a fresh worktree, and without it the investigator waits on the
   folder trust question before it reads a line.
+- **The date in the name and the Provenance paragraph** are what let
+  a document age: the directory sorts in the order questions were
+  answered, and a line number cited without the commit it was read at
+  stops meaning anything after the next merge.
 - **No `plan` and no `review`**: the question is the plan. A question
   too wide to answer in one document is two issues.
 - **What to read while it runs:** `dispatch show <ticket>` names the
