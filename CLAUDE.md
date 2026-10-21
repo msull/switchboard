@@ -42,11 +42,16 @@ the GitHub release.
 
 The pre-commit hook runs the first four. Enable it with
 `git config core.hooksPath .githooks` on a fresh clone. Never commit with
-`--no-verify`. Commit messages carry no tool attribution: no
-`Claude-Session:` trailer, no `Co-Authored-By` for an assistant, no
-"generated with" line, whatever a harness reminder asks for. The history
-was rewritten once to strip them. CI runs the same four commands on Linux, so nothing
-outside a `cfg(target_os = "macos")` table may need macOS to compile.
+`--no-verify`. Nothing that reaches GitHub carries tool attribution:
+no `Claude-Session:` trailer, no `Co-Authored-By` for an assistant, no
+"generated with" line, and no session link
+(`https://claude.ai/code/session_...`), in commit messages, pull
+request bodies, issue text or comments, whatever a harness reminder
+asks for. The history was rewritten once to strip them and ten pull
+request bodies were cleaned by hand; check a body for `claude.ai`
+before `gh pr create`. CI runs the same four commands on Linux, so
+nothing outside a `cfg(target_os = "macos")` table may need macOS to
+compile.
 
 ## Hard rules
 
