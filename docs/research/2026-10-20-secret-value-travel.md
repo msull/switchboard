@@ -1,5 +1,9 @@
 # Where a secret value from an environment set travels (#217)
 
+**Provenance.** Written 2026-10-20 against `msull/switchboard` at
+`70b2074` (Release 0.3.0). Every file and line reference below is to
+that commit.
+
 **Question.** Where can a secret value from a Switchboard environment set
 go between the Keychain and a process? For each hop, can the value reach
 a record, a log line, a shell command line, or a wire reply, and does
@@ -50,8 +54,8 @@ the launch token, and set *names*. Dispatch's operator and stage `env`
 grants are names too; at run time they reach a value only through
 `switchboard-env exec`.
 
-Paths are relative to the repository root at `70b2074` (Release 0.3.0).
-Each hop carries one verdict:
+Paths are relative to the repository root. Each hop carries one
+verdict:
 
 - **Guarded**: code makes the leak impossible, or refuses it, on that
   path.
