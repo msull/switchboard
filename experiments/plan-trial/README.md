@@ -256,7 +256,35 @@ owner can answer. The trial runs unattended, so the facts file's "For
 the owner" section is read by the planner as unresolved, with the
 fallback it names. The live pipeline can add the gate afterwards.
 
+## The reassembled pipeline, revision 5
+
+The stage-level runs (next section, and `results/JOURNAL.md`) produced
+`pipelines/switchboard-facts-v5.toml`: revision 3's facts stage,
+revision 4's planner and reviewer, and one reviewer sentence from
+revision 5. It runs as a second set of arms, `sbf5-<scenario>-<a|b>`,
+with results under `results/sb-230/facts5/`, three scenarios chosen
+from what the isolated runs showed:
+
+| scenario | investigate | facts | plan | review | why |
+|---|---|---|---|---|---|
+| `lean` | haiku | sonnet | sonnet | sonnet | sonnet is four of four on the central fact where haiku is three of four, and the sonnet planner got the only hand-off of note; haiku reads the tree as well as anything |
+| `sonnet` | sonnet | sonnet | sonnet | sonnet | the all-sonnet baseline the lean arm is measured against |
+| `checked` | sonnet | sonnet | sonnet | opus | the opus reviewer searched in every isolated run where sonnet searched in one of four, and found more |
+
+On the trial Mac:
+
+```sh
+./make-arms.sh                               # the six sbf5-* files beside the rest
+./take.sh switchboard 230 facts5             # all three scenarios; a later batch names its scenarios
+./collect.sh switchboard 230 facts5          # when all six wait at finalize
+./blind.sh switchboard 230 facts5            # W to Z, then AA and AB: the trial outgrew the alphabet
+```
+
+then commit `results/` and push as before. `grade-all.sh` now grades
+every letter the key holds.
+
 ## Testing one stage in isolation
+
 
 Rerunning the pipeline to try a guidance change costs an hour and six
 tickets. `stage.sh` runs one stage as the pipeline would run it, from
@@ -330,11 +358,13 @@ and remove `~/code_repos/plan-trial`.
 |---|---|
 | `pipelines/switchboard.toml`, `pipelines/simplesingletable.toml` | the live pipelines as trial bases, with `PROJECT` and `MODEL` to fill in |
 | `pipelines/switchboard-facts.toml` | the Switchboard pipeline with the facts stage and the two-round review, with `PROJECT` and a model per planning stage to fill in |
+| `pipelines/switchboard-facts-v2.toml` to `-v5.toml` | the guidance revisions from the stage-level runs; v5 is the reassembled pipeline the `sbf5-*` arms run |
+| `spend.py`, `results/LEDGER.md` | the iteration budget: what is counted and the running total from the runs' own cost reports |
 | `prompts/<repo>.md` | the planner's guidance, verbatim from the base file, for the single arm |
 | `make-arms.sh` | writes the twelve arm projects and the ten facts arms into Dispatch's `pipelines/` |
-| `take.sh` | records the base commit and takes an issue in a repository's six arms, or with `facts` in the facts arms, all or the scenarios named |
+| `take.sh` | records the base commit and takes an issue in a repository's six arms, or with `facts` or `facts5` in that set's arms, all or the scenarios named |
 | `single.sh` | one headless Claude Code plan at the base commit |
-| `collect.sh` | copies an issue's pipeline arms, or with `facts` its facts arms, out of Dispatch's data directory |
+| `collect.sh` | copies an issue's pipeline arms, or with `facts` or `facts5` that set's arms, out of Dispatch's data directory, with every session's transcript |
 | `blind.sh` | shuffles the twelve plans into A to L with a key and a score sheet; with `facts`, adds the facts plans not yet in the key as the next letters |
 | `rubric.md` | how to score a plan, and what to put beside the scores |
 | `base-tree.sh` | a worktree at an issue's base commit under `~/code_repos/plan-trial`, made on first use |

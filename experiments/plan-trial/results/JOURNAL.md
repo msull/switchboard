@@ -336,3 +336,30 @@ the step ran. Costs are list price from the runs' own reports.
   poll-first and the cost of a missing cookie on a restored tab is a
   socket that falls to polling, while a script-readable token is a
   standing exposure; SameSite=Lax with the Origin check is acceptable.
+
+## 2026-10-22: the revision 4 review round, revision 5, and the reassembled pipeline ($35.67 of $50)
+
+- Round one of revision 4's review template on the revision 4
+  sonnet-b plan: sonnet-a one objection ($1.61, no search); sonnet-b
+  three objections ($0.29, one search); opus-a four objections
+  ($0.35, two searches). The new objection class is used: sonnet-b
+  and opus-a each object that the plan changes a decision the spec
+  made (the §5 pairing sentence; the card excerpt). Neither names the
+  certificate reissue as one, so the reissue passes the reviewer for
+  the same reason it passes the planner: the facts file's Apple rules
+  make it read as required.
+- One conflict found: sonnet-b objects that the cookie "rests on an
+  unresolved line with no fallback", which is the default the
+  planner's credential rule asks for. Revision 5 adds the converse to
+  the reviewer's objection list: a safer store chosen while its
+  mechanics are unresolved is right if the plan names the test.
+- Reviewer cost at sonnet still varies five-fold between runs of the
+  same plan and template.
+- The reassembled pipeline is revision 5, run as `sbf5-*` arms in
+  three scenarios: lean (haiku investigate, sonnet facts, sonnet plan,
+  sonnet review), sonnet throughout, checked (sonnet with the opus
+  reviewer). The scripts take, collect and blind the set; blind
+  letters continue past Z.
+- The respond step (the planner answering a review) run once as a
+  mechanics check, on the revision 4 sonnet-b plan with opus-a's
+  objections.

@@ -6,8 +6,7 @@
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$1; issue=$2; only=${3:-}
-for l in A B C D E F G H I J K L M N O P Q R S T U V W X Y Z; do
-  [ -s "$here/results/"*"-$issue/blind/$l.md" ] || continue   # not blinded yet
+for l in $(awk '{print $1}' "$here/results/"*"-$issue/blind/key.txt"); do   # every letter the key holds
   for g in fable codex; do
     [ -n "$only" ] && [ "$g" != "$only" ] && continue
     [ -s "$here/results/"*"-$issue/grades/$l.$g.md" ] && continue

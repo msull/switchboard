@@ -30,7 +30,7 @@ def grade(letter, grader):
     if not f.exists():
         return None
     for line in f.read_text().splitlines():
-        m = re.match(r"\|\s*([A-Z])\s*\|(.*)\|\s*$", line)
+        m = re.match(r"\|\s*([A-Z]+)\s*\|(.*)\|\s*$", line)
         if m and m.group(1) == letter:
             cells = [c.strip() for c in m.group(2).split("|")]
             if len(cells) >= 5:
@@ -47,7 +47,7 @@ def cost(tokens):
 
 def measure(arm):
     d = res / arm
-    if arm.startswith(("pipeline/", "facts/")):
+    if arm.startswith(("pipeline/", "facts")):
         r = json.loads((d / "report.json").read_text())
         show = json.loads((d / "show.json").read_text())
         # The review stage is still open (finalize is never answered in
@@ -61,7 +61,7 @@ def measure(arm):
         failed = sum(a["state"] == "failed" for a in reviews)
         rounds = r["plan_rounds"]
         # The first trial's review cap is six rounds; the facts pipeline's is two.
-        cap = "cap" if rounds >= (2 if arm.startswith("facts/") else 6) else ""
+        cap = "cap" if rounds >= (2 if arm.startswith("facts") else 6) else ""
         if failed:
             cap = (cap + f" {failed} rerun").strip()
         spike = (d / "spikes.txt").exists() and (d / "spikes.txt").read_text().strip() != ""

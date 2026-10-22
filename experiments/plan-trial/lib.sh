@@ -35,3 +35,27 @@ facts_models() {
     *) echo "unknown scenario $1 ($FACTS_SCENARIOS)" >&2; exit 2 ;;
   esac
 }
+
+# The reassembled pipeline (revision 5) as a second set of arms, prefix
+# sbf5, results under facts5/. The three combinations the stage-level
+# runs argued for: lean (haiku reads, sonnet checks and writes), sonnet
+# throughout, and checked (sonnet with the opus reviewer, which searched
+# in every isolated run where sonnet did not).
+FACTS5_SCENARIOS="lean sonnet checked"
+facts5_models() {
+  case $1 in
+    lean)    echo "haiku sonnet sonnet sonnet" ;;
+    sonnet)  echo "sonnet sonnet sonnet sonnet" ;;
+    checked) echo "sonnet sonnet sonnet opus" ;;
+    *) echo "unknown scenario $1 ($FACTS5_SCENARIOS)" >&2; exit 2 ;;
+  esac
+}
+# set_vars <facts|facts5>: the arm prefix, the pipeline file, the
+# scenarios and their model function, and the results subdirectory.
+set_vars() {
+  case $1 in
+    facts)  prefix=sbf;  pipeline=switchboard-facts.toml;    scenarios=$FACTS_SCENARIOS;  models=facts_models;  subdir=facts ;;
+    facts5) prefix=sbf5; pipeline=switchboard-facts-v5.toml; scenarios=$FACTS5_SCENARIOS; models=facts5_models; subdir=facts5 ;;
+    *) echo "unknown set $1 (facts or facts5)" >&2; exit 2 ;;
+  esac
+}

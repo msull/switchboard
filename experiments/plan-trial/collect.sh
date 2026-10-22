@@ -8,7 +8,7 @@
 # branch, or an empty file. Run it once every arm of the set waits at
 # finalize. Safe to run again. A closed ticket for the arm (one retaken
 # after main moved) is skipped.
-# usage: collect.sh <switchboard|simplesingletable> <issue> [facts]
+# usage: collect.sh <switchboard|simplesingletable> <issue> [facts|facts5]
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
@@ -16,9 +16,10 @@ repo=$1; issue=$2; set_=${3:-}
 repo_vars "$repo"
 status=$("$DISPATCH" status)
 last() { ls "$1" | sort -n | tail -1; }
-if [ "$set_" = facts ]; then
-  out="$here/results/$short-$issue/facts"
-  arms=$(for s in $FACTS_SCENARIOS; do for r in a b; do echo "sbf-$s-$r $s-$r"; done; done)
+if [ -n "$set_" ]; then
+  set_vars "$set_"
+  out="$here/results/$short-$issue/$subdir"
+  arms=$(for s in $scenarios; do for r in a b; do echo "$prefix-$s-$r $s-$r"; done; done)
 else
   out="$here/results/$short-$issue/pipeline"
   arms=$(for m in opus sonnet haiku; do for r in a b; do echo "$short-$m-$r $m-$r"; done; done)
@@ -74,7 +75,7 @@ for sid, label in wanted.items():
 have = sorted(p.name for p in out.glob("*.jsonl"))
 print(f"  transcripts: {', '.join(have) if have else 'none found'}")
 PYIN
-    if [ "$set_" = facts ]; then
+    if [ -n "$set_" ]; then
       # What the facts stage committed: every file on the branch beyond
       # the base commit. The facts stage is the only one that commits
       # before finalize, so this is the spike, or nothing.

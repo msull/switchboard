@@ -8,13 +8,13 @@
 # With `facts`, scenario names after it limit the take to those arms
 # (a project that already holds the issue is refused by dispatch, so a
 # later batch names only its new scenarios).
-# usage: take.sh <switchboard|simplesingletable> <issue> [facts [<scenario>...]]
+# usage: take.sh <switchboard|simplesingletable> <issue> [facts|facts5 [<scenario>...]]
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
 repo=$1; issue=$2; set_=${3:-}
 [ $# -ge 3 ] && shift 3 || shift $#
-scenarios=${*:-$FACTS_SCENARIOS}
+named=$*
 repo_vars "$repo"
 out="$here/results/$short-$issue"
 mkdir -p "$out"
@@ -25,12 +25,13 @@ if [ -s "$out/base.txt" ] && [ "$(cat "$out/base.txt")" != "$base" ]; then
 fi
 echo "$base" > "$out/base.txt"
 echo "base $base"
-if [ "$set_" = facts ]; then
+if [ -n "$set_" ]; then
   [ "$repo" = switchboard ] || { echo "the facts arms exist for switchboard only" >&2; exit 2; }
-  for scenario in $scenarios; do
-    facts_models "$scenario" > /dev/null
+  set_vars "$set_"
+  for scenario in ${named:-$scenarios}; do
+    $models "$scenario" > /dev/null
     for rep in a b; do
-      "$DISPATCH" take "sbf-$scenario-$rep" "$issue"
+      "$DISPATCH" take "$prefix-$scenario-$rep" "$issue"
     done
   done
 else

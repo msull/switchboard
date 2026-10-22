@@ -25,15 +25,15 @@ if facts:
     entries = [line.split() for line in keyfile.read_text().splitlines() if line]
     taken = [e[0] for e in entries]
     done = {e[1] for e in entries}
-    plans = [p for p in sorted(res.glob("facts/*/plan.md"))
+    plans = [p for p in sorted(res.glob("facts*/*/plan.md"))
              if f"{p.parent.parent.name}/{p.parent.name}" not in done]
     if not plans:
         sys.exit("every collected facts plan is already in blind/key.txt")
     if len(plans) % 2:
         sys.exit(f"{len(plans)} new facts plans: a scenario is missing its a or b")
-    letters = [c for c in string.ascii_uppercase if c not in taken][:len(plans)]
-    if len(letters) < len(plans):
-        sys.exit("out of letters")
+    # A to Z, then AA, AB, ...: the trial outgrew the alphabet.
+    pool = list(string.ascii_uppercase) + [a + b for a in string.ascii_uppercase for b in string.ascii_uppercase]
+    letters = [c for c in pool if c not in taken][:len(plans)]
 else:
     plans = sorted(res.glob("pipeline/*/plan.md")) + sorted(res.glob("single/*/plan.md"))
     if len(plans) != 12:
