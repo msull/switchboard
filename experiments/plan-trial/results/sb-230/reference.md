@@ -37,3 +37,18 @@ Written from the code at the base commit before any plan was read. It is the gra
 ## Errata, after grading
 
 Eleven of the twelve plans found a departure this reference missed: the card's one-line excerpt is not on the wire. `SessionView` (`control/src/lib.rs:637`) has `card`, `waiting` and `waiting_reason` but no `last_message`; the spec's sentence at `docs/remote-client.md:207` describes a field that was never added, and `agent_excerpt` (`src/ui/cards.rs:558`) computes the excerpt UI-side. Decision 6's "as the issue says" therefore asked for a field the page cannot read; a plan that reads `last-response` for the waiting sessions, shows `card` and `waiting_reason`, or defers the excerpt was right to depart, and the Codex grader's "restore the excerpt" reversals should be read with that in mind (no score changed: by its own count every plan kept three or more other reversals). Several plans also found that nothing tells a device its scope after a reload behind a cookie (§5's "answers with the device's scope" is true only of the pair reply), that the invite carries a LAN address while the host listens on loopback, and that the pair reply would carry the token in its body even with a cookie. All verified by the graders; a plan that handled them earned it under departures.
+
+**Added 2026-10-22, after the stage-level runs.** One facts run found
+WebKit bugs 200345 (open) and 232666 (closed as a configuration
+change): a `SameSite=Strict` cookie can be missing from a WebSocket
+handshake in a restored or history-loaded Safari tab. Several plans
+took that as the reason to keep the token out of a cookie and carry it
+in `Sec-WebSocket-Protocol` from `localStorage`. The finding is true and
+does not change decision 2. The page is poll-first, so a socket that
+fails for want of the cookie leaves the page polling, and the cookie
+rides those ordinary same-site requests as before; the cost is a
+restored tab without live updates until the socket reconnects. A token
+script can read is a standing exposure with no fallback. A plan that
+answers the bug with `SameSite=Lax` plus the `Origin` check on
+state-changing requests and the upgrade is acceptable; a plan that
+answers it with `localStorage` is still the call to reverse.
