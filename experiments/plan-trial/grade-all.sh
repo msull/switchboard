@@ -1,12 +1,12 @@
 #!/bin/sh
-# Grades every blind plan of an issue (A to L, and M to R once the facts
-# arms are blinded) with both graders, four at a time,
+# Grades every blind plan of an issue (A to L, and the letters after
+# them as facts arms are blinded) with both graders, four at a time,
 # skipping any grade already written.
 # usage: grade-all.sh <switchboard|simplesingletable> <issue> [fable|codex]
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$1; issue=$2; only=${3:-}
-for l in A B C D E F G H I J K L M N O P Q R; do
+for l in A B C D E F G H I J K L M N O P Q R S T U V W X Y Z; do
   for g in fable codex; do
     [ -n "$only" ] && [ "$g" != "$only" ] && continue
     [ -s "$here/results/"*"-$issue/grades/$l.$g.md" ] && continue

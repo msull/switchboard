@@ -5,11 +5,16 @@
 # (`facts`, Switchboard only). A facts run of an issue the first trial
 # already planned is refused unless main is still at that issue's base
 # commit, so the six new plans compare with the twelve old ones.
-# usage: take.sh <switchboard|simplesingletable> <issue> [facts]
+# With `facts`, scenario names after it limit the take to those arms
+# (a project that already holds the issue is refused by dispatch, so a
+# later batch names only its new scenarios).
+# usage: take.sh <switchboard|simplesingletable> <issue> [facts [<scenario>...]]
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
 repo=$1; issue=$2; set_=${3:-}
+[ $# -ge 3 ] && shift 3 || shift $#
+scenarios=${*:-$FACTS_SCENARIOS}
 repo_vars "$repo"
 out="$here/results/$short-$issue"
 mkdir -p "$out"
@@ -22,7 +27,8 @@ echo "$base" > "$out/base.txt"
 echo "base $base"
 if [ "$set_" = facts ]; then
   [ "$repo" = switchboard ] || { echo "the facts arms exist for switchboard only" >&2; exit 2; }
-  for scenario in $FACTS_SCENARIOS; do
+  for scenario in $scenarios; do
+    facts_models "$scenario" > /dev/null
     for rep in a b; do
       "$DISPATCH" take "sbf-$scenario-$rep" "$issue"
     done

@@ -2,10 +2,11 @@
 # Shuffles an issue's plans into results/<short>-<issue>/blind/ with the
 # key in key.txt and a scores.md to fill in. The first call takes the
 # twelve first-trial plans as A to L. A later call with `facts` adds the
-# six facts-arm plans as the next six letters, shuffled among themselves,
-# appending to the key and the score sheet; the earlier letters keep
-# their grades. Score before opening the key. A pipeline arm's plan is
-# the reviewed copy.
+# facts-arm plans not yet in the key as the next free letters, shuffled
+# among themselves, appending to the key and the score sheet; the
+# earlier letters keep their grades. So each batch of facts arms is
+# blinded once, when its plans are collected. Score before opening the
+# key. A pipeline arm's plan is the reviewed copy.
 # usage: blind.sh <switchboard|simplesingletable> <issue> [facts]
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
@@ -19,15 +20,20 @@ facts = sys.argv[2] == "facts"
 blind = res / "blind"
 keyfile = blind / "key.txt"
 if facts:
-    plans = sorted(res.glob("facts/*/plan.md"))
-    if len(plans) != 6:
-        sys.exit(f"{len(plans)} facts plans found, expected 6 (3 scenarios x a, b)")
     if not keyfile.exists():
         sys.exit("blind/key.txt missing: run blind.sh for the first-trial plans first")
-    taken = [line.split()[0] for line in keyfile.read_text().splitlines() if line]
-    if any(line.split()[1].startswith("facts/") for line in keyfile.read_text().splitlines() if line):
-        sys.exit("the facts plans are already in blind/key.txt")
-    letters = [c for c in string.ascii_uppercase if c not in taken][:6]
+    entries = [line.split() for line in keyfile.read_text().splitlines() if line]
+    taken = [e[0] for e in entries]
+    done = {e[1] for e in entries}
+    plans = [p for p in sorted(res.glob("facts/*/plan.md"))
+             if f"{p.parent.parent.name}/{p.parent.name}" not in done]
+    if not plans:
+        sys.exit("every collected facts plan is already in blind/key.txt")
+    if len(plans) % 2:
+        sys.exit(f"{len(plans)} new facts plans: a scenario is missing its a or b")
+    letters = [c for c in string.ascii_uppercase if c not in taken][:len(plans)]
+    if len(letters) < len(plans):
+        sys.exit("out of letters")
 else:
     plans = sorted(res.glob("pipeline/*/plan.md")) + sorted(res.glob("single/*/plan.md"))
     if len(plans) != 12:

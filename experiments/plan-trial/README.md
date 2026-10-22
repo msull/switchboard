@@ -18,7 +18,7 @@ Two public repositories, one issue each, twelve plans per issue:
 
 Every arm runs twice (`a` and `b`), so the two repetitions of one arm
 measure consistency. That is 12 Dispatch tickets and 12 single sessions
-for the first two arms, and 6 more tickets for the facts arm, which was
+for the first two arms, and 10 more tickets for the facts arm, which was
 added after #230 was scored (see "The facts pipeline" below). Implementation is a later phase and continues from these
 tickets, so nothing here is closed when planning is done.
 
@@ -185,22 +185,33 @@ file as the yardstick and writes a fallback beside any decision that
 rests on an unresolved line; and the review has a cap of two rounds
 with web tools, premises in round one and cuts in round two.
 
-Three scenarios, each run twice, so six more plans of the same issue
-against the same base commit:
+Five scenarios, each run twice, against the same base commit. The
+first three were taken as one batch, the last two as a second one:
 
 | scenario | investigate | facts | plan | review | compares with |
 |---|---|---|---|---|---|
 | `sonnet` | sonnet | sonnet | sonnet | sonnet | pipeline sonnet, single sonnet |
 | `opus` | opus | opus | opus | opus | pipeline opus |
 | `mixed` | sonnet | opus | sonnet | opus | both: the money goes to the two stages that gather and check information |
+| `haiku` | haiku | haiku | haiku | haiku | pipeline haiku |
+| `cheap` | haiku | sonnet | haiku | sonnet | `mixed` one tier down, no opus anywhere |
 
 The projects are `sbf-<scenario>-<a|b>` in their own space,
 `Plan trial · Switchboard facts`. Running them, on the trial Mac with
 the branch pulled:
 
 ```sh
-./make-arms.sh                      # writes the six sbf-* files beside the twelve
+./make-arms.sh                      # writes the ten sbf-* files beside the twelve
 ./take.sh switchboard 230 facts     # refuses if main has moved off results/sb-230/base.txt
+```
+
+`take.sh` with `facts` and no scenario names takes every scenario, and
+dispatch refuses a project that already holds the issue, so a later
+batch names its scenarios: the second batch was
+
+```sh
+./make-arms.sh                               # the two new files
+./take.sh switchboard 230 facts haiku cheap
 ```
 
 The same decisions rules apply: never answer `finalize`, one `rerun`
@@ -218,20 +229,20 @@ per ticket. Two things are new to watch:
   as in the first trial. If a facts session sits at a prompt, answer it
   and note which tool in the results commit message.
 
-When all six wait at `finalize`:
+When every arm of a batch waits at `finalize`:
 
 ```sh
-./collect.sh switchboard 230 facts   # results/sb-230/facts/<scenario>-<rep>/, with facts.md and spikes.txt
-./blind.sh switchboard 230 facts     # adds the six as M..R to blind/, appending the key
+./collect.sh switchboard 230 facts   # results/sb-230/facts/<scenario>-<rep>/, with facts.md and spikes.txt; arms not taken are reported and skipped
+./blind.sh switchboard 230 facts     # the collected facts plans not yet in the key, as the next free letters (M..R, then S..V)
 git add experiments/plan-trial/results
 git commit -m "Plan trial: switchboard #230 planned in the facts arms"
 git push
 ```
 
-Scoring is then `grade-all.sh` as before: it grades M to R against the
-same reference and skips A to L, whose grades exist, and `tally.py`
-puts the facts arms in the same table with their rounds (cap 2) and a
-`spike` mark where one was committed. The reference's errata section
+Scoring is then `grade-all.sh` as before: it grades the new letters
+against the same reference and skips those whose grades exist, and
+`tally.py` puts the facts arms in the same table with their rounds
+(cap 2) and a `spike` mark where one was committed. The reference's errata section
 stays as it is: the facts arms are graded by the same yardstick as the
 twelve, including its one known gap.
 
@@ -270,11 +281,11 @@ and remove `~/code_repos/plan-trial`.
 | `pipelines/switchboard.toml`, `pipelines/simplesingletable.toml` | the live pipelines as trial bases, with `PROJECT` and `MODEL` to fill in |
 | `pipelines/switchboard-facts.toml` | the Switchboard pipeline with the facts stage and the two-round review, with `PROJECT` and a model per planning stage to fill in |
 | `prompts/<repo>.md` | the planner's guidance, verbatim from the base file, for the single arm |
-| `make-arms.sh` | writes the twelve arm projects and the six facts arms into Dispatch's `pipelines/` |
-| `take.sh` | records the base commit and takes an issue in a repository's six arms, or with `facts` in the six facts arms |
+| `make-arms.sh` | writes the twelve arm projects and the ten facts arms into Dispatch's `pipelines/` |
+| `take.sh` | records the base commit and takes an issue in a repository's six arms, or with `facts` in the facts arms, all or the scenarios named |
 | `single.sh` | one headless Claude Code plan at the base commit |
 | `collect.sh` | copies an issue's pipeline arms, or with `facts` its facts arms, out of Dispatch's data directory |
-| `blind.sh` | shuffles the twelve plans into A to L with a key and a score sheet; with `facts`, adds the six facts plans as M to R |
+| `blind.sh` | shuffles the twelve plans into A to L with a key and a score sheet; with `facts`, adds the facts plans not yet in the key as the next letters |
 | `rubric.md` | how to score a plan, and what to put beside the scores |
 | `base-tree.sh` | a worktree at an issue's base commit under `~/code_repos/plan-trial`, made on first use |
 | `grade.sh` | scores one blind plan with one grader (`fable` or `codex`) from one packet: issue, rubric, reference, plan, base worktree; writes `grades/<letter>.<grader>.md` |

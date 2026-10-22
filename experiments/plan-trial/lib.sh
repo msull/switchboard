@@ -22,13 +22,16 @@ repo_vars() {
 # The facts pipeline's scenarios: a name and the model of each of its
 # four planning stages, in the order investigate facts plan review.
 # `mixed` spends on the two stages that gather and check information
-# and keeps the two that write on sonnet.
-FACTS_SCENARIOS="sonnet opus mixed"
+# and keeps the two that write on sonnet; `cheap` is the same shape one
+# tier down, haiku writing and sonnet checking, with no opus anywhere.
+FACTS_SCENARIOS="sonnet opus mixed haiku cheap"
 facts_models() {
   case $1 in
     sonnet) echo "sonnet sonnet sonnet sonnet" ;;
     opus)   echo "opus opus opus opus" ;;
     mixed)  echo "sonnet opus sonnet opus" ;;
+    haiku)  echo "haiku haiku haiku haiku" ;;
+    cheap)  echo "haiku sonnet haiku sonnet" ;;
     *) echo "unknown scenario $1 ($FACTS_SCENARIOS)" >&2; exit 2 ;;
   esac
 }
