@@ -313,3 +313,26 @@ the step ran. Costs are list price from the runs' own reports.
 - Graded by both graders, and the revision 4 review round run on the
   sonnet-b plan with sonnet twice and opus once, for comparison with
   revision 3's.
+
+## 2026-10-22: revision 4's plans graded ($34.06 of $50)
+
+- Grades (`results/sb-230/stages/plan/v4-*/grade.*.md`): sonnet-a
+  Fable 3/3/2/2/note, Codex 3/2/1/1/note; sonnet-b Fable
+  3/2/2/2/note, Codex 3/2/1/1/note; haiku-a Fable 3/2/1/2/note, Codex
+  3/2/0/1/no; haiku-b Fable 3/3/1/2/note, Codex 3/2/0/1/no.
+- The sonnet plans are the first in the trial to get a hand-off of
+  note from Codex, and both graders write that everything else
+  matches the reference. The one reversal left in all four is the
+  certificate reissue, with haiku-a adding a certificate download
+  path and both haiku plans a third static file. So revision 4's
+  credential rule removed the token-store reversal in every plan, and
+  the reissue stands as the owner's judgment call.
+- Compared with revision 3 on the same facts file: Fable's overturn
+  rose from 1 to 2 for sonnet (one reversal instead of two), Codex's
+  hand-off moved from no to note for sonnet. Length rose by about a
+  fifth.
+- The owner left the SameSite errata to me: the reference now says the
+  finding is true and does not change decision 2, since the page is
+  poll-first and the cost of a missing cookie on a restored tab is a
+  socket that falls to polling, while a script-readable token is a
+  standing exposure; SameSite=Lax with the Origin check is acceptable.
