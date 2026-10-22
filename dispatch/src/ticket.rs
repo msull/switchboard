@@ -17,7 +17,8 @@ pub struct SourceSnapshot {
     /// `github`, `task-file` or `manual`.
     pub kind: String,
     /// `<repo>#<number>` for GitHub; a hash of the line for a task file.
-    /// A ticket is taken once per identity.
+    /// A ticket is taken once per identity in a project; another
+    /// project on the same repository may take it too.
     pub identity: String,
     pub number: Option<u64>,
     pub title: String,
