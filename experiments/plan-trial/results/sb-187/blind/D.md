@@ -1,267 +1,114 @@
-# A plan review rerun starts from the failed attempt's copy (#187)
-
-Line numbers are from this worktree at 7fe8949. Today the ticket
-record is at `RECORD_VERSION = 28` (`dispatch/src/store.rs:26`) and the
-app's store at `SCHEMA_VERSION = 16` (`src/core/model.rs:12`). This plan
-bumps neither.
+# A plan review rerun reviews the owner's revision (#187)
 
 ## Where this departs from the issue
 
-- The issue says the `revise` note should "survive a runner failure".
-  It already does. `revise` (`dispatch/src/scheduler.rs:7565`) writes
-  the note as `plan.feedback-<k>.md` beside `review/1/joined/plan.md`
-  and records a `Revision` on the attempt, and both are still on disk
-  and in the record after the failure. What gets lost is the revised
-  plan: `start_workflow` (`scheduler.rs:7436`) takes its input from
-  `review_subject` (`scheduler.rs:10534`), which only considers
-  **Complete** attempts, so it skips the failed `review/1` and copies
-  `plan/1`'s output. The plan fixes the input. It does not re-send the
-  note's text to attempt 2: starting from the revised copy carries the
-  note's effect. Showing the owner's earlier decisions to round 1's
-  reviewer is listed as a known gap.
-- The issue asks `show` to list the earlier copy as a "prior revision"
-  next to the reviewed copy. Once attempt 2 starts from attempt 1's
-  copy, that copy is not a separate plan; it is where attempt 2 began.
-  So `show` marks the reviewed copy with the copy it started from and
-  does not add a second `plan:` line. The earlier attempt's rounds,
-  including the owner's, stay listed in `show` and on the ticket page's
-  Plan tab, tagged with their attempt (see The UI).
-- The investigation proposed a new `Attempt::started_from` field and a
-  record version bump. It is not needed. `Attempt::carried_from:
-  Option<(String, u32)>` (`dispatch/src/ticket.rs:317`) already exists,
-  is `#[serde(default)]`, and is read only for `AttemptKind::Review`
-  attempts: `carry_of` is called from code review paths only
-  (`review.rs:548`, `815`, `1776`), and `report.rs:414` filters on
-  `AttemptKind::Review`. A plan review attempt sets the same field.
-  The serialized type does not change, so there is no migrate step.
+- Repro step 2 says a runner restart in the middle of a run makes the attempt fail with `review run gone`. The code does not support that. A workflow run is a durable record in Switchboard (`docs/design.md:1002`). `poll_workflow` fails the attempt only when the app answers `no such run` for the run id (`dispatch/src/scheduler.rs:7755`), and the app answers that only when it has no record of the run (`src/app.rs:3915-3918`), for example after `remove_workflow` (`src/core/workflow.rs:1009`). The tests use what `a_run_switchboard_no_longer_has_fails_the_attempt` already uses (`dispatch/tests/first_slice.rs:3809`): `env.sb().runs.clear()`. The fix does not depend on why the run went away.
+- "The `revise` note should survive a runner failure the same way an answered decision does." The note does survive. It is on the answered `finalize` decision, and it is in `review/1/joined/plan.feedback-<n>.md` (`scheduler.rs:7615-7618`). What gets lost is the plan copy the planner revised in response to it. The plan carries that copy forward. It does not replay the note into the new run. A note the planner never answered is named in the rerun and finalize questions, so the owner can send it again with `revise`. Replaying it automatically would open a paid round that the owner did not ask for in this run.
+
+Everything else in the issue matches the code. `start_workflow` (`scheduler.rs:7436`) takes its input from `review_subject` (`scheduler.rs:10534-10548`), which skips every attempt that is not `Complete`. So a failed review attempt's copy is never a candidate, and the copy is taken from `plan/1`. `rerun_carries` (`scheduler.rs:9382-9390`) adds nothing to the question for a workflow attempt. `show`'s `files:` block prints only `t.shown("plan")`, which is the open attempt-2 copy (`dispatch/src/serve.rs:538-548`, `dispatch/src/main.rs:896-909`).
 
 ## The record
 
-The record has no new field. A `StageKind::Workflow` attempt now sets
-`carried_from = Some((stage, m))` when its copy was made from attempt
-`m`'s copy. It also sets `rework` to the rerun note it was started
-with. Both fields are written when the attempt is made and never
-changed. Update the doc comments on both fields (`ticket.rs:311-322`)
-to say they also apply to a plan review attempt.
+No schema change. `RECORD_VERSION` stays at its current value, 28 (`dispatch/src/store.rs:26`), and `USAGE_VERSION` stays 1. If the implementer finds they do need a serialized field after all, they bump from the value in `store.rs` at implementation time plus one and add a `migrate` step.
 
-Rehydration is derived from the record on every pass, so a restart
-between the `rerun` answer and the new attempt picks the same copy.
+The existing `Attempt::carried_from: Option<(String, u32)>` (`dispatch/src/ticket.rs:312-317`) is now also set on a workflow attempt. There it means "this attempt's copy started as attempt `m`'s copy, not as the stage's input". Every current reader is limited to code review attempts, so this new meaning does not reach any of them:
+- `previous_review` filters `AttemptKind::Review` (`dispatch/src/review.rs:3618-3625`);
+- `carry_of` is called only for review attempts (`review.rs:3646`);
+- `report::code_review` filters `AttemptKind::Review` (`dispatch/src/report.rs:413`).
+
+Records written before this change have `None` and read as they do today. Widen the field's doc comment to cover both meanings.
+
+## The carry rule
+
+There is one new pure function in `scheduler.rs`, next to `review_subject`:
+
+```rust
+/// The copy a new attempt of a plan review starts from instead of the stage's input:
+/// `prev`'s, the latest earlier attempt in the context, when the owner revised it or
+/// it carried such a copy itself, nothing has rewritten the input since it started,
+/// a restart did not discard it, and its copy is still on disk.
+fn carried_copy<'t>(t: &'t Ticket, prev: &'t Attempt, subject: &str) -> Option<&'t PathBuf>
+```
+
+It returns `Some` only when all of the following hold:
+- `prev.kind == AttemptKind::Workflow`.
+- `!prev.revisions.is_empty() || prev.carried_from.is_some()`. Carrying the copy forward through `carried_from` makes a chain of failures keep the revision.
+- `prev.state` is not `Cancelled { reason }` with `reason.starts_with(DISCARDED_BY)`. `DISCARDED_BY` is already imported at `scheduler.rs:25`.
+- The input attempt `review_subject` finds ended at or before `prev.started_ms`. A restart to the plan stage writes a newer input, so that input is reviewed afresh.
+- `!prev.forgotten.contains_key(subject)` and `prev.artifacts[subject]` exists on disk.
+
+The plan only carries a failed attempt's copy when the owner revised it. A copy changed only by the planner, in an attempt that failed with no revision, is not carried, because it may be a half-finished edit. That rerun reviews the input as it does today, and its question says so.
+
+A second helper:
+
+```rust
+/// The owner's round file in `src` whose round has no response beside the copy:
+/// its note never reached the plan.
+fn unanswered_revision(src: &Attempt, subject: &str) -> Option<PathBuf>
+```
+
+It takes `src`'s last `Revision`. When `report::response_file(copy, round)` (`report.rs:201`) does not exist, it returns `report::round_file(copy, round)` (`report.rs:156`).
 
 ## The signals
 
-There is no new signal. The input rule is one pure function next to
-`review_subject` in `scheduler.rs`:
+No new event or decision. Two existing questions gain a clause, and `show` gains a line.
 
-`fn revised_copy<'t>(t: &'t Ticket, stage: &str, ctx: &str, subject: &str) -> Option<&'t Attempt>`
+- **The rerun question.** `rerun_carries` (`scheduler.rs:9382`) returns a `String` instead of `&'static str`. Its only caller is `rerun_ask` at `scheduler.rs:9373`. For a workflow attempt `a` it reads the subject name from `a.artifacts`' single key and uses `carried_copy(t, a, subject)` and `review_subject`:
+  - When a copy is carried: " The next attempt reviews `<a's copy>`, this attempt's copy with the owner's revision, not `<input>`." If there is an unanswered revision, it adds: " The owner's note in `<round file>` has no response; answer `revise` with it again at finalize if it still stands."
+  - Otherwise: " The next attempt reviews `<input>` afresh."
+- **The finalize question.** `review_done` (`scheduler.rs:7693-7696`): when `a.carried_from` names attempt `m`, it appends " It started from `<m's copy>`, an earlier attempt's revised copy." and the same unanswered-note sentence, computed on attempt `m`.
 
-It walks `t.attempts` newest first:
+## The actions and effects
 
-- It stops with `None` at the first Complete attempt that wrote
-  `subject` and has not forgotten it. A plan rerun after the failure
-  (a send-back, a `restart --from plan`) is newer, so it wins.
-- It returns the first attempt that matches all of these: an
-  `AttemptKind::Workflow` attempt of `stage` in `ctx`; `Failed`, or
-  `Cancelled` with a reason that does not start with
-  `restart::DISCARDED_BY`; holds `subject` in `artifacts`; and does not
-  have it in `forgotten`.
-
-After a chain of failures this is the latest attempt, whose copy
-already holds every earlier revision. The function does no file I/O.
-The caller checks that the file exists.
-
-The copy is taken as the failed run left it. A run that failed because
-its planner exited mid-round may leave a partly edited copy. Dispatch
-cannot tell a partial edit from a finished one, since rounds edit in
-place, so it does not try. The rerun question says the copy is the one
-the failed run left, and a note saying "start over" is the way back to
-the stage's original output.
-
-`review_subject`'s walk is split out as
-`fn subject_writer<'t>(t: &'t Ticket, subject: &str) -> Option<&'t Attempt>`:
-the newest Complete attempt with `subject` in `artifacts`, the filter
-at 10539-10544 unchanged. `review_subject` becomes a wrapper over it
-that keeps its `Result<(PathBuf, String), String>` and its two error
-texts, and `rerun_carries` uses it for the stage and number it prints.
-
-## Actions and effects
-
-There is no new `Body` variant or reply, and `WorkflowStart` is
-unchanged.
-
-- `start_workflow` (`scheduler.rs:7436`):
-  1. Read the note with `t.rework.get(&rework_key(&stage.name, ctx))`,
-     not `remove`. The parks at 7449-7467 and the `Err` returns from
-     `attempt_dir` and `std::fs::copy` (7468-7472) all come before the
-     push, and the scheduler's rule is that a note leaves the ticket
-     only with the attempt that carries it (`scheduler.rs:6279-6280`,
-     removed after the launch at 6370).
-  2. Unless the note `starts_over`, look up `revised_copy`. If the
-     attempt it returns still has its copy on disk, copy that file
-     instead of `source_path` (7470-7472). If the file is missing, log
-     one warning and fall back.
-  3. Set `carried_from` and `rework` on the new attempt pushed at
-     7491, and remove the note from `t.rework` in the same step, before
-     `save_ticket`. A later `Reply::Failed` fails the attempt, which
-     then holds the note, so a further rerun's `rerun_note` finds no
-     answer note and the attempt's own `rework` is not re-read. That is
-     the existing behaviour for a code review's `rework` and is kept.
-  4. Keep `source` as `review_subject`'s session, the newest complete
-     writer's planner. The failed attempt's `session` is the dead run's
-     clone (`poll_workflow`, 7794-7798).
-- `rerun_note` (`scheduler.rs:8988`): accept `StageKind::Workflow` in
-  the `matches!` at 8992-8995, so a note on a plan review's `rerun`
-  answer is kept under `rework_key` by `retire_replaced` (3599-3601),
-  not dropped. `sent_back` (10600) still excludes Workflow stages, so
-  the kept note never holds the stage as sent back. Update its comment
-  to say the note is taken by the next attempt.
-- `review::starts_over` (`review.rs:3639`) becomes `pub(crate)` and is
-  imported by the scheduler.
-- `rerun_carries` (`scheduler.rs:9382`) returns `String` rather than
-  `&'static str`. For a Workflow attempt `a` that `revised_copy` would
-  pick, it adds: ` A rerun reviews this attempt's copy as the failed
-  run left it, with the owner's revision of round {k}; a note saying
-  "start over" reviews {writer}/{n}'s {subject} instead.` Here `{k}` is
-  the last `a.revisions` round, and the clause "with the owner's
-  revision …" is dropped when `revisions` is empty. `{writer}/{n}` is
-  `subject_writer(t, subject)`'s `stage` and `n`; when it is `None`
-  the "start over" clause is dropped, since a rerun would park on
-  "nothing wrote" anyway. `rerun_ask` (9335) uses it unchanged.
+- `review_subject` returns the input attempt's `ended_ms` as well: `(PathBuf, String, Option<u64>)`. It has one caller, at `scheduler.rs:7465`.
+- In `start_workflow`, before the push at `scheduler.rs:7487`, take `prev = latest_attempt(t, &stage.name, ctx)`. If `carried_copy` returns a path, copy that file instead of `source_path` at `scheduler.rs:7471`, and set `carried_from = Some((stage.name.clone(), prev.n))` on the new attempt. `new_attempt` stays as it is; set the field on the returned value, as `review.rs:225` does. `source_session` is still the plan attempt's session, because the planner clone's history has to be the plan author's. The workflow's prompts already name the copy (`docs/dispatch.md:550-557`).
+- Log the carry with `log::info!`, naming both attempts.
+- There is no new `Effect` or port call. The copy is a local file copy, as it is today.
 
 ## The UI
 
-- `dispatch-control/src/lib.rs:586` `LaneFile` gains `from:
-  Option<PathBuf>`: the copy that a plan review's copy started from.
-  The struct is `#[serde(default)]`, so older readers ignore it.
-- `serve::ticket_paths` (`dispatch/src/serve.rs:538`) sets `from` from
-  `a.carried_from` → `find_attempt` → `artifacts[subject]`, for Workflow
-  attempts only.
-- `print_lane_files` (`dispatch/src/main.rs:896`) prints `    (started
-  from <path>)` under a plan line whose `from` is set, whether the
-  review is open or not. That earlier path's directory also holds the
-  owner's `plan.feedback-<k>.md`.
-- `dispatch-control/src/lib.rs:604` `PlanRoundView` gains `attempt:
-  Option<u32>`: the review attempt a round belongs to, set only for a
-  round of an earlier attempt than the current one. Also
-  `#[serde(default)]`.
-- `serve::ticket_paths` builds `plan_rounds` (564-572) by walking
-  `carried_from` back from `review`, the newest Workflow attempt with
-  artifacts. It lists each earlier attempt's `plan_rounds(a)`
-  (`serve.rs:504`), oldest first, with `attempt: Some(a.n)`, then the
-  current attempt's rounds with `attempt: None`. Each attempt's round
-  files sit beside its own copy, so round numbers repeat across
-  attempts, and the tag is what tells them apart. `round_file`
-  (`serve.rs:573`) falls back only to the current attempt's last round,
-  so `round:` never names an earlier attempt's file.
-- `show` (`main.rs:991-994`) prints an earlier attempt's round as
-  `plan round {n} (owner, review/{m}): <path>`, or `(review/{m})` for a
-  reviewer round.
-- The app's Plan tab (`src/ui/ticket.rs:454-470`) titles an earlier
-  attempt's round "Attempt {m} · Round {n}", with "· owner" as today,
-  and puts `round.attempt` in the fold's persistent id so two
-  "Round 1" folds do not share state. The finalize card's count
-  (`ui/ticket.rs:154`) counts only rounds with `attempt: None`, since
-  `finalize` asks about the current run. Nothing under `src/` reads
-  `plan_files` or `LaneFile`, so `from` stays a `show` line.
+- `dispatch-control/src/lib.rs:586` `LaneFile` gains `pub started_from: Option<PathBuf>`: the earlier attempt's copy this copy started from. The struct is `#[serde(default)]`, which makes the field additive: a reply from an older runner simply reads `None`.
+- `serve.rs:541-547` fills it from `a.carried_from` through `find_attempt` and that attempt's `artifacts[&a.stage's subject]`. The subject is the attempt's single artifact key.
+- The test literal at `serve.rs:1540` names every field. Add `started_from: None` there.
+- `print_lane_files` (`main.rs:896`) prints `    (started from <path>, an earlier attempt's revised copy)` under the file when `started_from` is set. This line prints whether or not the review is still open.
+- The app's Dispatch page does not draw `plan_files` (nothing under `src/` reads it), so the app does not change.
 
 ## The tests
 
-- `dispatch/tests/first_slice.rs`, after
-  `a_run_switchboard_no_longer_has_fails_the_attempt` (3809):
-  `a_rerun_after_a_failed_review_reviews_the_revised_copy`.
-  1. Set up with `at_finalize` and `revise(&mut env, &id, note)`, then
-     step until `workflow.object` is sent.
-  2. Overwrite `review/1`'s `plan` artifact with a revised text.
-  3. Run `env.sb().runs.clear()` and step until the failure is
-     `review run gone: no such run`.
-  4. Assert that the pending `rerun` question names the owner's revision
-     of round k and says "start over".
-  5. Decide `rerun` with no note, then step until `review` attempt 2
-     has a run.
-  6. Assert that attempt 2's copy reads the revised text, that
-     `sb.runs[0].plan` is attempt 2's copy, that `sb.runs[0].source` is
-     still `plan`'s session, that `carried_from == Some(("review", 1))`,
-     and that `ticket_paths(..).plan_files[0].from` is `review/1`'s
-     copy.
-- Same file: `a_start_over_rerun_reviews_the_plan_stage_output`. It has
-  the same setup and decides `rerun` with the note `start over`. Assert
-  that attempt 2's copy equals `plan/1/joined/plan.md`, that
-  `carried_from` is `None`, that `rework` starts with `start over`, and
-  that `t.rework` is empty.
-- `scheduler.rs` `mod tests` (11338): `revised_copy_is_the_newest_copy_the_stage_holds`
-  checks the picker's cases:
-  - a failed review after the complete plan is picked;
-  - a complete plan rerun after the failed review gives `None`;
-  - a review cancelled with a `DISCARDED_BY` reason gives `None`;
-  - a forgotten artifact gives `None`;
-  - another context gives `None`;
-  - two failures pick the later one.
-- `serve.rs` tests: `a_plan_copy_says_which_copy_it_started_from`. It
-  builds plan/1 complete, review/1 failed, and review/2 running with
-  `carried_from`, and asserts `plan_files[0].from`. Without
-  `carried_from`, `from` is `None`.
-- `serve.rs` tests: `plan_rounds_list_an_earlier_attempts_rounds_first`.
-  It builds review/1 failed with feedback files for rounds 1 and 2 and a
-  `Revision` for round 2, and review/2 running with `carried_from =
-  ("review", 1)` and a round 1 file. It asserts the order `(Some(1), 1),
-  (Some(1), 2, owner), (None, 1)` and that `round_file` is review/2's
-  round 1.
-- `tests/ui.rs`, beside `the_plan_tab_marks_the_owners_round` (5920):
-  `the_plan_tab_tags_an_earlier_attempts_rounds`. It seeds
-  `plan_rounds` with one tagged owner round and one untagged round,
-  finds "Attempt 1 · Round 2 · owner" and "Round 1" by label, and checks
-  that the finalize card says "1 round so far".
-- `ticket.rs:1827`
-  `the_plan_shown_is_an_open_review_copy_but_an_input_never_is` stays
-  as it is: downstream readers still never see a failed copy.
+In `dispatch/tests/first_slice.rs`, next to `a_run_switchboard_no_longer_has_fails_the_attempt`, using `at_finalize`, `revise` and `artifact_of`:
+
+- `a_rerun_after_a_revised_review_fails_reviews_the_revised_copy`:
+  1. `revise` with a note, then `step`.
+  2. Write the revised plan text into the attempt-1 copy and write `response_file(copy, 2)`.
+  3. `env.sb().runs.clear()`, then `step` until the `rerun` decision is pending. Assert its question names the attempt-1 copy and "the owner's revision" and has no "no response".
+  4. Answer `rerun` and step until `n == 2` has a run. Assert the attempt-2 copy's text equals the revised text, `carried_from == Some(("review", 1))`, and `env.sb().runs.last().plan` is the attempt-2 copy.
+  5. Converge run 2. Assert the finalize question says "started from" with the attempt-1 path.
+  6. Assert `ticket_paths(...).plan_files[0].started_from` is the attempt-1 copy.
+- `a_rerun_after_an_unanswered_revision_names_the_owners_note`: the same steps without the response file. Both the rerun question and attempt 2's finalize question name `round_file(attempt-1 copy, 2)`. The copy is still carried, since it is the converged plan.
+- Extend `a_failed_review_run_fails_the_attempt_and_a_rerun_starts_a_new_run` (`first_slice.rs:3257`). Its rerun question says "afresh" and names the plan attempt's file, attempt 2 has `carried_from == None`, and the attempt-2 copy reads `# plan`.
+
+Unit tests in the `scheduler.rs` test module (`scheduler.rs:11338`), on a hand-built `Ticket`. `carried_copy` returns `None` when:
+- an input attempt ended after `prev` started;
+- `prev` is cancelled with a `DISCARDED_BY` reason;
+- `prev` has no revisions and no `carried_from`;
+- `prev`'s copy file is missing.
+
+It returns `Some` for an unrevised `prev` whose `carried_from` is set. `unanswered_revision` returns `None` once the response file exists.
 
 ## Docs
 
-- `docs/design.md`, "The control port (2026-09-29)". At 1785 ("a rerun
-  kills the old run's agents and starts a fresh run"), add that the
-  fresh run reviews the failed attempt's copy, revisions included,
-  unless the rerun note says "start over". Also add that `show` names
-  the copy the reviewed copy started from. Add a known-gaps line: round
-  1 of the rerun is not told the owner's earlier decisions (no
-  `REVIEW_CARRIED`-style prompt for plan reviews), and why the run was
-  gone is not covered.
-- `docs/design.md`, "Dispatch ticket page (2026-10-04)", the Plan tab
-  bullet at 2160-2165: the rounds list includes an earlier failed
-  attempt's rounds, titled with their attempt, when a rerun started
-  from its copy.
-- The known-gaps line also says that a copy left mid-edit by a dead
-  planner is taken as it is, with "start over" as the remedy.
-- `docs/dispatch.md`, Dispatch's own spec:
-  - "A review is a copy" (550-557): a rerun after a failed or
-    cancelled attempt copies that attempt's copy, as the failed run
-    left it, so the owner's revisions carry; a rerun note saying
-    "start over" copies the reviewed artifact again. The attempt
-    records the copy's source in `carried_from`.
-  - The port paragraph at 2830-2836: the `ticket` reply's plan review
-    round files include an earlier attempt's rounds tagged with it,
-    and a plan file names the copy it started from.
-  - The first-slice table, after the `revise --note` row at 2975: a row
-    "A plan review rerun after a failed attempt that was revised" for
-    `a_rerun_after_a_failed_review_reviews_the_revised_copy`, and a row
-    "The same rerun noted "start over"" for
-    `a_start_over_rerun_reviews_the_plan_stage_output`, worded like
-    the code review rows at 3058 and 3060.
-- `CHANGELOG.md` Unreleased: "Fixed: rerunning a failed plan review now
-  starts from the revised plan, not the plan stage's original; a note
-  saying "start over" reviews the original."
-- README: no change. There is no new file, dev aid or data directory
-  entry.
+- `docs/dispatch.md`:
+  - The "A review is a copy" bullet (line 550): a rerun after a failed attempt that the owner revised copies that attempt's copy, and the rerun and finalize questions say so.
+  - Design choice 6 (line 3171): a rerun keeps the owner's revision, and an unanswered note is named rather than replayed.
+  - A new row in the first-slice table after the `revise --note` row (line 2975), naming the three integration tests.
+- `docs/design.md` has no status item for the plan review stage. Dispatch's built state is the first-slice table in `docs/dispatch.md`, which the row above updates.
+- README Layout, `dispatch/src/scheduler.rs` line (459): add "a plan review's rerun after the owner's revision reviews the revised copy". Same table, `dispatch-control/` line (448): no change. The dev-aid list and the data directory section do not change.
+- `CHANGELOG.md`, under Unreleased, `### Fixed`: "A Dispatch plan review rerun after a failed attempt reviews the owner's revised copy instead of the plan stage's original, and the rerun question and `show` say which copy it reviews."
 
 ## Commit
 
-`Dispatch: a plan review rerun starts from the failed attempt's revised copy`
+`A plan review rerun after a failed attempt reviews the owner's revised copy (#187)`
 
 Contract additions:
-- `dispatch_control::LaneFile::from: Option<PathBuf>` (additive,
-  `#[serde(default)]`).
-- `dispatch_control::PlanRoundView::attempt: Option<u32>` (additive,
-  `#[serde(default)]`).
-- `Attempt::carried_from` and `Attempt::rework` are now also set on
-  `AttemptKind::Workflow` attempts. No new field, no `RECORD_VERSION`
-  bump.
-- `rerun_note` keeps a note for `StageKind::Workflow` stages under
-  `rework_key`.
+- `dispatch_control::LaneFile::started_from: Option<PathBuf>` (serde default).
+- `dispatch::ticket::Attempt::carried_from` is now also set on a workflow attempt, meaning the attempt whose copy it started from. There is no new field and no schema bump.

@@ -1,191 +1,217 @@
-# Plan: issue #13 – typed conflict errors + `save(expected_version)`
+# Plan: issue #13 — typed conflict errors and `save(expected_version)`
 
-## 0. Finding: the issue is already implemented
+Repo: `/Users/sbgragent/.dispatch/worktrees/ce7eaf93` (HEAD `a82a3f6`, equal to `main`, tree clean).
+Version on tree: 22.0.0. Do not bump the version or touch `pyproject.toml`, `src/simplesingletable/__init__.py`, or the `README.md` version line. `inv fullrelease` owns those.
 
-Verified in the worktree (branch tip `a82a3f6`, clean tree):
+## 0. Status: the issue is already delivered
 
-- Commit `7bfdeb0` "Typed conflict errors and a save(expected_version) primitive (#13)" is an ancestor of HEAD.
-  It shipped in **21.0.0** (`CHANGELOG.md` `## [21.0.0] 2026-08-24`). The issue's "verified on 19.0.0" is stale.
-- Part 1 (typed errors): `src/simplesingletable/exceptions.py` has `ConflictError(ValueError)`,
-  `ResourceExistsError`, `TransactionError`, `TransactionConditionFailedError`, `VersionConflictError`.
-  `DynamoDbMemory.transact_write_safe` raises `VersionConflictError` on `ConditionalCheckFailed`;
-  `update_existing` (`dynamodb_memory.py:~577`) and `local_storage_memory.py:~503` raise `VersionConflictError`.
-- Part 2 (`save`): `ResourceRepository.save(id, obj_in, expected_version, clear_fields, changed_by, audit_metadata)`
-  at `src/simplesingletable/extras/repository.py:183`. `0` creates (raises `ResourceExistsError`), `>0` updates from
-  that exact pre-image (raises `VersionConflictError`).
-- Tests: `tests/test_typed_conflicts_and_save.py` covers both parts, including LocalStorage parity.
+Both halves of #13 shipped in **21.0.0** in commit `7bfdeb0` ("Typed conflict errors and a save(expected_version) primitive (#13)"). That commit is an ancestor of HEAD (verified with `git merge-base --is-ancestor 7bfdeb0 HEAD`).
 
-**Nothing in the issue's stated scope needs building.** Do not re-implement any of the above. The recommended
-action on the issue is to close it as done in 21.0.0. The rest of this plan is a small follow-up for the one
-place that still has the exact bug the issue describes.
+| Issue claim (written against 19.0.0) | State on this tree |
+|---|---|
+| `transact_write_safe` turns `ConditionalCheckFailed` into bare `ValueError` | Fixed. `src/simplesingletable/dynamodb_memory.py:296-326` raises `VersionConflictError` when a cancellation carries `ConditionalCheckFailed`. Other cancellation reasons stay a bare `ValueError` by design. |
+| `update_existing` raises `ValueError("Cannot update from non-latest version")` | Fixed. `dynamodb_memory.py:575-583` raises `VersionConflictError` with `expected_version`, `actual_version`, `resource_type`, `resource_id`. `local_storage_memory.py:502` does the same. |
+| Repository callers must match message text | Not needed. `ConflictError` covers both paths. |
+| No `save(obj, expected_version)` | Implemented as `ResourceRepository.save` at `src/simplesingletable/extras/repository.py:183`. Inherited by `VersionedResourceRepository`. |
 
-## 1. Residual gap (the only code change)
+The remaining work is one real gap in the singleton path, plus issue close-out. Nothing else in #13 needs code.
 
-`src/simplesingletable/extras/singleton.py:41`, in `SingletonVersionedResource.saved_updated_singleton`:
+Typed hierarchy as shipped (`src/simplesingletable/exceptions.py`):
 
-```python
-if existing.version != self.version:
-    raise ValueError("Cannot update from non-latest version")
+```
+ValueError
+└── ConflictError                        (resource_type, resource_id)
+    ├── ResourceExistsError
+    └── TransactionConditionFailedError  (also TransactionError)
+        └── VersionConflictError         (expected_version, actual_version)
 ```
 
-This is the same stale-version condition the issue names, and it is the last bare `ValueError` for it in `src`
-(`grep -rn "non-latest" src` shows only this one plus the two already-typed sites). A caller mapping
-`ConflictError -> 409` would see this as a 400.
+## 1. Scope of this plan
 
-### Change
+**In scope**
 
-File to change: `src/simplesingletable/extras/singleton.py`.
+1. Convert the one remaining bare conflict raise, `SingletonVersionedResource.saved_updated_singleton`, to `VersionConflictError`.
+2. Add tests for it.
+3. Add one CHANGELOG bullet under `## [Unreleased]`.
+4. Close #13 after this branch merges, with a comment that covers both the 21.0.0 delivery and this fix (outward-facing; see section 5).
 
-1. Import: `from ..exceptions import VersionConflictError`.
-2. Replace the raise with the structured form used elsewhere (`dynamodb_memory.py:577`):
+**Out of scope — do not change**
+
+- **The `save` signature.** The issue proposed `save(obj_in, expected_version)`. The shipped form is `save(id, obj_in, expected_version, clear_fields=None, changed_by=None, audit_metadata=None)`. The `id` is required because `save` may create, and creating needs an explicit id. Keep the shipped form. It is already documented in the 21.0.0 CHANGELOG entry.
+- **Non-versioned conditional create.** `_put_nonversioned_resource` still writes unconditionally, and `save` raises `TypeError` for non-versioned models. This is a separate feature. Do not implement it here; open a follow-up issue.
+- **`_build_versioned_update_items` raising `ResourceNotFoundError`** (`transactions.py:873`). That is a plain `Exception` for "missing" (not a race), and the issue does not ask for it. Leave it.
+- **`get_or_create`.** Leave it. `save` does not depend on it.
+- **The message text.** Keep `"Cannot update from non-latest version"` verbatim everywhere. Three existing tests assert on it, and they stay as they are (see section 4).
+
+## 2. Code change: `SingletonVersionedResource` raises a typed conflict
+
+### File: `src/simplesingletable/extras/singleton.py`
+
+Current code (lines 35-42):
 
 ```python
-if existing.version != self.version:
-    raise VersionConflictError(
-        "Cannot update from non-latest version",
-        resource_type=type(self).__name__,
-        resource_id=existing.resource_id,
-        expected_version=self.version,
-        actual_version=existing.version,
-    )
+class SingletonVersionedResource(DynamoDbVersionedResource, BaseSingleton):
+    ...
+    def saved_updated_singleton(self, memory: "DynamoDbMemory") -> Self:
+        """Overwrites the existing Singleton with the current object;
+        the version number on this resource must match the latest existing version in the database."""
+        existing = self.ensure_exists(memory)
+        if existing.version != self.version:
+            raise ValueError("Cannot update from non-latest version")
+        return memory.update_existing(existing, self)
 ```
 
-No signature changes. The message text is identical and `VersionConflictError` subclasses `ValueError`, so
-existing `except ValueError` handlers and message matches keep working. Keep the keyword names exactly as
-`VersionConflictError.__init__` defines them in `exceptions.py`; read that signature before editing and adjust if
-it differs from the call used at `dynamodb_memory.py:577`.
+Change the `raise` only. The signature, docstring, and the `ensure_exists` / `update_existing` calls stay the same.
 
-Also update the docstring of `saved_updated_singleton` to add: "Raises `VersionConflictError` if this object is not
-at the latest version."
-
-`SingletonResource` (non-versioned) has no version check, so it is unchanged.
-
-## 2. Tests (new, `tests/`)
-
-Add to `tests/test_typed_conflicts_and_save.py` (the home of the #13 tests). That file is **module-level `test_*`
-functions with fixtures, no test classes**; follow that. Add `SingletonVersionedResource` (from
-`simplesingletable.extras.singleton`) to the imports and a model next to `Doc`/`Plain`:
+Add the import at the top of the file:
 
 ```python
-class VersionedSettings(SingletonVersionedResource):
+from ..exceptions import VersionConflictError
+```
+
+Replace the `raise` with:
+
+```python
+        if existing.version != self.version:
+            raise VersionConflictError(
+                "Cannot update from non-latest version",
+                resource_type=self.__class__.__name__,
+                resource_id=str(self.resource_id),
+                expected_version=self.version,
+                actual_version=existing.version,
+            )
+```
+
+Notes for the implementer:
+
+- `VersionConflictError` subclasses `ValueError` (through `ConflictError`), so every existing `except ValueError` handler still catches it.
+- The message is unchanged on purpose.
+- `resource_id` is the attribute the 21.0.0 `GsiIndex` CHANGELOG example uses. `ensure_exists` creates the singleton with `override_id=cls.__name__`, so `str(self.resource_id)` is the class name.
+- Do not change `ensure_exists`, `BaseSingleton`, or `SingletonResource` (the non-versioned variant has no version to conflict on).
+- No change is needed in `update_existing`. Its own race is already typed.
+
+No other `src/` file needs to change. `grep` confirms the only remaining bare conflict raise is this one. The other two hits of the message string are already `VersionConflictError` (`dynamodb_memory.py:577`, `local_storage_memory.py:503`).
+
+### File: `AGENT_KNOWLEDGE.md`
+
+In the `**Key behavior:**` list of the Singleton Pattern section (around line 966), replace this bullet:
+
+```
+- Versioned singletons check that you're updating from the latest version
+```
+
+with:
+
+```
+- Versioned singletons check that you're updating from the latest version. A stale `saved_updated_singleton` raises `VersionConflictError` (a `ConflictError` and a `ValueError`), so catch that type to handle a lost race.
+```
+
+Leave the "Exception hierarchy" block (around line 1770) unchanged. It documents the transaction types imported from `simplesingletable.transactions`. It does not cover `ConflictError`, and extending it to the whole conflict family is a separate docs task, not part of this fix.
+
+## 3. Tests
+
+### File: `tests/test_typed_conflicts_and_save.py` (extend; do not create a new file)
+
+The module docstring already says it covers #13, so the singleton tests belong here.
+
+Add imports:
+
+```python
+from simplesingletable.extras.singleton import SingletonVersionedResource
+```
+
+Add a module-level model (defaults are required because `ensure_exists` creates with `{}`):
+
+```python
+class AppSettings(SingletonVersionedResource):
     theme: str = "light"
 ```
 
-Put the tests in a new section after `test_local_storage_raises_the_same_types_as_dynamodb`, under a banner
-comment in the file's existing style (`# --- singleton save ---`). Fixtures: `dynamodb_memory` (conftest.py:85) and
-`local_storage` (defined in the test file, line 75).
+Add a class `TestSingletonVersionConflict` with these tests. Use the existing `dynamodb_memory` fixture (DynamoDB Local via Docker; see `tests/conftest.py:86`).
 
-**Fixture isolation (checked):** `dynamodb_memory` is function-scoped and calls `reset_local_dynamodb_test_table`
-(truncates the table) before every test, and `local_storage` is a fresh `TemporaryDirectory` per test. So
-`ensure_exists` on the shared `SINGLETON#VersionedSettings` key always starts at version 1 and the absolute
-`version` asserts below are safe.
+Give every new test a one-line docstring that says why the test matters, in the style of the file's existing tests (for example, `test_version_conflict_is_both_a_transaction_error_and_a_value_error`). Test 2's docstring must record the back-compat intent: a caller still on `except ValueError` or `except ConflictError` keeps catching a stale singleton write.
 
-1. `test_stale_singleton_save_raises_version_conflict(dynamodb_memory)`
-   - `stale = VersionedSettings.ensure_exists(dynamodb_memory)` (version 1)
-   - `dynamodb_memory.update_existing(stale, {"theme": "dark"})` (now version 2; `stale` is behind)
-   - `stale.theme = "blue"`; `with pytest.raises(VersionConflictError) as exc_info: stale.saved_updated_singleton(dynamodb_memory)`
-   - Assert `isinstance(exc_info.value, ConflictError)`, `(exc_info.value.expected_version, exc_info.value.actual_version) == (1, 2)`,
-     `exc_info.value.resource_type == "VersionedSettings"`, `exc_info.value.resource_id == stale.resource_id`.
-2. `test_stale_singleton_save_is_still_a_value_error(dynamodb_memory)` – same setup;
-   `pytest.raises(ValueError, match="non-latest version")` (back-compat guard).
-3. `test_current_singleton_save_succeeds(dynamodb_memory)` – `s = ensure_exists`; `s.theme = "dark"`;
-   `out = s.saved_updated_singleton(dynamodb_memory)`; assert `out.version == 2` and `out.theme == "dark"`.
-4. `test_local_storage_singleton_stale_save_raises_version_conflict(local_storage)` – backend parity, mirroring
-   `test_local_storage_raises_the_same_types_as_dynamodb` (line 209). `saved_updated_singleton` is backend-agnostic
-   (it only calls `ensure_exists`/`update_existing` on the memory), so it must raise the same type on both.
-   Same setup as test 1 using `local_storage`; assert `VersionConflictError` and `(expected, actual) == (1, 2)`.
-   Verified beforehand that `SingletonVersionedResource.ensure_exists` + `update_existing` work on
-   `LocalStorageMemory` and that today the stale save raises a bare `ValueError` there, so this test fails before
-   the fix and passes after.
+1. `test_stale_singleton_raises_version_conflict(dynamodb_memory)`
+   - `first = AppSettings.ensure_exists(dynamodb_memory)`. Assert `first.version == 1`. Verify this in the run rather than assuming it.
+   - `fresh = first.model_copy(update={"theme": "dark"})`; `fresh.saved_updated_singleton(dynamodb_memory)`. This moves the stored version to 2.
+   - `with pytest.raises(VersionConflictError) as exc: first.saved_updated_singleton(dynamodb_memory)`.
+   - Assert `exc.value.expected_version == 1`, `exc.value.actual_version == 2`, `exc.value.resource_type == "AppSettings"`, `exc.value.resource_id == first.resource_id`.
+   - Assert `"Cannot update from non-latest version" in str(exc.value)`.
 
-Run: `pytest tests/test_typed_conflicts_and_save.py -k singleton` (tests 1-3 need Docker), then the full `pytest`,
-then `inv lint`.
+2. `test_stale_singleton_is_catchable_as_conflict_and_value_error(dynamodb_memory)`
+   - Same setup as test 1.
+   - Assert `pytest.raises(ConflictError)` catches it, and separately that `pytest.raises(ValueError)` catches it.
 
-## 3. Docs
+3. `test_stale_singleton_write_does_not_change_stored_state(dynamodb_memory)`
+   - Same setup. After the failed stale write, read back with `AppSettings.ensure_exists(dynamodb_memory)`.
+   - Assert `theme == "dark"` and `version == 2`. The rejected write must not be applied.
 
-Two **separate** items; only (a) is part of the bug fix.
+4. `test_current_version_singleton_still_saves(dynamodb_memory)` (regression guard)
+   - Create, update once with the current object, then update again from the object returned by the first update (or from a fresh `ensure_exists`).
+   - Assert no exception and the final `version` is correct.
 
-**(a) Singleton note (belongs with the fix)** – `AGENT_KNOWLEDGE.md` ~line 967 ("Versioned singletons check that
-you're updating from the latest version"): append "; a stale save raises `VersionConflictError` (a
-`ConflictError` / `ValueError`)".
+5. `test_local_storage_stale_singleton_raises_version_conflict(local_storage)` (required, not optional)
+   - Same flow as test 1, using the `local_storage` fixture that the backend-parity test (`test_local_storage_raises_the_same_types_as_dynamodb`, line 209) already uses.
+   - `ensure_exists` works on `LocalStorageMemory`: `get_existing` accepts `consistent_read` (`local_storage_memory.py:221`) and `create_new` accepts `override_id` (`local_storage_memory.py:343`). The check in `singleton.py` runs before any memory call, so the same assertions apply to both backends.
+   - Do not add a skip condition or a shim.
 
-**(b) Docs catch-up for the already-shipped #13 (independent of the fix; may be split into its own PR)**, all in
-`AGENT_KNOWLEDGE.md`:
+### Existing tests to keep unchanged
 
-- Add a short subsection near the `ConflictError` material (~lines 441-522) documenting
-  `ResourceRepository.save(id, obj_in, expected_version, clear_fields=None, changed_by=None, audit_metadata=None)`
-  (`grep -n "save" AGENT_KNOWLEDGE.md` finds only unrelated hits and `saved_updated_singleton`):
-  - `expected_version=0` → conditional create, `ResourceExistsError` if present
-  - `>0` → update from that exact version, `VersionConflictError` if absent or at another version
-  - non-versioned model → `TypeError`; negative → `ValueError`
-  - example `try: repo.save(doc_id, changes, expected_version=v) except ConflictError: ...  # 409`
-  Source the wording from the `save` docstring (`repository.py:183`) so the two do not drift.
-- **Fix the stale exception tree in "Exception hierarchy" (~lines 1770-1785).** It currently says
-  `VersionConflictError  # Back-compat alias.` under `TransactionConditionFailedError`, imports from
-  `simplesingletable.transactions`, and says "All three classes carry ...". Checked against `exceptions.py`:
-  `ConflictError(ValueError)` (line 43) is the root; `ResourceExistsError(ConflictError)` (66);
-  `TransactionError(Exception)` (74); `TransactionConditionFailedError(TransactionError, ConflictError)` (96);
-  `VersionConflictError(TransactionConditionFailedError)` (127) is a real subclass that adds
-  `resource_type`/`resource_id`/`expected_version`/`actual_version`, not an alias. Replace the tree with:
+These assert the message text on purpose, as a backwards-compatibility guard. Do not convert them to typed checks, and do not delete them:
 
-  ```
-  # ValueError
-  # └── ConflictError                              # An optimistic-concurrency write lost.
-  #     ├── ResourceExistsError                    # Create onto an id that is taken.
-  #     └── TransactionConditionFailedError        # (also a TransactionError)
-  #         └── VersionConflictError               # Stale/absent version; carries expected/actual_version.
-  # TransactionError (Exception)                   # Any transaction failure.
-  # └── TransactionConditionFailedError            # (above)
-  ```
+- `tests/test_typed_conflicts_and_save.py:154`
+- `tests/test_blob_storage_bugfixes.py:113`
+- `tests/test_local_storage.py:555`
 
-  Import from `simplesingletable` (or `simplesingletable.exceptions`; `transactions` re-exports the same objects),
-  and reword "All three classes carry" so `cancellation_reasons`/`operation_indexes` are attributed to the
-  transaction errors and the version fields to `VersionConflictError`. Before editing, re-read `exceptions.py`
-  lines 43-160 and confirm which attributes each class really defines; write only what it shows.
-- `README.md`: no change (no `save(` mention and no section for this area).
+### Run
+
+Docker must be running for the DynamoDB-backed tests. The investigation could not run them because Docker is not installed on the investigation machine.
+
+```bash
+pytest tests/test_typed_conflicts_and_save.py -v
+pytest -k "singleton or non_latest or non-latest" -v
+pytest tests/test_typed_conflicts_and_save.py tests/test_local_storage.py tests/test_blob_storage_bugfixes.py
+inv lint
+```
+
+No dependency change, so no `uv lock` is needed.
 
 ## 4. CHANGELOG
 
-Under the existing `## [Unreleased]` section (it already has Added / Changed / Deprecated / Fixed subsections;
-its `### Fixed` starts at line 88). Do **not** write a version header, and do not bump the version
-(`inv fullrelease` does both). Two entries, matching the two kinds of change:
+### File: `CHANGELOG.md`, section `## [Unreleased]`, subsection `### Changed`
 
-Append to `### Fixed`:
+Append one bullet to the end of the existing `### Changed` block under `## [Unreleased]`. Do not touch `## [22.0.0]`, `## [21.0.0]`, or any other released section. Do not add a version header. `inv fullrelease` stamps the header from the `## [Unreleased]` marker.
 
-```markdown
-* **`SingletonVersionedResource.saved_updated_singleton` raises `VersionConflictError` on a stale save** (#13
-  follow-up). It previously raised a bare `ValueError("Cannot update from non-latest version")`, the one
-  stale-version conflict left that could not be told apart from a programming error without matching the message.
-  `VersionConflictError` subclasses `ValueError` and the message is unchanged, so existing handlers keep working;
-  it now also carries `expected_version` / `actual_version`.
-```
-
-Add a `### Internal` subsection to `## [Unreleased]` (none exists there yet; 22.0.0 uses `### Internal` for
-non-library changes) with the docs item from 3(b):
+Text:
 
 ```markdown
-### Internal
-
-* **`AGENT_KNOWLEDGE.md` documents `ResourceRepository.save` and the real exception hierarchy** (#13). Adds the
-  missing `save(id, obj_in, expected_version)` section and corrects the hierarchy tree, which still described
-  `VersionConflictError` as a back-compat alias rather than a `ConflictError` subclass. Docs only; no library changes.
+* **`SingletonVersionedResource.saved_updated_singleton` raises `VersionConflictError`** (#13). A
+  stale version used to raise a bare `ValueError`; it now raises `VersionConflictError`, with
+  `expected_version` and `actual_version` set. It is still a `ValueError` and the message is
+  unchanged, so existing handlers keep working. A caller that catches `TransactionError` will now also catch this case, as it already does for the same condition on `update_existing`.
 ```
 
-If 3(b) is split into its own PR, move this `### Internal` bullet with it.
+Put it under "Changed". It is not breaking for `except ValueError` handlers. It does broaden `except TransactionError` handlers: `VersionConflictError` subclasses `TransactionConditionFailedError`, which subclasses `TransactionError`, so a stale singleton write that used to escape as a bare `ValueError` is now caught by them. That is consistent with `update_existing`, which already raises `VersionConflictError` for the same condition (`dynamodb_memory.py:576`). `grep` finds no `except TransactionError` in `src/`, so the library itself is unaffected. The bullet above states the broadening so downstream callers can see it.
 
-## 5. Explicitly out of scope
+## 5. Issue close-out (outward-facing; confirm before doing it)
 
-- Other `transact_write_safe` cancellations (not `ConditionalCheckFailed`) stay bare `ValueError`, by design per
-  its docstring.
-- No changes to `save`, the exception hierarchy, LocalStorageMemory, or the 21.0.0 tests.
-- No version bump, no release, no edits to `pyproject.toml`, `__init__.py` `package_version`, or `uv.lock`
-  (no dependency changes).
+Closing #13 and commenting on it are visible to other people. Get the user's go-ahead before doing either. Once confirmed:
 
-## 6. Summary of files touched
+- After this branch merges, close #13 with a comment that says it was delivered in 21.0.0 in commit `7bfdeb0` (the typed hierarchy and `save()` shape, section 0), and that the stale-singleton gap was fixed in the merged PR and ships in the next release.
+- Note in that comment that `save` takes `id` as its first argument (the shipped form), not the two-argument form in the issue.
+- Open follow-up issues for:
+  - non-versioned conditional create (section 1, out of scope);
+  - whether `save` should also accept a two-argument form, if the team still wants it. Default: no.
 
-| File | Change |
-|---|---|
-| `src/simplesingletable/extras/singleton.py` | import + raise `VersionConflictError`; docstring |
-| `tests/test_typed_conflicts_and_save.py` | new `VersionedSettings` model + 4 module-level tests (3 DynamoDB, 1 LocalStorage) |
-| `AGENT_KNOWLEDGE.md` | singleton note; new `repo.save` subsection; corrected exception hierarchy tree |
-| `CHANGELOG.md` | one `### Fixed` bullet and one `### Internal` (docs) bullet under `## [Unreleased]` |
+The singleton fix from sections 2-4 ships on this branch, so #13 stays open until that branch merges. Reference #13 in the CHANGELOG bullet and in the commit message. The close-out comment reports the singleton fix as merged in the next release, not as part of 21.0.0.
+
+## 6. Acceptance checklist
+
+- [ ] `src/simplesingletable/extras/singleton.py` raises `VersionConflictError` with the four context fields, same message text.
+- [ ] `tests/test_typed_conflicts_and_save.py` has the `TestSingletonVersionConflict` tests from section 3, and they pass on DynamoDB Local.
+- [ ] The three message-text assertions in section 3 are unchanged and still pass.
+- [ ] `CHANGELOG.md` has one bullet under `## [Unreleased]` / `### Changed`. No new version header. No edit to `pyproject.toml`, `__init__.py`, or the README version line.
+- [ ] `AGENT_KNOWLEDGE.md` Singleton Pattern "Key behavior" list has the bullet from section 2. The Exception hierarchy block is unchanged.
+- [ ] All new tests have one-line docstrings in the file's style (section 3). Test 5 (local backend) is present and passes.
+- [ ] `inv lint` is clean.
+- [ ] #13 is closed only after this branch merges and the user confirms (section 5).

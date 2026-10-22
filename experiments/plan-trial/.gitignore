@@ -1,0 +1,3 @@
+results/*/grades/*.prompt.md
+results/*/grades/*.json
+results/*/grades/*.log

@@ -1,0 +1,4 @@
+# letter grader column value — reason (applied by tally.py after reading the grade)
+K codex grounding 3 — counted ticket-directory paths quoted from the issue as references; its two code references were found, and Fable opened five code references and found all real
+L codex grounding 3 — same: two of its five "references" were runtime file names from the issue
+G codex grounding 3 — same

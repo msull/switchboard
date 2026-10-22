@@ -1,299 +1,283 @@
-# Plan — issue #13: typed conflict errors + `save(obj, expected_version)`
+# Plan: #13 — typed conflict errors and `save(expected_version)`
 
-## 0. Read this first: the feature has already shipped
+## 0. State of play (read first)
 
-The issue was filed against 19.0.0. Both halves landed later in commit `7bfdeb0`
-("Typed conflict errors and a save(expected_version) primitive (#13)") and were released in
-**21.0.0 (2026-08-24)**. `git tag --contains 7bfdeb0` → `21.0.0`, `22.0.0`. The branch base
-(`a82a3f6`) contains it, and CHANGELOG.md:219–309 records it under `## [21.0.0]`.
+The issue body was written against 19.0.0. Both parts of #13 are **already implemented and released**:
 
-I re-checked the investigation's claims against the tree. They hold:
+- Commit `7bfdeb0` ("Typed conflict errors and a save(expected_version) primitive (#13)", 2026-08-24) is an ancestor of `HEAD`.
+- Its CHANGELOG entries sit under `## [21.0.0] 2026-08-24` (`CHANGELOG.md:244-290`), not under `## [Unreleased]`.
+- Current version is `22.0.0` (`pyproject.toml:7`). `git tag --contains 7bfdeb0` lists `21.0.0` and `22.0.0`.
 
-| Issue asks for | Where it is now |
+The investigation notes at `tickets/c3a45d04/investigate/1/root/notes.md` are mostly right, with three corrections:
+
+1. The #13 CHANGELOG entries are under 21.0.0, not Unreleased (see above).
+2. The eventually consistent latest-version read in `update_existing` is at `dynamodb_memory.py:571-574`. The consistent read at `:589-594` is the post-write read, which is already strongly consistent.
+3. Notes deviation 3 is real and is the only defect left. It is in scope (section 2).
+
+So the remaining work is one consistency fix, two decisions recorded, two doc corrections, and the tests. Nothing here is a new feature, and no version bump or release is planned (`inv fullrelease` does that).
+
+## 1. What is already in place (verified, do not redo)
+
+| Symbol | Location | Status |
+|---|---|---|
+| `ConflictError(ValueError)` | `src/simplesingletable/exceptions.py:43` | done |
+| `ResourceExistsError(ConflictError)` | `exceptions.py:66` | done |
+| `TransactionConditionFailedError(TransactionError, ConflictError)` | `exceptions.py:96` | done |
+| `VersionConflictError(TransactionConditionFailedError)` with `expected_version`, `actual_version` | `exceptions.py:127` | done |
+| Re-exports from `transactions.py`, and from package root | `transactions.py`, `src/simplesingletable/__init__.py` | done |
+| `transact_write_safe` raises `VersionConflictError` on `ConditionalCheckFailed` | `dynamodb_memory.py:296-327` | done |
+| `update_existing` raises `VersionConflictError` on version mismatch | `dynamodb_memory.py:575-582` | done |
+| Local backend raises the same types | `local_storage_memory.py` (~434, 502, 557, 568) | done |
+| `create_new` raises `ResourceExistsError` on a taken id | `dynamodb_memory.py:1098-1130` | done |
+| `ResourceRepository.save(id, obj_in, expected_version, clear_fields=None, changed_by=None, audit_metadata=None)` | `extras/repository.py:183-265` | done |
+| Tests | `tests/test_typed_conflicts_and_save.py` (379 lines, 23 tests: 18 Docker-backed, 1 local-only, 4 with no fixture) | done, but the Docker-backed tests were never run in the investigation (Docker was down) |
+
+Note the issue's `_is_lost_race` string match in `ResourceRepository` is a consumer-side workaround. Nothing in this library needs to change for it. The CHANGELOG already tells users to delete it.
+
+## 2. The remaining defect: eventually consistent reads on the write path
+
+`DynamoDbMemory.get_existing` (`dynamodb_memory.py:371-376`) and `read_existing` (`:526-533`) both default to `consistent_read=False`.
+
+Three reads on the write path use that default:
+
+- **A.** `extras/repository.py:246`: `existing = self.ddb.get_existing(id, self.model_class)`. This is the `save(expected_version=N>0)` pre-image guard.
+- **B.** `dynamodb_memory.py:571-574` in `update_existing`, the versioned branch: `latest_resource = self.read_existing(existing_id=..., data_class=data_class)`. This is the latest-version check. Every versioned `update(obj)` and `save` goes through it.
+- **C.** `update(id)` only. `extras/repository.py:178` calls `self.read(id)`, which calls `get()` (`:128-133`), which calls `_get()` (`:351-358`). `_get` checks the cache, then calls `get_existing` with the default. So `update(id)` gets its pre-image from the same stale read as A. `update(obj)` skips this read, because the caller supplies the object.
+
+**Failure mode.** Shortly after a write, an eventually consistent read can return the previous version. The caller then gets a false `VersionConflictError` (a false 409) for a write that did not race anyone. The version-conditioned write (`_update_existing_versioned`) is unchanged, so this is never a lost update. Only the false positive is wrong.
+
+**Why all three.** Fixing only A still leaves B stale. Scenario: A reads v3 correctly, then B reads v2 from a lagging replica, `existing.version (3) != latest.version (2)`, and the call raises. Fixing only C leaves `update(id)` stale for the same reason. So all three must change.
+
+**Decision:** pass `consistent_read=True` to all three reads.
+
+**Cache on the `update(id)` path (C).** The cache is not bypassed. A cache hit can be stale only if another process wrote the record after it was cached. That is a genuine conflict, the behaviour the library already had, and it is not replica lag, so it is out of scope. Bypassing the cache would also remove every cache hit from `update(id)`. T4 therefore clears the cache before it runs, so it exercises the miss path (section 6).
+
+**Cost:** one strongly consistent read per versioned update, which costs 2× the read capacity units of an eventually consistent read. This applies to every versioned `update()` and `save()`, not only `save()`, and to every `update(id)` cache miss. Record it in the CHANGELOG (section 5). `LocalStorageMemory` reads are file reads and are always consistent, so it needs no change.
+
+## 3. Decisions on the two deviations from the issue text
+
+Both are settled here. The second engineer should not reopen them.
+
+**D1. Signature stays `save(id, obj_in, expected_version, ...)`.** The issue proposed `save(obj_in, expected_version)`. The id is required because `expected_version=0` is a create and there is no existing object to take an id from. The guard is still an integer compared against a fresh read, plus a version-conditioned write, so the TOCTOU concern is addressed. Keep it. Update the issue text rather than the code.
+
+**D2. A create collision raises `ResourceExistsError`, not `VersionConflictError`.** The issue said "`VersionConflictError` either way". `ResourceExistsError` is a sibling under `ConflictError`, and it shipped in 21.0.0. Changing it now would break `except ResourceExistsError` callers. Callers who write `except ConflictError` catch both, which is the stated goal. Keep it. The `save` docstring already documents this.
+
+## 4. Files to change
+
+Before editing `repository.py`, confirm the subclass facts this section relies on. `VersionedResourceRepository` (`versioned_repository.py:71`) subclasses `ResourceRepository` and does not override `_get`, `get`, `read` or `update`. `ReadOnlyResourceRepository` (`readonly_repository.py:46`) is a separate class with no `update`, so it is unaffected.
+
+### 4.1 `src/simplesingletable/extras/repository.py`
+
+**Change 1 (path A).** Line 246. Make the pre-image read strongly consistent and say why in the comment.
+
+```python
+        # Deliberately bypasses the repository cache: a cached pre-image could be
+        # stale, which would turn the guard into a rubber stamp. Strongly consistent
+        # for the same reason: an eventually consistent read can return the version
+        # before our own last write and report a conflict that did not happen.
+        existing = self.ddb.get_existing(id, self.model_class, consistent_read=True)
+```
+
+No signature change to `save`. The docstring's `Raises:` section is already correct.
+
+**Change 2 (path C).** `_get` gains a `consistent_read` keyword with a default, so `get()` and every other caller are unchanged:
+
+```python
+    def _get(self, id: Any, consistent_read: bool = False) -> T | None:
+        if self._cache:
+            cached = self._cache.get(str(id))
+            if cached is not None:
+                return cached
+        result = self.ddb.get_existing(id, self.model_class, consistent_read=consistent_read)
+        if result is not None and self._cache:
+            self._cache.put(str(id), result)
+        return result
+```
+
+In `update()` (`:146-180`), replace the `else` branch that currently calls `self.read(id_or_obj)` (`:177-178`):
+
+```python
+        if isinstance(id_or_obj, self.model_class):
+            existing = id_or_obj
+        else:
+            existing = self._get(id_or_obj, consistent_read=True)
+            if existing is None:
+                raise ValueError(f"{self.model_class.__name__} with id {id_or_obj} not found")
+```
+
+The not-found message must match `read()`'s (`:135-141`), so callers that match on it keep working. `read()` itself does not change.
+
+### 4.2 `src/simplesingletable/dynamodb_memory.py`
+
+Lines 571-574 in `update_existing`, versioned branch:
+
+```python
+            latest_resource = self.read_existing(
+                existing_id=existing_resource.resource_id,
+                data_class=data_class,
+                consistent_read=True,
+            )
+```
+
+No signature change. Nothing else in this file needs to change.
+
+### 4.3 `AGENT_KNOWLEDGE.md`
+
+- **Line 1781** says `# │   └── VersionConflictError              # Back-compat alias.`, which is wrong. `VersionConflictError` is a subclass that also sits under `ConflictError`, not an alias. Replace the hierarchy block at roughly lines 1773-1781 with the real tree:
+
+  ```python
+  # ConflictError(ValueError)                 # Root of the conflict family.
+  # ├── ResourceExistsError                   # Conditional create hit an existing item.
+  # └── TransactionConditionFailedError       # Also a TransactionError.
+  #     └── VersionConflictError              # A write lost a version race.
+  # TransactionError(Exception)               # Transaction failure.
+  ```
+
+  Keep the import block at 1774-1777 and add `ConflictError` and `ResourceExistsError` to it. Import them from `simplesingletable.exceptions` or the package root, as the code at line 441 already does.
+
+- **Add a `save` subsection** next to the existing `except ConflictError` example (lines ~441-483). Keep it short:
+
+  ```python
+  try:
+      doc = repo.save(doc_id, changes, expected_version=known_version)  # 0 = must not exist
+  except ConflictError:
+      ...  # re-read and retry, or return 409
+  ```
+
+  It should say: `0` creates and raises `ResourceExistsError` if the id is taken. `>0` updates from that exact version and raises `VersionConflictError` if the resource is missing or at another version. Both are `ConflictError`.
+
+### 4.4 Not changed
+
+- `exceptions.py`, `transactions.py`, `__init__.py`, `local_storage_memory.py`: no change.
+- `README.md`: no change. It does not mention these types.
+- `pyproject.toml`, `src/simplesingletable/__init__.py` version, `uv.lock`: no change (no version bump, no dependency change).
+
+## 5. CHANGELOG entry
+
+Add as the last bullet of the existing `### Fixed` block under `## [Unreleased]`. That block starts at `CHANGELOG.md:88` (the heading) and its last line is `:106` (`find them.`, the end of the #18 entry). Insert the new bullet after line 106. Leave the blank line at 107 before `## [22.0.0] 2026-09-30` at line 108. The `### Fixed` heading already exists, so do not create another one. Do **not** add a new #13 entry or a `## [X.Y.Z]` header.
+
+Match the bullet and bold-lead style of the #18 entry above it. The text:
+
+```markdown
+* **`ResourceRepository.save` and `update(id)` could raise a spurious `VersionConflictError` right after a write.**
+  The pre-image read in `save`, the pre-image read in `update(id)` (on a cache miss), and the latest-version
+  check in `DynamoDbMemory.update_existing` used DynamoDB's eventually consistent reads. A read that landed
+  on a replica still holding the previous version reported a conflict that did not exist. All three reads
+  are now strongly consistent. The conditional write is unchanged, so a concurrent writer is still rejected;
+  only the false positive is removed. Each versioned update now uses a strongly consistent read, which costs
+  twice the read capacity units of the previous eventually consistent read.
+```
+
+## 6. Tests to add
+
+All in `tests/test_typed_conflicts_and_save.py`, reusing its existing `repo` fixture (line 66, built on `dynamodb_memory`) and its model and schema definitions. These run against DynamoDB Local, so Docker must be running (see section 7).
+
+The file has 23 tests today: 18 use a Docker-backed fixture (`repo` or `dynamodb_memory`), 1 uses `local_storage` only, and 4 use no fixture. The new tests are added alongside them.
+
+Names in the test code below are not module-level. They are defined inside each test, as the existing file does with literal ids such as `"doc-1"`. Define them in each test: `ID = "doc-1"`, `create_obj = {"title": "t", "content": "c"}`, `update_obj = {"content": "c2"}`. The model class is `Doc`, which is also `repo.model_class`. Payloads are dicts, which `save` and `update` validate against `CreateDoc` and `UpdateDoc`.
+
+**T1. `test_save_pre_image_read_is_strongly_consistent`**
+
+Spy on `dynamodb_memory.get_existing` with `unittest.mock.patch.object(..., wraps=...)`. Create a resource at version 1, then call `repo.save(ID, update_obj, expected_version=1)`. Assert that the `get_existing` call made by `save` has `consistent_read=True`. Then call `repo.clear_cache()` and `repo.update(ID, update_obj)` under the same spy. `update(ID)` calls `get_existing` more than once: for its pre-image (path C), and again through `read_existing` (`dynamodb_memory.py:541`) for the latest-version check and the post-write read. Assert that every `get_existing` call made during that update has `consistent_read=True`, so the check does not depend on call order. This checks the calls directly. T4 checks the behaviour.
+
+**T2. `test_update_existing_latest_read_is_strongly_consistent`**
+
+Pre-read the object with `existing = dynamodb_memory.get_existing(ID, Doc)` **before** installing the spy, so the spy only sees the calls made by the update. Spy on `dynamodb_memory.read_existing` with `wraps=`, then call `dynamodb_memory.update_existing(existing, changes)`. Assert that the first `read_existing` call has `consistent_read=True`.
+
+**Shared helper for T3 and T4** (module level in the test file):
+
+```python
+def _lag_latest_reads(monkeypatch, ddb, record_id, model_class, stale):
+    """Make the eventually consistent latest-version read of one record return ``stale``.
+
+    DynamoDB Local is always strongly consistent, so the lag is simulated. Only default
+    reads (``consistent_read=False``) of ``version=0`` for ``record_id`` and ``model_class``
+    are lagged. Every other read passes through unchanged.
+    """
+
+    def lag(real):
+        def fake(existing_id, data_class, version=0, consistent_read=False, **kwargs):
+            if not consistent_read and version == 0 and data_class is model_class and existing_id == record_id:
+                return stale
+            return real(existing_id, data_class, version=version, consistent_read=consistent_read, **kwargs)
+
+        return fake
+
+    monkeypatch.setattr(ddb, "get_existing", lag(ddb.get_existing))
+    monkeypatch.setattr(ddb, "read_existing", lag(ddb.read_existing))
+```
+
+Both patched methods are called with the same leading parameters, so one fake covers the pre-image read (A) and the latest-version read (B). The patch is set on the instance, so `real` is the bound method captured before the patch.
+
+**T3. `test_save_is_not_fooled_by_a_lagging_read` (regression, fails before the fix)**
+
+```python
+def test_save_is_not_fooled_by_a_lagging_read(repo, dynamodb_memory, monkeypatch):
+    repo.save(ID, create_obj, expected_version=0)                 # v1
+    stale = dynamodb_memory.get_existing(ID, repo.model_class)    # snapshot of v1, taken before the lag starts
+    repo.save(ID, update_obj, expected_version=1)                 # v2 written
+
+    _lag_latest_reads(monkeypatch, dynamodb_memory, ID, repo.model_class, stale)
+
+    result = repo.save(ID, update_obj, expected_version=2)
+    assert result.version == 3
+```
+
+Before the fix, `save`'s pre-image read (A) returns the lagged v1. The guard at `extras/repository.py:247` (`existing.version != expected_version`, with `expected_version=2`) raises `VersionConflictError` before `_update` runs, so the write is never reached. There is no genuine race. After the fix, the pre-image read is consistent, returns v2, the guard passes, and the call returns v3. The conditional write is not what T3 tests. T4 covers it.
+
+**T4. `test_update_by_id_is_not_fooled_by_a_lagging_read` (regression, fails before the fix)**
+
+The same lag as T3, but through `update(ID, ...)` by id, which is path C. The repository cache is cleared first. A cache hit would return the fresh v2 and skip the read this test is about, so the lag would never be hit.
+
+```python
+def test_update_by_id_is_not_fooled_by_a_lagging_read(repo, dynamodb_memory, monkeypatch):
+    repo.save(ID, create_obj, expected_version=0)                 # v1
+    stale = dynamodb_memory.get_existing(ID, repo.model_class)    # snapshot of v1, taken before the lag starts
+    repo.save(ID, update_obj, expected_version=1)                 # v2 written
+    repo.clear_cache()                                            # force the miss path
+
+    _lag_latest_reads(monkeypatch, dynamodb_memory, ID, repo.model_class, stale)
+
+    result = repo.update(ID, update_obj)
+    assert result.version == 3
+```
+
+Before the fix, `update(ID)`'s pre-image (C) returns v1 and the latest-version read (B) returns v1. The conditional write fails with `VersionConflictError`. After the fix, C is consistent, so the call returns v3.
+
+**T5. `test_genuine_concurrent_write_still_conflicts`**
+
+Guard against over-correcting. Pre-read `existing` at v2. Write v3 normally with `repo.update(ID, ...)`. Then call `repo.save(ID, update_obj, expected_version=2)`. Assert `VersionConflictError`, and that `expected_version == 2` and `actual_version == 3`. No fakes are needed. This shows that strong reads still detect real conflicts.
+
+**T6. Local backend parity: none needed.** Local reads are file reads and always consistent.
+
+Run T3 and T4 against the unmodified code first, and confirm they fail with `VersionConflictError`. That proves they test what they claim.
+
+## 7. Verification
+
+1. Start Docker, then run `pytest tests/test_typed_conflicts_and_save.py -v`. The 18 Docker-backed tests (section 6) have never executed, so this is the first real run. Every test in the file must pass, not only the new ones.
+2. Confirm T1-T4 fail before section 4 is applied, and pass after. T3 and T4 fail with `VersionConflictError`. T1 and T2 fail on their `consistent_read=True` assertions, because the default read is still in place. T4 passes after section 4.1 change 2, which covers path C.
+3. Run the full suite: `pytest`. Watch `tests/test_local_storage.py` (asserts old message text) and `tests/test_blob_storage_bugfixes.py:101-113` (asserts non-latest version message). Both should still pass, since message text is unchanged.
+4. Run `inv lint`.
+5. No dependency change, so `uv lock --check` is not affected.
+6. Confirm `CHANGELOG.md` still has exactly one `## [Unreleased]` heading and no new version header.
+
+## 8. Issue #13 closure (outward-facing: needs the user's explicit go-ahead)
+
+Every step in this section is visible to other people, or cannot be undone. The implementer does not run any of them. Each one needs the user's explicit go-ahead, given for that specific action. Code changes and tests in sections 4-7 do not need this.
+
+- **Needs go-ahead:** comment on #13 that the feature shipped in **21.0.0** (`7bfdeb0`), with the issue's line references updated (`dynamodb_memory.py:190`, `:442`, and `transactions.py:809` no longer exist).
+- **Needs go-ahead:** record decisions D1 and D2 as accepted, with the rationale from section 3.
+- **Needs go-ahead:** close #13 when the section 4 fix is released. The release is a separate step (`inv fullrelease`), not part of this plan.
+- **Needs go-ahead:** tell the #10 consumer to delete `_is_lost_race` and catch `ConflictError`, which the 21.0.0 CHANGELOG already says.
+
+## 9. Summary of changes
+
+| File | Change |
 |---|---|
-| Typed exceptions in one module, as `ValueError` subclasses | `src/simplesingletable/exceptions.py:43-160`: `ConflictError(ValueError)` → `ResourceExistsError`; `TransactionConditionFailedError(TransactionError, ConflictError)` → `VersionConflictError` |
-| `transact_write_safe` stops flattening `ConditionalCheckFailed` to `ValueError` | `dynamodb_memory.py:296-329`: raises `VersionConflictError` (with `cancellation_reasons`) when any reason is `ConditionalCheckFailed`. Other cancellations stay bare `ValueError`, same message format |
-| `update_existing` "non-latest version" becomes `VersionConflictError` | `dynamodb_memory.py:575-582`, message text unchanged, carries `expected_version` / `actual_version` |
-| Conditional create of an existing id is typed | `_create_new_versioned` raises `ResourceExistsError` (`dynamodb_memory.py:1124-1131`) |
-| `LocalStorageMemory` behaves the same way | `local_storage_memory.py:434, 502, 557, 568` |
-| Exported | package root `__init__.py:9-22`, and still re-exported from `transactions.py` |
-| `repo.save(..., expected_version)`: 0 creates conditionally, >0 updates from that exact version, conflict either way | `ResourceRepository.save` at `extras/repository.py:183-275`. `VersionedResourceRepository` inherits it |
-| Tests | `tests/test_typed_conflicts_and_save.py` (hierarchy, back-compat, stale pre-image, taken id, losing the write race, txn conditions as `ConflictError`, LocalStorage parity, and 11 `save` tests) |
-
-The shipped signature is not quite the one the issue proposed. That was deliberate and is
-recorded in the 21.0.0 CHANGELOG entry:
-
-```python
-def save(
-    self,
-    id: Any,
-    obj_in: CreateSchemaType | UpdateSchemaType | dict,
-    expected_version: int,
-    clear_fields: set[str] | None = None,
-    changed_by: str | None = None,
-    audit_metadata: dict | None = None,
-) -> T
-```
-
-It takes the id instead of a pre-read object. The TOCTOU concern is handled in the write
-itself: `_update_existing_versioned` conditions on `attribute_exists(pk) AND #version =
-:version`, so a pre-read is never the only guard. `save` reads with `self.ddb.get_existing`,
-skipping the repository cache, and only uses that read to fail early and get the pre-image.
-
-**Do not re-implement or change any of this.** No public API changes in this plan.
-
-What's left is (a) documentation drift, since AGENT_KNOWLEDGE.md was never updated for #13,
-and (b) one `save` branch no test covers. Once this work merges, close #13 as fixed in
-21.0.0 and link `7bfdeb0` and the CHANGELOG entry.
-
-Out of scope (separate ticket if wanted): conditional create for **non-versioned**
-resources. `_put_nonversioned_resource` (`dynamodb_memory.py:~1056`) does an unconditioned
-`put_item`, and `save` raises `TypeError` for non-versioned models. Both are documented as
-intentional in 21.0.0.
-
----
-
-## 1. Files to change
-
-### 1.1 `AGENT_KNOWLEDGE.md`: four edits
-
-**(a) §1 "Core CRUD Methods" (lines ~75-113).** Add the raised types as comments in the
-existing code block. Change nothing else in it.
-
-- Above `resource = memory.create_new(`, add:
-  `# CREATE — returns the created resource. Versioned + taken override_id → ResourceExistsError`
-  (replace the existing `# CREATE — returns the created resource` line).
-- Replace `# UPDATE — returns updated resource` with:
-  ```
-  # UPDATE — returns updated resource.
-  # Versioned: if existing_resource is not the latest version (someone else wrote first),
-  # raises VersionConflictError (a ConflictError / ValueError). The write itself is
-  # conditioned on the version, so a race between read and write is caught too.
-  ```
-
-**(b) §5 "ResourceRepository" methods block (lines ~791-803).** Add one line after
-`repo.update(...)`:
-
-```python
-repo.save(id, obj_in, expected_version, clear_fields=None, changed_by=None, audit_metadata=None) -> T  # versioned only
-```
-
-Then, right after the methods code block and before `### VersionedResourceRepository`, add a
-new subsection:
-
-````markdown
-### Optimistic writes: `save(id, obj_in, expected_version)`
-
-Create-or-update, but only from the state you read. `expected_version=0` means *must not
-exist yet* (validated against the create schema); any positive value means *must currently be
-at exactly that version* (validated against the update schema). A lost race raises a
-`ConflictError` subclass either way, so you write one `except` and no create/update branch:
-
-```python
-from simplesingletable import ConflictError
-
-try:
-    doc = repo.save(doc_id, changes, expected_version=known_version)  # 0 for a new doc
-except ConflictError:
-    raise HTTPException(status_code=409)  # re-read and retry, or report the conflict
-```
-
-- `expected_version=0` and the id exists → `ResourceExistsError`.
-- `expected_version>0` and the resource is missing or at another version →
-  `VersionConflictError` (`.expected_version`, `.actual_version`; `actual_version` is
-  `None` when missing). A missing resource is never silently created.
-- The write is conditioned on the stored version, so a writer that slips in after `save`'s
-  read is still caught. `save` reads around the repository cache and evicts the entry on
-  conflict.
-- Versioned models only: a non-versioned model raises `TypeError`. A negative
-  `expected_version` raises `ValueError`.
-- Do not match exception message text (`"ConditionalCheckFailed"`, `"non-latest version"`).
-  Catch `ConflictError`. All of these types still subclass `ValueError`, so old handlers
-  keep working.
-````
-
-**(c) §14 "Exception hierarchy" (lines ~1770-1790).** Replace the import block and tree
-comment with the current hierarchy. Keep the paragraphs that follow (`cancellation_reasons`,
-`operation_indexes`, the try/except example) as they are, except for the one-word fix noted
-below.
-
-````markdown
-```python
-from simplesingletable import (
-    ConflictError,
-    ResourceExistsError,
-    TransactionError,
-    TransactionConditionFailedError,
-    VersionConflictError,
-)  # also importable from simplesingletable.exceptions / simplesingletable.transactions
-
-# ValueError
-# └── ConflictError                         # Stored state wasn't what the caller expected. Catch this for 409.
-#     ├── ResourceExistsError               # Versioned create_new with a taken id / save(..., 0). Non-versioned create_new is an unconditioned put and never raises this.
-#     └── TransactionConditionFailedError   # Also a TransactionError. A condition didn't hold.
-#         └── VersionConflictError          # Lost optimistic-concurrency race, on either write path.
-#
-# TransactionError (Exception)              # Any transaction failure.
-# └── TransactionConditionFailedError
-```
-
-`ConflictError` carries `resource_type` and `resource_id` when known. `VersionConflictError`
-adds `expected_version` / `actual_version` when known. Non-condition transaction cancellations
-from the non-transactional path (`transact_write_safe`) are still plain `ValueError`.
-````
-
-Replace the existing sentence "All three classes carry:" and the two bullets under it
-(`cancellation_reasons`, `operation_indexes`) with this paragraph, verbatim:
-
-> `TransactionError` and its subclasses carry `cancellation_reasons` / `operation_indexes`.
-> Both are filled on a transaction `commit()`. On the non-transactional path they may be
-> empty, so use `expected_version` / `actual_version` there.
-
-For reference (do not paste this into the doc), the facts behind that wording are:
-- Transaction `commit()` fills both `cancellation_reasons` and `operation_indexes`.
-- `transact_write_safe` (`dynamodb_memory.py:296-329`) fills `cancellation_reasons` only, so
-  `operation_indexes` is `[]`.
-- `update_existing`'s stale-pre-image check (`dynamodb_memory.py:575`) and `save`'s pre-read
-  check (`extras/repository.py:259`) leave both `[]` but fill `expected_version` /
-  `actual_version`.
-- `ResourceExistsError` is not a `TransactionError` and has neither attribute.
-
-**(d) "Quick Reference: Key Imports" (lines ~2058-2063).** Replace the `# Transactions`
-import block with:
-
-```python
-# Errors — ConflictError and its subclasses are ValueErrors; TransactionError is not
-from simplesingletable import (
-    ConflictError,
-    ResourceExistsError,
-    TransactionError,
-    TransactionConditionFailedError,
-    VersionConflictError,
-)
-```
-
-### 1.2 `README.md`: one bullet (required)
-
-`save` has shipped for two releases (21.0.0, 22.0.0) and the README feature list does not
-mention it. In the feature list at `README.md:128-129`, after the Versioned Repository
-bullet, add:
-
-```markdown
-- **Optimistic writes**: `repo.save(id, obj, expected_version)` — create (`0`) or update from an exact version; a lost race raises `ConflictError`
-```
-
-No other README changes. Don't touch the version line; bumpver owns it.
-
-### 1.3 No source changes
-
-`src/` stays unchanged. If an implementer finds a docstring that contradicts the docs above,
-the code wins. Fix the doc, not the code, and mention it in the PR.
-
----
-
-## 2. Test to add
-
-The suite is already thorough. One branch in `save` has no test: the
-`except VersionConflictError` at `extras/repository.py:270-274`, which evicts the cache when
-the conflict is raised inside `_update`, after `save`'s own pre-read passed. The existing
-`test_save_does_not_trust_a_cached_pre_image` only reaches the pre-read branch (lines
-259-268).
-
-Add to `tests/test_typed_conflicts_and_save.py`, in the `save()` section after
-`test_save_does_not_trust_a_cached_pre_image`. It uses the existing `Doc` / `CreateDoc` /
-`UpdateDoc` models and the `dynamodb_memory` fixture (DynamoDB Local):
-
-```python
-def test_save_conflict_from_the_update_itself_evicts_the_cache(dynamodb_memory, monkeypatch):
-    """Conflict raised inside ``_update``, after save's own pre-read passed, evicts the cache."""
-    cached_repo = VersionedResourceRepository(
-        ddb=dynamodb_memory,
-        model_class=Doc,
-        create_schema_class=CreateDoc,
-        update_schema_class=UpdateDoc,
-        cache_ttl_seconds=300,
-    )
-    cached_repo.save("doc-1", {"title": "t", "content": "v1"}, expected_version=0)
-    cached_repo.get("doc-1")  # warm the cache at version 1
-
-    real_get_existing = dynamodb_memory.get_existing
-    raced = False
-
-    def get_existing_then_race(*args, **kwargs):
-        nonlocal raced
-        pre_image = real_get_existing(*args, **kwargs)
-        if not raced:
-            raced = True
-            # Another writer moves the resource forward after save() has its pre-image.
-            dynamodb_memory.update_existing(pre_image, UpdateDoc(content="other writer"))
-        return pre_image
-
-    monkeypatch.setattr(dynamodb_memory, "get_existing", get_existing_then_race)
-
-    with pytest.raises(VersionConflictError) as exc_info:
-        cached_repo.save("doc-1", {"content": "loser"}, expected_version=1)
-    assert exc_info.value.actual_version == 2, "update_existing's non-latest check must be what fired"
-
-    monkeypatch.undo()
-    stored = dynamodb_memory.get_existing("doc-1", Doc)
-    assert (stored.version, stored.content) == (2, "other writer"), "the losing write must not land"
-    assert cached_repo.get("doc-1").version == 2, "the conflict must evict the stale cache entry"
-```
-
-Implementation notes:
-- `save` calls `self.ddb.get_existing(id, self.model_class)`. Patching the instance attribute
-  on `dynamodb_memory` intercepts it because `cached_repo.ddb is dynamodb_memory`. Confirm
-  `ResourceRepository.__init__` stores `ddb` as-is rather than wrapping it.
-- Which check fires is deterministic. `save` → `_update` → `update_existing` calls
-  `read_existing` (`dynamodb_memory.py:571`), which calls `self.get_existing`
-  (`dynamodb_memory.py:541`), i.e. the patched function. With `raced` already `True` it just
-  returns the stored v2, and the "Cannot update from non-latest version" check at
-  `dynamodb_memory.py:575` raises `VersionConflictError(expected_version=1,
-  actual_version=2)` every time. The write's `ConditionExpression` in
-  `_update_existing_versioned` is never reached. That is fine: the test's purpose is the
-  eviction branch at `repository.py:270`, which any `VersionConflictError` from `_update`
-  reaches. The `actual_version == 2` assertion pins which check fired.
-- This test is **not** evidence for the write-condition race. That case is already covered by
-  `test_losing_the_write_race_itself_raises_version_conflict`, which drives
-  `_update_existing_versioned` with a stale `previous_version`. The §5 doc bullet ("a writer
-  that slips in after `save`'s read is still caught") rests on that test and on the condition
-  in `_update_existing_versioned`, not on this one.
-- Run: `pytest tests/test_typed_conflicts_and_save.py -k save` and then the full
-  `pytest`. Both need Docker for DynamoDB Local.
-- If a doc test exists that greps AGENT_KNOWLEDGE.md, run it too. None exists today:
-  `grep -rn AGENT_KNOWLEDGE tests/` is empty.
-
----
-
-## 3. CHANGELOG entry
-
-Add under `## [Unreleased]` in `CHANGELOG.md`, as a new bullet at the end of the
-**existing** `### Fixed` subsection (`CHANGELOG.md:88`), immediately before `## [22.0.0]`.
-The stale §14 tree is a doc bug, so it belongs under Fixed. Do **not** add a new heading:
-the file follows Keep a Changelog and has never used `### Documentation`. Do **not** add a
-version header; `inv fullrelease` stamps it.
-
-```markdown
-* AGENT_KNOWLEDGE.md now covers `ResourceRepository.save(id, obj_in, expected_version)` and the
-  `ConflictError` / `ResourceExistsError` / `VersionConflictError` hierarchy shipped in 21.0.0
-  (#13). The §14 exception tree was stale: it listed only the transaction types and still
-  called `VersionConflictError` a back-compat alias, when it is the type raised by
-  non-transactional `update_existing` as well.
-```
-
-(The new test is test-only and needs no entry.)
-
----
-
-## 4. Checklist
-
-1. Edit AGENT_KNOWLEDGE.md §1, §5 (methods line + new subsection), §14 and Quick Reference
-   as in 1.1.
-2. Add the README bullet (1.2).
-3. Add the test in §2. Run `pytest tests/test_typed_conflicts_and_save.py`, then `pytest`.
-4. Add the CHANGELOG bullet to the existing `### Fixed` under `## [Unreleased]`.
-5. `inv lint`.
-6. No `pyproject.toml` / dependency change, so `uv.lock` is untouched. No version bump.
-7. PR description: say #13 was implemented in 21.0.0 (`7bfdeb0`), that this PR only fixes
-   docs and adds one test, and that the issue can be closed. Note that the non-versioned
-   conditional-create gap is a separate follow-up.
+| `src/simplesingletable/extras/repository.py:246` | `consistent_read=True` on the pre-image read (path A); comment |
+| `src/simplesingletable/extras/repository.py:351` (`_get`) and `:177-178` (`update()`) | `_get` gains `consistent_read`; `update(id)` uses it and raises the same not-found `ValueError` as `read()` (path C) |
+| `src/simplesingletable/dynamodb_memory.py:571-574` | `consistent_read=True` on the latest-version read (path B) |
+| `tests/test_typed_conflicts_and_save.py` | add T1-T5 and the `_lag_latest_reads` helper |
+| `CHANGELOG.md` (`## [Unreleased]`, `### Fixed`, after line 106) | one entry from section 5 |
+| `AGENT_KNOWLEDGE.md` (~1773-1781, ~441-483) | correct hierarchy; add `save` subsection |
+| No public signature changes | `save`, `update`, `update_existing`, `get_existing`, and the exception classes are unchanged |

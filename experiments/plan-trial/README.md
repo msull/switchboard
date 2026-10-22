@@ -155,7 +155,9 @@ and the same collect, blind, commit when its arms are done.
 
 ## Scoring
 
-The owner's part. Pull the branch, open `results/<short>-<issue>/blind/`
+First the owner writes `results/<short>-<issue>/reference.md` from the code at base, before reading any plan: departures from the issue's framing, the decisions a plan must get right, and the anchors it should cite. Then `grade-all.sh` scores every blind plan with two graders and `tally.py` writes `scores.md`; the owner adjudicates where the graders disagree, recording any correction in `grades/overrides.txt`.
+
+The manual alternative. Pull the branch, open `results/<short>-<issue>/blind/`
 and fill `scores.md` by `rubric.md` with `key.txt` unopened. Then open
 the key and put each arm's measurements beside its scores: rounds and
 whether the cap was hit from `report.json`, wall time, tokens by model,
@@ -186,5 +188,9 @@ and remove `~/code_repos/plan-trial`.
 | `collect.sh` | copies an issue's pipeline arms out of Dispatch's data directory |
 | `blind.sh` | shuffles the twelve plans into A to L with a key and a score sheet |
 | `rubric.md` | how to score a plan, and what to put beside the scores |
+| `base-tree.sh` | a worktree at an issue's base commit under `~/code_repos/plan-trial`, made on first use |
+| `grade.sh` | scores one blind plan with one grader (`fable` or `codex`) from one packet: issue, rubric, reference, plan, base worktree; writes `grades/<letter>.<grader>.md` |
+| `grade-all.sh` | every plan of an issue through both graders, four at a time, skipping grades already written |
+| `tally.py` | joins grades to the key and the runs' measurements into `scores.md`; applies `grades/overrides.txt` |
 | `lib.sh` | shared by the scripts: the `dispatch` binary, the data directory, the repositories |
 | `results/` | one directory per issue, committed to this branch |

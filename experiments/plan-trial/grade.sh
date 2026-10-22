@@ -1,0 +1,74 @@
+#!/bin/sh
+# Scores one blind plan with one grader, from the same packet each time:
+# the issue, rubric.md, the owner-checked reference, the plan, and a
+# worktree at the issue's base commit. The grader never sees the key or
+# another plan. Writes results/<short>-<issue>/grades/<letter>.<grader>.md.
+# usage: grade.sh <switchboard|simplesingletable> <issue> <A..L> <fable|codex>
+set -eu
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/lib.sh"
+repo=$1; issue=$2; letter=$3; grader=$4
+repo_vars "$repo"
+res="$here/results/$short-$issue"
+tree=$("$here/base-tree.sh" "$repo" "$issue")
+grades="$res/grades"; mkdir -p "$grades"
+out="$grades/$letter.$grader.md"
+prompt="$grades/$letter.$grader.prompt.md"
+{
+  echo "You are scoring one implementation plan for a GitHub issue, blind: you do not know who or what wrote it, and you score this plan on its own."
+  echo "The repository at the issue's base commit is checked out at $tree (read-only; change nothing there). Every file path in the plan is relative to that tree."
+  echo
+  echo "Score by the rubric, column by column. Length is not thoroughness. For grounding, take the first five distinct file or line references the plan makes, in order of appearance, open each in the tree, and say what you found. For departures and decisions, use the reference as the yardstick; where you disagree with the reference, say so in the evidence rather than silently scoring your own view."
+  echo
+  echo "Your final message must be exactly this shape and nothing else:"
+  echo
+  echo '```'
+  echo "| plan | grounding | departures caught | decisions to overturn | over-specification | hand-off |"
+  echo "|---|---|---|---|---|---|"
+  echo "| $letter | <0-3> | <0-3> | <0-3> | <0-3> | <yes|note|no> |"
+  echo '```'
+  echo
+  echo "## Grounding"
+  echo "- <ref 1 as the plan wrote it>: found / wrong (<what is there>)"
+  echo "- ... five rows"
+  echo "## Departures caught"
+  echo "- <each departure in the reference>: caught / missed / caught with a wrong fix"
+  echo "- <any departure the plan found that the reference lacks>"
+  echo "## Decisions to overturn"
+  echo "- <each call you would reverse, with the reference decision it conflicts with>; or none"
+  echo "## Over-specification"
+  echo "- <what an implementer would not need, and roughly what fraction of the plan it is>"
+  echo "## Hand-off"
+  echo "- <the one line of guidance if note; why not if no>"
+  echo "## Notes"
+  echo "- best: <one line>"
+  echo "- worst: <one line>"
+  echo
+  echo "---"; echo; echo "# The issue"; echo; cat "$res/issue.md"
+  echo; echo "---"; echo; echo "# The rubric"; echo; cat "$here/rubric.md"
+  echo; echo "---"; echo; echo "# The reference (owner-checked)"; echo; cat "$res/reference.md"
+  echo; echo "---"; echo; echo "# The plan ($letter)"; echo; cat "$res/blind/$letter.md"
+} > "$prompt"
+start=$(date +%s)
+case $grader in
+  fable)
+    (cd "$tree" && claude -p --model fable --output-format json \
+      --permission-mode default \
+      --allowedTools "Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git grep *),Bash(sed *),Bash(grep *),Bash(rg *),Bash(cat *),Bash(ls *),Bash(head *),Bash(tail *),Bash(wc *),Bash(find *)" \
+      < "$prompt" > "$grades/$letter.$grader.json")
+    python3 -I - "$grades/$letter.$grader.json" "$out" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+r = r[-1] if isinstance(r, list) else r
+open(sys.argv[2], "w").write(r.get("result", ""))
+print(f"cost_usd={r.get('total_cost_usd')} turns={r.get('num_turns')} ms={r.get('duration_ms')}")
+PY
+    ;;
+  codex)
+    (cd "$tree" && codex exec -s read-only --ephemeral --color never \
+      -o "$out" - < "$prompt" > "$grades/$letter.$grader.log" 2>&1) || echo "codex exited $?; see $grades/$letter.$grader.log"
+    ;;
+  *) echo "grader must be fable or codex" >&2; exit 2 ;;
+esac
+echo "$(( $(date +%s) - start ))" > "$grades/$letter.$grader.seconds"
+echo "$out ($(wc -w < "$out") words, $(cat "$grades/$letter.$grader.seconds")s)"
