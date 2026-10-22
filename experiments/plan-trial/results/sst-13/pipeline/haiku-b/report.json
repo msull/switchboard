@@ -1,0 +1,328 @@
+{
+  "id": "c3a45d04",
+  "project": "sst-haiku-b",
+  "title": "Typed conflict errors on the non-transactional write path, and a save(obj, expected_version) primitive",
+  "state": "active",
+  "stages": [
+    {
+      "stage": "investigate",
+      "attempts": 1,
+      "ms": 103425,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-haiku-5-5": {
+          "input": 26,
+          "output": 16945,
+          "cache_write": 63003,
+          "cache_write_1h": 63003,
+          "cache_read": 866041,
+          "messages": 13
+        }
+      }
+    },
+    {
+      "stage": "lanes",
+      "attempts": 1,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "plan",
+      "attempts": 1,
+      "ms": 110132,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-haiku-5-5": {
+          "input": 18,
+          "output": 22280,
+          "cache_write": 55021,
+          "cache_write_1h": 55021,
+          "cache_read": 506353,
+          "messages": 9
+        }
+      }
+    },
+    {
+      "stage": "review",
+      "attempts": 1,
+      "ms": 385603,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-haiku-5-5": {
+          "input": 120,
+          "output": 71187,
+          "cache_write": 245014,
+          "cache_write_1h": 245014,
+          "cache_read": 6775954,
+          "messages": 60
+        }
+      }
+    },
+    {
+      "stage": "implement",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "review-code",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "pr",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "inspect",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "ready",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "merge",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    }
+  ],
+  "plan_lines": 218,
+  "plan_bytes": 14502,
+  "plans": [
+    {
+      "lane": "repo",
+      "lines": 218,
+      "bytes": 14502
+    }
+  ],
+  "plan_reviews": [
+    {
+      "stage": "review",
+      "attempt": 1,
+      "rounds": [
+        {
+          "n": 1,
+          "new": 5,
+          "open": 5
+        },
+        {
+          "n": 2,
+          "new": 7,
+          "open": 7
+        },
+        {
+          "n": 3,
+          "new": 7,
+          "open": 7
+        },
+        {
+          "n": 4,
+          "new": 8,
+          "open": 8
+        },
+        {
+          "n": 5,
+          "new": 9,
+          "open": 9
+        },
+        {
+          "n": 6,
+          "new": 9,
+          "open": 9
+        }
+      ]
+    }
+  ],
+  "plan_rounds": 6,
+  "plan_points": 45,
+  "code_reviews": [],
+  "code_rounds": 0,
+  "code_points": 0,
+  "code_points_by_reviewer": {},
+  "code_incomplete": false,
+  "fix_passes": 0,
+  "rebases": 0,
+  "pr_url": null,
+  "commits": null,
+  "range": null,
+  "tickets": 1,
+  "answered_by": {},
+  "evidence_files": 0,
+  "evidence_bytes": 0,
+  "usage": [
+    {
+      "stage": "investigate",
+      "n": 1,
+      "context": "root",
+      "models": {
+        "claude-haiku-5-5": {
+          "input": 26,
+          "output": 16945,
+          "cache_write": 63003,
+          "cache_write_1h": 63003,
+          "cache_read": 866041,
+          "messages": 13
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "af1a55dc-19ad-47c9-af75-ff5db7760913",
+          "source": "transcript",
+          "models": {
+            "claude-haiku-5-5": {
+              "input": 26,
+              "output": 16945,
+              "cache_write": 63003,
+              "cache_write_1h": 63003,
+              "cache_read": 866041,
+              "messages": 13
+            }
+          },
+          "span_ms": 94602,
+          "active_ms": 94602,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "plan",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-haiku-5-5": {
+          "input": 18,
+          "output": 22280,
+          "cache_write": 55021,
+          "cache_write_1h": 55021,
+          "cache_read": 506353,
+          "messages": 9
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "7b861f26-c465-41bf-a0f9-f9dc7e824434",
+          "source": "transcript",
+          "models": {
+            "claude-haiku-5-5": {
+              "input": 18,
+              "output": 22280,
+              "cache_write": 55021,
+              "cache_write_1h": 55021,
+              "cache_read": 506353,
+              "messages": 9
+            }
+          },
+          "span_ms": 104916,
+          "active_ms": 104916,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "review",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-haiku-5-5": {
+          "input": 120,
+          "output": 71187,
+          "cache_write": 245014,
+          "cache_write_1h": 245014,
+          "cache_read": 6775954,
+          "messages": 60
+        }
+      },
+      "sessions": [
+        {
+          "role": "planner",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "75b26860-e1c3-4a00-b3e9-59d475d07ac6",
+          "source": "transcript",
+          "models": {
+            "claude-haiku-5-5": {
+              "input": 70,
+              "output": 45567,
+              "cache_write": 142789,
+              "cache_write_1h": 142789,
+              "cache_read": 4573200,
+              "messages": 35
+            }
+          },
+          "span_ms": 287879,
+          "active_ms": 234760,
+          "asking_ms": 0,
+          "idle_ms": 53119
+        },
+        {
+          "role": "plan reviewer",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "9fd6f27c-6e03-4e63-8782-77d189a86165",
+          "source": "transcript",
+          "models": {
+            "claude-haiku-5-5": {
+              "input": 50,
+              "output": 25620,
+              "cache_write": 102225,
+              "cache_write_1h": 102225,
+              "cache_read": 2202754,
+              "messages": 25
+            }
+          },
+          "span_ms": 341765,
+          "active_ms": 134421,
+          "asking_ms": 0,
+          "idle_ms": 207344
+        }
+      ]
+    }
+  ],
+  "tokens": {
+    "claude-haiku-5-5": {
+      "input": 164,
+      "output": 110412,
+      "cache_write": 363038,
+      "cache_write_1h": 363038,
+      "cache_read": 8148348,
+      "messages": 82
+    }
+  },
+  "not_counted": 0,
+  "not_found": 0,
+  "kind_unknown": 0
+}

@@ -1,0 +1,9 @@
+1. Test style mismatch: `tests/test_typed_conflicts_and_save.py` is made of module-level `test_*` functions with fixtures (`dynamodb_memory`, `local_storage`), not test classes. The plan's `TestSingletonConflict` class doesn't match the surrounding code. Write the three tests as module-level functions, e.g. `test_stale_singleton_save_raises_version_conflict`.
+
+2. Singleton parity with `LocalStorageMemory` is not covered. That file already checks that `LocalStorageMemory` raises the same types as DynamoDB (`test_local_storage_raises_the_same_types_as_dynamodb`, line 209). `saved_updated_singleton` runs against either backend, so add one stale-save test using the `local_storage` fixture. Otherwise state why it is skipped.
+
+3. The new `VersionedSettings` model uses the shared key `SINGLETON#VersionedSettings`. The plan doesn't say whether `dynamodb_memory` is a fresh table for each test. If it isn't, `ensure_exists` could return state left over from another test and the `version == 1` / `version == 2` asserts would fail. Confirm the fixture's scope in `tests/conftest.py`, or assert relative to the version `ensure_exists` returns.
+
+4. The `AGENT_KNOWLEDGE.md` hierarchy tree around line 1781 labels `VersionConflictError` as a "Back-compat alias". The plan adds docs for it but never checks that this tree matches `exceptions.py`, where `VersionConflictError` is a real subclass of `TransactionConditionFailedError`. Check that line, and fix it if it is stale, while you are editing that file.
+
+5. Section 3 asks for a new `repo.save` subsection in `AGENT_KNOWLEDGE.md`. That is unrelated to the singleton fix, and the plan itself says issue #13 is already shipped. Either make it a clearly separate docs item, or list it in the CHANGELOG as a docs change. As written, the single "Fixed" bullet doesn't account for it.

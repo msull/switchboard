@@ -1,0 +1,12 @@
+A pipeline/haiku-b
+B pipeline/haiku-a
+C single/opus-b
+D single/fable-a
+E single/sonnet-a
+F single/sonnet-b
+G pipeline/opus-b
+H single/opus-a
+I single/fable-b
+J pipeline/sonnet-a
+K pipeline/sonnet-b
+L pipeline/opus-a

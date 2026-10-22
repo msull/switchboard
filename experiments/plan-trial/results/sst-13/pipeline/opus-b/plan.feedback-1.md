@@ -1,0 +1,19 @@
+1. **CHANGELOG: don't invent a `### Documentation` subsection.** No release in CHANGELOG.md has ever used one. The file follows Keep a Changelog, and its existing headings are Added / Changed / Deprecated / Removed / Fixed / Security, plus one `### Internal`. `## [Unreleased]` already has a `### Fixed` section (line 88). The stale §14 tree is a doc bug, so put the entry under that existing `### Fixed` heading and add no new heading. The wording itself is fine, and so is "no version header".
+
+2. **§14 attribute wording: settle it in the plan instead of leaving "check exceptions.py" to the implementer.** I checked, and the facts are:
+   - Every `TransactionError` subclass, `VersionConflictError` included, *has* `cancellation_reasons` and `operation_indexes`, but they are only populated on some paths.
+   - Transaction `commit()` fills both.
+   - The non-transactional `transact_write_safe` (`dynamodb_memory.py:296-329`) fills `cancellation_reasons` only, so `operation_indexes` is `[]`.
+   - `update_existing`'s stale-pre-image check (`dynamodb_memory.py:575`) and `save`'s pre-read check (`extras/repository.py:259`) leave both as `[]`, but fill `expected_version`/`actual_version`.
+   - `ResourceExistsError` has neither attribute.
+
+   The proposed replacement, "The `Transaction*` classes (and `VersionConflictError`) carry:", is also redundant, because `VersionConflictError` *is* a `TransactionConditionFailedError`. Use this wording: "`TransactionError` and its subclasses carry `cancellation_reasons` / `operation_indexes`. Both are filled on a transaction `commit()`. On the non-transactional path they may be empty, so use `expected_version` / `actual_version` there."
+
+3. **The Quick Reference comment is wrong.** `# Errors (all ValueError subclasses except TransactionError's non-conflict cases)` is inaccurate: `TransactionError` itself is a plain `Exception`, not a `ValueError` "case". Use: `# Errors — ConflictError and its subclasses are ValueErrors; TransactionError is not`. Also qualify the §14 tree comment for `ResourceExistsError`: it should say "versioned `create_new` with a taken id / `save(..., 0)`". Non-versioned `create_new` is an unconditioned put, as the plan's own out-of-scope note says, and must not look as if it raises this.
+
+4. **The new test does not exercise the path its name and docs claim, and the plan's note about it is wrong.** In the test, the race happens inside the patched `get_existing`. After that, `save` → `_update` → `update_existing` calls `read_existing` → `get_existing` (patched, `raced=True`), sees v2, and raises "non-latest version" at `dynamodb_memory.py:575`. That happens every time. It never reaches the `ConditionExpression` in `_update_existing_versioned`. So the note "which of the two fires depends on that internal read" is wrong: the pre-check always fires. The test still covers the `except VersionConflictError` eviction branch at `repository.py:270`, which is its real purpose. Make the following changes:
+   - Rename it and fix its docstring, e.g. `test_save_conflict_from_the_update_itself_evicts_the_cache`, "conflict raised inside `_update`, after save's own pre-read passed".
+   - Add `assert exc_info.value.actual_version == 2` so the test pins which check fired.
+   - Fix the implementation note. The write-condition race is already covered by `test_losing_the_write_race_itself_raises_version_conflict`. The §5 doc bullet ("a writer that slips in after `save`'s read is still caught") is true, but it should not cite this test as its evidence.
+
+5. **The README bullet should not be "optional".** A plan step that is optional leaves the PR's scope ambiguous for the implementer. `save` is a public API that has shipped for two releases, and the README feature list (`README.md:128-129`) doesn't mention it. Make the bullet a required step and remove "Optionally" from checklist item 2.
