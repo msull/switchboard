@@ -1,0 +1,310 @@
+{
+  "id": "f5eea5a6",
+  "project": "sb-sonnet-b",
+  "title": "A web control surface: the remote port serves a browser page, paired from a URL that carries the code",
+  "state": "active",
+  "stages": [
+    {
+      "stage": "investigate",
+      "attempts": 1,
+      "ms": 171511,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 26,
+          "output": 16569,
+          "cache_write": 84151,
+          "cache_write_1h": 84151,
+          "cache_read": 972026,
+          "messages": 13
+        }
+      }
+    },
+    {
+      "stage": "lanes",
+      "attempts": 1,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "plan",
+      "attempts": 1,
+      "ms": 243061,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 28,
+          "output": 25360,
+          "cache_write": 100817,
+          "cache_write_1h": 100817,
+          "cache_read": 1251808,
+          "messages": 14
+        }
+      }
+    },
+    {
+      "stage": "review",
+      "attempts": 1,
+      "ms": 866360,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 76,
+          "output": 38289,
+          "cache_write": 223514,
+          "cache_write_1h": 223514,
+          "cache_read": 4535086,
+          "messages": 38
+        }
+      }
+    },
+    {
+      "stage": "implement",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "review-code",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "pr",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "ready",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "merge",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    }
+  ],
+  "plan_lines": 420,
+  "plan_bytes": 23627,
+  "plans": [
+    {
+      "lane": "repo",
+      "lines": 420,
+      "bytes": 23627
+    }
+  ],
+  "plan_reviews": [
+    {
+      "stage": "review",
+      "attempt": 1,
+      "rounds": [
+        {
+          "n": 1,
+          "new": 9,
+          "open": 9
+        },
+        {
+          "n": 2,
+          "new": 11,
+          "open": 11
+        },
+        {
+          "n": 3,
+          "new": 3,
+          "open": 3
+        },
+        {
+          "n": 4,
+          "new": 0,
+          "open": 0
+        }
+      ]
+    }
+  ],
+  "plan_rounds": 4,
+  "plan_points": 23,
+  "code_reviews": [],
+  "code_rounds": 0,
+  "code_points": 0,
+  "code_points_by_reviewer": {},
+  "code_incomplete": false,
+  "fix_passes": 0,
+  "rebases": 0,
+  "pr_url": null,
+  "commits": null,
+  "range": null,
+  "tickets": 1,
+  "answered_by": {},
+  "evidence_files": 0,
+  "evidence_bytes": 0,
+  "usage": [
+    {
+      "stage": "investigate",
+      "n": 1,
+      "context": "root",
+      "models": {
+        "claude-sonnet-5-5": {
+          "input": 26,
+          "output": 16569,
+          "cache_write": 84151,
+          "cache_write_1h": 84151,
+          "cache_read": 972026,
+          "messages": 13
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "4c5cf267-290e-441a-80ae-5b026424e370",
+          "source": "transcript",
+          "models": {
+            "claude-sonnet-5-5": {
+              "input": 26,
+              "output": 16569,
+              "cache_write": 84151,
+              "cache_write_1h": 84151,
+              "cache_read": 972026,
+              "messages": 13
+            }
+          },
+          "span_ms": 159357,
+          "active_ms": 159357,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "plan",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-sonnet-5-5": {
+          "input": 28,
+          "output": 25360,
+          "cache_write": 100817,
+          "cache_write_1h": 100817,
+          "cache_read": 1251808,
+          "messages": 14
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "38d62e74-11f3-45cf-b788-d3d5e0f57c3e",
+          "source": "transcript",
+          "models": {
+            "claude-sonnet-5-5": {
+              "input": 28,
+              "output": 25360,
+              "cache_write": 100817,
+              "cache_write_1h": 100817,
+              "cache_read": 1251808,
+              "messages": 14
+            }
+          },
+          "span_ms": 238168,
+          "active_ms": 238168,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "review",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-sonnet-5-5": {
+          "input": 76,
+          "output": 38289,
+          "cache_write": 223514,
+          "cache_write_1h": 223514,
+          "cache_read": 4535086,
+          "messages": 38
+        }
+      },
+      "sessions": [
+        {
+          "role": "planner",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "6a0d7082-1283-403e-b3b3-f46e9fcb7711",
+          "source": "transcript",
+          "models": {
+            "claude-sonnet-5-5": {
+              "input": 40,
+              "output": 28053,
+              "cache_write": 158869,
+              "cache_write_1h": 158869,
+              "cache_read": 3194738,
+              "messages": 20
+            }
+          },
+          "span_ms": 257211,
+          "active_ms": 227703,
+          "asking_ms": 0,
+          "idle_ms": 29508
+        },
+        {
+          "role": "plan reviewer",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "c167aada-e42d-496d-8a68-5c660889bd84",
+          "source": "transcript",
+          "models": {
+            "claude-sonnet-5-5": {
+              "input": 36,
+              "output": 10236,
+              "cache_write": 64645,
+              "cache_write_1h": 64645,
+              "cache_read": 1340348,
+              "messages": 18
+            }
+          },
+          "span_ms": 330513,
+          "active_ms": 129692,
+          "asking_ms": 0,
+          "idle_ms": 200821
+        }
+      ]
+    }
+  ],
+  "tokens": {
+    "claude-sonnet-5-5": {
+      "input": 130,
+      "output": 80218,
+      "cache_write": 408482,
+      "cache_write_1h": 408482,
+      "cache_read": 6758920,
+      "messages": 65
+    }
+  },
+  "not_counted": 0,
+  "not_found": 0,
+  "kind_unknown": 0
+}

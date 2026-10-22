@@ -1,0 +1,305 @@
+{
+  "id": "192e7027",
+  "project": "sb-opus-a",
+  "title": "A web control surface: the remote port serves a browser page, paired from a URL that carries the code",
+  "state": "active",
+  "stages": [
+    {
+      "stage": "investigate",
+      "attempts": 1,
+      "ms": 294939,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 52,
+          "output": 23105,
+          "cache_write": 105220,
+          "cache_write_1h": 105220,
+          "cache_read": 2299562,
+          "messages": 26
+        }
+      }
+    },
+    {
+      "stage": "lanes",
+      "attempts": 1,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "plan",
+      "attempts": 1,
+      "ms": 353156,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 46,
+          "output": 30733,
+          "cache_write": 88728,
+          "cache_write_1h": 88728,
+          "cache_read": 1845979,
+          "messages": 23
+        }
+      }
+    },
+    {
+      "stage": "review",
+      "attempts": 1,
+      "ms": 632891,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 108,
+          "output": 55134,
+          "cache_write": 235077,
+          "cache_write_1h": 235077,
+          "cache_read": 5855349,
+          "messages": 54
+        }
+      }
+    },
+    {
+      "stage": "implement",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "review-code",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "pr",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "ready",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "merge",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    }
+  ],
+  "plan_lines": 543,
+  "plan_bytes": 25243,
+  "plans": [
+    {
+      "lane": "repo",
+      "lines": 543,
+      "bytes": 25243
+    }
+  ],
+  "plan_reviews": [
+    {
+      "stage": "review",
+      "attempt": 1,
+      "rounds": [
+        {
+          "n": 1,
+          "new": 7,
+          "open": 7
+        },
+        {
+          "n": 2,
+          "new": 8,
+          "open": 8
+        },
+        {
+          "n": 3,
+          "new": 0,
+          "open": 0
+        }
+      ]
+    }
+  ],
+  "plan_rounds": 3,
+  "plan_points": 15,
+  "code_reviews": [],
+  "code_rounds": 0,
+  "code_points": 0,
+  "code_points_by_reviewer": {},
+  "code_incomplete": false,
+  "fix_passes": 0,
+  "rebases": 0,
+  "pr_url": null,
+  "commits": null,
+  "range": null,
+  "tickets": 1,
+  "answered_by": {},
+  "evidence_files": 0,
+  "evidence_bytes": 0,
+  "usage": [
+    {
+      "stage": "investigate",
+      "n": 1,
+      "context": "root",
+      "models": {
+        "claude-opus-5-5": {
+          "input": 52,
+          "output": 23105,
+          "cache_write": 105220,
+          "cache_write_1h": 105220,
+          "cache_read": 2299562,
+          "messages": 26
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "7907fdfe-c60e-493a-b8f5-0d478991a094",
+          "source": "transcript",
+          "models": {
+            "claude-opus-5-5": {
+              "input": 52,
+              "output": 23105,
+              "cache_write": 105220,
+              "cache_write_1h": 105220,
+              "cache_read": 2299562,
+              "messages": 26
+            }
+          },
+          "span_ms": 286261,
+          "active_ms": 286261,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "plan",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-opus-5-5": {
+          "input": 46,
+          "output": 30733,
+          "cache_write": 88728,
+          "cache_write_1h": 88728,
+          "cache_read": 1845979,
+          "messages": 23
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "f77c9d36-62e8-4f58-b0db-27815640288f",
+          "source": "transcript",
+          "models": {
+            "claude-opus-5-5": {
+              "input": 46,
+              "output": 30733,
+              "cache_write": 88728,
+              "cache_write_1h": 88728,
+              "cache_read": 1845979,
+              "messages": 23
+            }
+          },
+          "span_ms": 349303,
+          "active_ms": 349303,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "review",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-opus-5-5": {
+          "input": 108,
+          "output": 55134,
+          "cache_write": 235077,
+          "cache_write_1h": 235077,
+          "cache_read": 5855349,
+          "messages": 54
+        }
+      },
+      "sessions": [
+        {
+          "role": "planner",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "dbdc12c8-be2d-4ed3-bdc2-776b318c5b58",
+          "source": "transcript",
+          "models": {
+            "claude-opus-5-5": {
+              "input": 40,
+              "output": 32507,
+              "cache_write": 130915,
+              "cache_write_1h": 130915,
+              "cache_read": 2710634,
+              "messages": 20
+            }
+          },
+          "span_ms": 344018,
+          "active_ms": 309894,
+          "asking_ms": 0,
+          "idle_ms": 34124
+        },
+        {
+          "role": "plan reviewer",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "67f6878a-4e80-4c9d-816a-af0058c46149",
+          "source": "transcript",
+          "models": {
+            "claude-opus-5-5": {
+              "input": 68,
+              "output": 22627,
+              "cache_write": 104162,
+              "cache_write_1h": 104162,
+              "cache_read": 3144715,
+              "messages": 34
+            }
+          },
+          "span_ms": 537474,
+          "active_ms": 256898,
+          "asking_ms": 0,
+          "idle_ms": 280576
+        }
+      ]
+    }
+  ],
+  "tokens": {
+    "claude-opus-5-5": {
+      "input": 206,
+      "output": 108972,
+      "cache_write": 429025,
+      "cache_write_1h": 429025,
+      "cache_read": 10000890,
+      "messages": 103
+    }
+  },
+  "not_counted": 0,
+  "not_found": 0,
+  "kind_unknown": 0
+}
