@@ -1,7 +1,7 @@
 # The Switchboard pipeline as a plan trial project. make-arms.sh writes one copy
 # per arm with PROJECT and MODEL filled in; the live pipeline file it was
 # taken from is the one under Dispatch's data directory. Differences from
-# it: no supervisor, one slot, a cap of six review rounds, the model set
+# it: no supervisor, two slots, a cap of six review rounds, the model set
 # on the investigator, planner and reviewer, and trust_folders on. The repo
 # URL is HTTPS: this Mac has no SSH key. The lane setup runs in a login zsh so
 # cargo is on PATH (issue #154), as the live file does.
@@ -137,7 +137,7 @@ gate = { kind = "external", check = "pr-merged", decision = "merge" }   # pendin
 
 
 [policy]
-slots = 1                    # one ticket per trial project
+slots = 2                    # the first issue's ticket holds at finalize and keeps its slot while the second runs
 waiting_on_me = 3
 trust_folders = true         # a fresh worktree's folder-trust question, answered for the trial's agents
 rebaser = "rebaser"

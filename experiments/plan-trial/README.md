@@ -25,16 +25,20 @@ What stays fixed across the twelve plans of an issue: the base commit
 guidance (`prompts/<repo>.md` is the pipeline file's text, verbatim), and
 the issue text as `gh issue view` returns it. The pipeline arms differ
 from the live pipeline only as the comment at the top of
-`pipelines/<repo>.toml` says: no supervisor, one slot, a cap of six
+`pipelines/<repo>.toml` says: no supervisor, two slots, a cap of six
 review rounds, the model set on the investigator, planner and reviewer,
 and `trust_folders` on. The `--model` flag reaches the review's reviewer
 session through the operator's `args`, and a resumed Claude Code session
 keeps the model it was started with, so the planner answers feedback at
 its arm's model too.
 
-Default issues, chosen for being medium sized and self-contained:
-Switchboard #187 and simplesingletable #13. Any other open issue works
-the same way.
+Issues so far: Switchboard #187 (a small Dispatch bug; the first run,
+scored under `results/sb-187/`), simplesingletable #13 (spoiled: the
+issue was already fixed on main before the trial's base commit, and
+every plan says so; its tickets and results stay as a record and are
+not scored), and Switchboard #230 (a feature, the web control surface,
+chosen because #187 was too small to separate the arms). Any other open
+issue works the same way.
 
 ## Before the first issue
 
@@ -144,14 +148,22 @@ git push
 No tool attribution in that commit message, the same as everywhere else
 in this repository.
 
-Then the second issue:
+Then the second Switchboard issue. The #187 tickets hold at `finalize`
+and each keeps its arm's slot, so the trial file now says `slots = 2`;
+write the arm files again first so the live copies pick it up (a ticket
+already taken keeps its own copy, and the scheduler reads `slots` from
+the live file):
 
 ```sh
-./take.sh simplesingletable 13
-for m in opus sonnet fable; do for r in a b; do ./single.sh simplesingletable 13 $m $r; done; done
+./make-arms.sh
+./take.sh switchboard 230
+for m in opus sonnet fable; do for r in a b; do ./single.sh switchboard 230 $m $r; done; done
 ```
 
-and the same collect, blind, commit when its arms are done.
+and the same collect, blind, commit when its arms are done, under
+`results/sb-230/`. #230 is a feature, so expect longer plans and more
+review rounds than #187 took; the cap of six still applies. Leave the
+simplesingletable arms alone.
 
 ## Scoring
 
