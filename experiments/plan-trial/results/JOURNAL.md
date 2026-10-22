@@ -234,3 +234,29 @@ the step ran. Costs are list price from the runs' own reports.
   graded plan.
 - Review stage, round one of revision 3's template, running on the
   sonnet-b plan with sonnet twice and opus once.
+
+## 2026-10-22: the review round under revision 3
+
+- Round one of the revision 3 review template on the sonnet-b plan,
+  with sonnet twice and opus once
+  (`results/sb-230/stages/review/v3-*`). sonnet-a: six objections,
+  1035 words, $1.50, no search; sonnet-b: one objection, 228 words,
+  $0.47, no search; opus-a: three objections, 574 words, $0.27 at the
+  reported rate, two searches and three fetches.
+- All three caught the same false premise, that load_identity refuses
+  a newer file, which the plan used to justify its identity schema
+  bump; opus-a also caught that not_after alone does not bound
+  validity, and the .local name with no source. Every objection is
+  inside the certificate reissue's details; none objects to the
+  reissue as a decision the spec's identity model rules out, and none
+  mentions the token store. So the review corrects premises but has
+  no yardstick for a decision the spec already made, and the two
+  reference overturns pass through it untouched.
+- Revision 4 now carries the planner's two limits into the review's
+  first round as objection classes: a spec decision changed without
+  the issue asking, and a credential kept where script can read it.
+- Reviewer consistency is poor at sonnet: one run wrote six
+  objections and another one, from the same plan and template, at
+  three times the cost. Worth a second look once revision 4 runs.
+- A first attempt at these runs launched nothing: a zsh loop did not
+  split its model and repetition pairs. No cost.

@@ -43,13 +43,16 @@ for f in sorted(HERE.glob("results/*/stages/*/*/run.json")):
     rows.setdefault(key, [0, 0.0])
     rows[key][0] += 1
     rows[key][1] += cost_of(f)
-for f in sorted(HERE.glob("results/*/grades/*.fable.json")):
+# Grader runs: on blind letters under grades/, and on stage runs in place.
+for f in sorted(HERE.glob("results/*/grades/*.fable.json")) + sorted(HERE.glob("results/*/stages/*/*/grade.fable.json")):
     if f.stat().st_mtime * 1000 >= since:
-        key = f"{f.parents[1].name} grading fable"
+        issue = f.parents[1].name if f.parent.name == "grades" else f.parents[3].name
+        key = f"{issue} grading fable"
         rows.setdefault(key, [0, 0.0]); rows[key][0] += 1; rows[key][1] += cost_of(f)
-for f in sorted(HERE.glob("results/*/grades/*.codex.md")):
+for f in sorted(HERE.glob("results/*/grades/*.codex.md")) + sorted(HERE.glob("results/*/stages/*/*/grade.codex.md")):
     if f.stat().st_mtime * 1000 >= since:
-        key = f"{f.parents[1].name} grading codex (est.)"
+        issue = f.parents[1].name if f.parent.name == "grades" else f.parents[3].name
+        key = f"{issue} grading codex (est.)"
         rows.setdefault(key, [0, 0.0]); rows[key][0] += 1; rows[key][1] += CODEX_ESTIMATE
 total = 0.0
 print(f"{'what':40} {'runs':>4} {'$':>7}")

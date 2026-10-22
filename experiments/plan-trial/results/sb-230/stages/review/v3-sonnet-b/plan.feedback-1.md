@@ -1,0 +1,7 @@
+1. **The plan says `RemoteFiles::load_identity` (`src/adapters/remote.rs:74`) "already refuses a newer file". It does not.** The premise is a line reference that does not match the tree. It is cited as the guard for the `IDENTITY_SCHEMA_VERSION` bump in "The record".
+   - `load_identity` (`src/adapters/remote.rs:74-76`) calls `self.load(IDENTITY_FILE)`. That function (`:49-58`) is a bare `serde_json::from_slice` with no look at `schema_version`.
+   - `grep -rn IDENTITY_SCHEMA_VERSION src tests` finds only the definition (`src/ports/remote.rs:17`), the import (`src/adapters/remote.rs:37`) and the single write in `make_identity` (`:118`). Nothing reads the field back to compare it.
+   - So the bump has no reader-side effect today. An older build opens a version-2 file, ignores the unknown fields, and keeps working.
+   - Worse for this plan: that older build would treat the file as complete. Reissue is keyed on empty `certificate_names`, so the older build never reissues. If it then saves the identity (listen change, rename), it writes the file back without the new fields and silently drops them.
+   - Either add the refusal as an item of this change, and say so in "Contract additions" with a test in `src/adapters/remote.rs`, or drop the sentence and say the bump is informational. Do not describe the guard as existing.
+   - The "additive, older reads" step in CLAUDE.md's `migrate` rule applies to `model.rs` records. The identity file has no migrate step, so the plan should say which of the two it is building.
