@@ -1,0 +1,445 @@
+You are scoring one implementation plan for a GitHub issue, blind: you do not know who or what wrote it, and you score this plan on its own.
+The repository at the issue's base commit is checked out at /Users/sully/code_repos/plan-trial/sb-230-base (read-only; change nothing there). Every file path in the plan is relative to that tree.
+
+Score by the rubric, column by column. Length is not thoroughness. For grounding, take the first five distinct file or line references the plan makes, in order of appearance, open each in the tree, and say what you found. For departures and decisions, use the reference as the yardstick; where you disagree with the reference, say so in the evidence rather than silently scoring your own view.
+
+Your final message must be exactly this shape and nothing else:
+
+```
+| plan | grounding | departures caught | decisions to overturn | over-specification | hand-off |
+|---|---|---|---|---|---|
+| v4-haiku-a | <0-3> | <0-3> | <0-3> | <0-3> | <yes|note|no> |
+```
+
+## Grounding
+- <ref 1 as the plan wrote it>: found / wrong (<what is there>)
+- ... five rows
+## Departures caught
+- <each departure in the reference>: caught / missed / caught with a wrong fix
+- <any departure the plan found that the reference lacks>
+## Decisions to overturn
+- <each call you would reverse, with the reference decision it conflicts with>; or none
+## Over-specification
+- <what an implementer would not need, and roughly what fraction of the plan it is>
+## Hand-off
+- <the one line of guidance if note; why not if no>
+## Notes
+- best: <one line>
+- worst: <one line>
+
+---
+
+# The issue
+
+# A web control surface: the remote port serves a browser page, paired from a URL that carries the code
+
+## What I want
+
+A second control surface beside the headset app: a page the host serves itself, opened in any browser on the local network (a phone, an iPad, another Mac), that lists the sessions with the waiting ones marked, shows a session's last response or screen, and sends a reply. It runs over the remote port that already exists. Nothing to install on the device, no App Store, no Xcode.
+
+## What exists
+
+- The remote port (`docs/remote-client.md`; `src/adapters/remote.rs`; `serve_remote` in `src/app.rs`): TLS with a per-installation self-signed certificate, pairing by a code with a pinned key, bearer tokens, the `/api/v1/*` read and control endpoints, the `/api/v1/events` WebSocket with the revision counter and `changed` events, redaction before every cut. Any path outside `/api/v1/` is refused.
+- The pairing window (`src/ui/remote.rs`): a QR carrying `{server_id, spki_sha256, code, addresses}` as JSON, the same in text beside it, open for five minutes or three wrong codes. The headset pairs from the Bonjour record and a typed code; the command-line `switchboard-remote pair` takes the QR's text as one argument.
+- Three speakers of the protocol already: the visionOS app, `switchboard-remote`, and the fixtures shared by `tests/remote.rs` and the Swift tests.
+
+## The shape
+
+- **The host serves the page from the same port.** `GET /` and the page's few files answer with HTML, CSS and JS embedded in the binary at compile time (`include_str!`), so there is no build step, no bundler and no package manager. Same origin as the API: the page calls `/api/v1/...` and opens `/api/v1/events` directly.
+- **The page speaks the protocol the headset speaks.** REST for reads and commands, the events socket for live changes, replies applied by revision the way §4.4 says. No new read model unless the page cannot do without one.
+- **Pairing from a URL.** The pairing window's QR becomes a URL, `https://<address>:<port>/?code=<code>&key=<spki_sha256>&id=<server_id>`, so a phone's camera opens it in the browser. The page reads the query, removes it from the address bar with `history.replaceState` before anything else happens, compares the key in the URL with the one `/info` presents, posts `/api/v1/pair` only when they match, keeps the token, and shows the sessions. The code never stays in the address bar or the history. The native text path (`switchboard-remote pair`, the headset's paste) takes the URL too, or the JSON as before.
+- **The first cut of the page.** Sessions grouped by project, waiting ones first and marked, each with its kind, state and the one-line excerpt the card shows; a session view with the last response for a Claude Code session or the screen for anything else, refreshed on `changed`; a reply box that posts `send` when the device has `control` scope and is hidden otherwise; the device's scope and host name in the header; "identity changed, pair again" and "revoked" states said plainly.
+
+## Decisions the plan must settle
+
+1. **Browser trust in the self-signed certificate.** The native client pins the SPKI; a browser cannot. The first visit shows a certificate warning the owner clicks through, and the browser then trusts that certificate for that address. The plan says what this buys and what it does not: the `key` in the URL lets a genuine page refuse to send the code to a host whose `/info` key differs, but a page served by an impostor is not a genuine page. Either the click-through on the local network is the trust step, said in the paired-devices dialog, or the host offers its certificate for download so the owner can trust it on the device first. Pick one, say why, and keep §5's rule that no non-loopback bind serves anything but `/info`, `/pair` and now the page itself before pairing.
+2. **How the token reaches the WebSocket.** A browser cannot set a header on `new WebSocket()`, and the spec forbids the token in a URL. Candidates: the `/pair` reply sets an `HttpOnly; Secure; SameSite=Strict` cookie that `fetch` and the WebSocket both carry and the page's script never sees, or the token travels as a `Sec-WebSocket-Protocol` value. The host keeps accepting the bearer header for the native clients. The choice also decides where the token lives on the device; `localStorage` is readable by any script on the origin, a cookie is not.
+3. **One QR or two.** One URL read by the browser and by the native text path is the preference; the headset has no camera and the CLI parses text, so the JSON form can be kept only if something still needs it.
+4. **Static paths on a port whose allowlist is `/api/v1/*`.** The exact set of paths, their `Content-Type`, a `Content-Security-Policy` with no inline script and no external resource, no caching across versions, which pool and rate window an unpaired browser's page load counts against (§4.1 allows four unauthenticated connections), and what the page shows when opened without a code and without a token.
+5. **Where the page lives and how it is tested.** `web/` embedded at compile time; a test in `tests/remote.rs` that the embedded page references only paths the host serves and that the new paths answer with the headers the plan names; the pairing flow tested end to end with the host's own HTTP client as the CLI does, since no UI test drives a browser; the fixture set extended if a view changes.
+6. **The device record.** A browser is a paired device like any other: a name from the user agent (`Safari on iPhone`), scope chosen in the pairing window as today, listed and revocable in the paired-devices dialog.
+
+## Not in this cut
+
+- Dispatch tickets and decisions on the page (the API serves them; a later issue).
+- The conversation beyond the last response, drafts, dictation, runs and pinned files (the API serves them; later).
+- Anything beyond the local network: no relay, no tunnel; §9 of the spec stands.
+- A framework, a build step or a dependency for the page.
+
+## Where to look
+
+- `docs/remote-client.md` §4.1 (bounds), §4.3 (endpoints), §5 (pairing): the plan amends the spec and the remote status section of `docs/design.md`.
+- `src/adapters/remote.rs`: `connection`, `read_request`, the pools and the rate windows.
+- `src/app.rs` `serve_remote`: the `/api/v1/` prefix match and the allowlist.
+- `src/ui/remote.rs`: the pairing window and its QR payload; `src/core/remote.rs` the pairing state.
+- `client/Sources/switchboard-remote/main.swift` and `client/Sources/SwitchboardProtocol/Info.swift`: the text pairing path that has to keep working.
+
+## Acceptance
+
+Open the pairing window, scan the QR with a phone, accept the certificate warning, see the sessions; a session that starts waiting moves to the top without a reload; send a reply from the phone and watch it arrive; revoke the phone in the dialog and the page says so on its next request.
+
+
+---
+
+# The rubric
+
+# Scoring a plan
+
+Score blind: the twelve plans of an issue as A to L, with the key closed
+until every row is filled. Length reads as thoroughness, so score each
+column on its own and never the whole impression.
+
+Each column is 0 to 3 except the last.
+
+- **Grounding.** Open five file or line references the plan makes, in a
+  worktree at the issue's base commit (`results/<short>-<issue>/base.txt`).
+  3: all real and relevant. 2: one wrong. 1: several wrong. 0: the plan
+  cites nothing checkable, or mostly misses.
+- **Departures caught.** Where the issue's claims do not match the code,
+  did the plan say so and say what it does instead? 3: every departure,
+  including ones you had not noticed. 0: it planned the issue as written
+  where the code says otherwise.
+- **Decisions to overturn.** Count the calls you would reverse before
+  implementing. 3: none. 2: one. 1: two. 0: three or more.
+- **Over-specification.** How much of the plan an implementer would not
+  need: restated code, sections with nothing to say, steps the test
+  suite would force anyway. 3: nothing to cut. 0: half or more.
+- **Hand-off.** Would you give this plan to an implementer as it is?
+  `yes`, `note` (with one line of guidance), `no`.
+- **Notes.** One line: the plan's one best and one worst thing.
+
+After the key is opened, put beside each arm's scores what the run
+measured: plan review rounds and whether the cap was hit (from
+`report.json`), wall time, tokens by model, and for a single session the
+`total_cost_usd` and `duration_ms` in `run.json`. Two repetitions per
+arm: note where they disagree, since that is the consistency result.
+
+Write the result per issue as the table and a paragraph of judgment, not
+an average over two issues.
+
+---
+
+# The reference (owner-checked)
+
+# Reference: Switchboard #230 at 7fe8949
+
+Written from the code at the base commit before any plan was read. It is the grader's yardstick for the five rubric columns, not a plan.
+
+## What the code does
+
+- `serve_remote` (`src/app.rs:3017`) strips `/api/v1/`; any other path is `404 not_found` with `authenticated: false`, decided on the frame. Only `info` and `pair` run before `authenticate` (`app.rs:3127`), which reads `request.bearer` and nothing else.
+- `read_request` (`src/adapters/remote.rs` ~440-515) keeps method, path, query, body, the `Authorization: Bearer` value and the `Sec-WebSocket-Key`; every other header is dropped. `respond` (`remote.rs:531`) writes every reply as `Content-Type: application/json`; `RemoteReply` (`remote.rs:389`) is status, body and `authenticated`. Nothing can serve a page today.
+- Pools: `MAX_UNAUTHENTICATED` 4, `MAX_PAIRED` 12 (`remote.rs:567`); a connection moves pools on its first authenticated reply (`connection`, `remote.rs:770`). Rate windows only on `/pair` and `/info`. Idle timeout 30 s, keep-alive, one request in flight per connection.
+- `remote_subscribe` (`app.rs:2723`) needs a device first, so the socket is authenticated by the bearer header; `respond_upgrade` (`remote.rs:519`) echoes no subprotocol.
+- `remote_pair` (`app.rs:3606`): inside the window, `spki_sha256` must equal the host's, the code is case-insensitive, `device_name` is the body's (64 chars, `new_device` in `src/core/remote.rs`); the reply is `{token, scope, server_id, device_id}`; the host keeps the token's SHA-256 in `devices.json`. The code is single-use, three failures close the window.
+- The pairing window (`src/ui/remote.rs:155-227`) builds `{server_id, spki_sha256, code, addresses: ["ip:port"]}` from `remote::local_address()` (`remote.rs:962`), draws it with the `qrcode` crate and "Copy invite" copies the JSON. `PairingInvite.parse` (`client/Sources/SwitchboardProtocol/Info.swift:114`) decodes JSON only; the CLI takes it as one argument (`switchboard-remote/main.swift:12-13`); the headset pairs from Bonjour and a typed code (`docs/design.md:3562`). `tests/ui.rs:7474` asserts the copied invite parses as that JSON.
+- The certificate (`make_identity`, `remote.rs:95`): P-256, self-signed, no SAN, no EKU, CN `Switchboard <id>`, expiry in 4096. Clients pin the SPKI (`pinned_client`, `remote.rs:168`); the identity model deliberately binds nothing to an address or a validity window (spec §5, §9).
+- Embedding precedent: `include_bytes!` for the icon and fonts (`src/main.rs:167`, `src/ui/theme.rs:203`). `tests/remote.rs` has its own TLS client (`http`, line 245) that reads only the status and `Content-Length`; `pair` (406) and `subscribe_at` (1960) are the helpers. Dev aids: `SWITCHBOARD_REMOTE_PORT`, script lines `pairing <code>` and `remote-listen lan <port>` (`src/script.rs:729-746`, README ~267-280).
+
+## Departures from the issue's framing
+
+1. **The WebSocket will not open from Safari.** WebKit refuses `wss://` to a certificate the user only clicked through, on iPhone, iPad and Apple-silicon Macs, a limitation open since 2011 (WebKit bug 41419; Cockpit documents the same), and today's certificate also fails Apple's rules for a trusted certificate (SAN, `serverAuth` EKU, 825 days). The page therefore loads after the click-through but `/api/v1/events` does not. The issue assumes the socket. A plan must say this and make the page work without it: poll the collections and the open session's content on a short interval, use the socket when it opens (Chrome, Firefox, Android). A plan that ships the socket alone has planned a page that is static on the device it is for.
+2. **"Offer the certificate for download" is not an option with this certificate.** Trusting it on the device needs a reissue with the address as a SAN, the EKU and a short validity, which ties the identity to an address and an expiry the spec avoids, and Safari still refuses `wss://` by Cockpit's report. The choice in the issue collapses: the click-through is the trust step. The key in the URL keeps its value against a relayed code.
+3. **Each file of the page is a connection.** A browser fetches subresources on parallel keep-alive connections that each hold an unauthenticated slot for up to 30 s. The issue frames this as "which pool"; the answer is that the page should be at most two files (HTML and script), and the plan must say what the pool leaves for a second device.
+4. **The device name is the page's to send.** The host drops every header but two, so the "name from the user agent" is the page's script filling `device_name` from `navigator.userAgent`, as every client fills it; no host-side parsing.
+
+## Decisions, with the answer I would take
+
+1. **Trust.** The click-through on the local network is the trust step; the paired-devices dialog and spec §5 say so. No certificate download, no reissue. The page compares the URL's key with `/info` before posting the code.
+2. **Token.** `/pair` sets an `HttpOnly; Secure; SameSite=Strict; Path=/` cookie named with the server id (cookies ignore ports, and two instances on one Mac would otherwise overwrite each other's) when the pair body asks for it; `read_request` fills `bearer` from that cookie when the header is absent, so `authenticate` and every handler are untouched and the native clients keep the header. `SameSite=Strict` is the CSRF defence and the plan must name it; an `Origin` check is fine, a CSRF token is over-specification. `localStorage` for the token is the call I would reverse.
+3. **Live updates.** Poll first, socket second (departure 1). Over the socket the page sends `watch` for the open session's `conversation` or `screen` as §4.4 says, else `changed` never arrives for content; polling refetches the same reads.
+4. **One QR, a URL.** `https://<address>:<port>/?code=…&key=…&id=…`; `addresses` is the authority. "Copy invite" copies the URL; `PairingInvite.parse` accepts the URL and the JSON; the UI test at 7474 changes with it. The page clears the query with `history.replaceState` before any fetch.
+5. **Static paths.** `/` and `/app.js` (CSS inline under a hash or in the HTML), answered on the connection thread as constants with `Content-Type`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and a CSP of `default-src 'none'; script-src 'self'; style-src 'self'` (or the hash) `; connect-src 'self'`. Nothing else outside `/api/v1/` changes. Raising `MAX_UNAUTHENTICATED` to 8 is acceptable; a frame-side route for a constant file is the call I would reverse.
+6. **The page.** `web/` with two files embedded by `include_str!`, plain script, no dependency, no build. First cut as the issue says: projects and their sessions, waiting first, the session's last response or screen, a send box under `control`, scope kept from the pair reply. Tickets, the conversation, drafts and files stay out.
+7. **Tests and docs.** In `tests/remote.rs`: the static paths and their headers (`http` learns to return headers), a pair that sets the cookie, a cookie-authenticated read and refusal after revoke, the embedded page's paths all served; in `tests/ui.rs` the invite as a URL; a Swift test for the URL form of `parse`. Spec §4.3 rows and a §5 paragraph, a dated entry in design.md's remote section, a `web/` row and the dev-aid sentence in the README, CHANGELOG under Unreleased. No new Rust or JS dependency.
+
+## Anchors a grounded plan should cite
+
+`src/app.rs:3017` (`serve_remote`), `3127` (`authenticate`), `3606` (`remote_pair`), `3568` (`remote_info`), `2723` (`remote_subscribe`); `src/adapters/remote.rs:389` (`RemoteReply`), `~440-515` (`read_request`), `531` (`respond`), `567-568` (pools), `770` (`connection`), `95` (`make_identity`), `962` (`local_address`); `src/ui/remote.rs:155-227` (the payload and Copy invite); `src/core/remote.rs` (`new_device`, `device_by_token`); `src/ports/remote.rs:96` (`PairedDevice`); `tests/remote.rs:245` (`http`), `406` (`pair`), `1960` (`subscribe_at`); `tests/ui.rs:7424-7495`; `client/Sources/SwitchboardProtocol/Info.swift:94-116`; `docs/remote-client.md` §4.1, §4.3, §4.4, §5; `docs/design.md:3107` (remote section), `3573` (known gaps); `README.md` ~267-280.
+
+## Errata, after grading
+
+Eleven of the twelve plans found a departure this reference missed: the card's one-line excerpt is not on the wire. `SessionView` (`control/src/lib.rs:637`) has `card`, `waiting` and `waiting_reason` but no `last_message`; the spec's sentence at `docs/remote-client.md:207` describes a field that was never added, and `agent_excerpt` (`src/ui/cards.rs:558`) computes the excerpt UI-side. Decision 6's "as the issue says" therefore asked for a field the page cannot read; a plan that reads `last-response` for the waiting sessions, shows `card` and `waiting_reason`, or defers the excerpt was right to depart, and the Codex grader's "restore the excerpt" reversals should be read with that in mind (no score changed: by its own count every plan kept three or more other reversals). Several plans also found that nothing tells a device its scope after a reload behind a cookie (§5's "answers with the device's scope" is true only of the pair reply), that the invite carries a LAN address while the host listens on loopback, and that the pair reply would carry the token in its body even with a cookie. All verified by the graders; a plan that handled them earned it under departures.
+
+---
+
+# The plan (v4-haiku-a)
+
+# #230: a browser page on the remote port
+
+Checked against the worktree at `7fe8949` (`stage/sb-230-plan-v4-haiku-a`, clean). Every file and line below was read in that tree. Facts are cited by section and item in `inputs/facts.md`: **[S: name]** for a Settled line, **[U n]** for Unresolved item n, **[O X]** for For the owner item X.
+
+## Where this departs from the issue
+
+- **The card excerpt is not on the record.** The issue, and `docs/remote-client.md:207`, call the excerpt `last_message` on the session record. The tree says otherwise. `last_message` is a field of the `Stopped` event (`src/ports/events.rs:24`, built at `src/adapters/hooks.rs:71`), and the core drops it: `src/core/events.rs:132` matches `EventKind::Stopped { pending, .. }`. No record struct carries it, and `SessionView` (`control/src/lib.rs:637`) has no excerpt field. The facts file says it "exists on the session record"; that line is wrong and this plan contradicts it. The plan adds no field. The page fetches `sessions/{id}/last-response` for each Claude session when its `last_stop_at_ms` (`control/src/lib.rs:650`) moves. The headset does the same (`client/Sources/SwitchboardUI/BrowserView.swift:149-163`), so this adds no read model.
+- **The device's scope is on no endpoint.** `remote_info` (`src/app.rs:3568`) is unauthenticated and carries no device scope. The scope arrives only in the `/pair` reply (`src/app.rs:3606`) and then goes stale. The plan adds `GET /api/v1/device`.
+- **"Revoked" cannot be told from "never paired".** `authenticate` (`src/app.rs:3127`) refuses a missing token and an unknown one with the same code, `unauthorized`, and the host keeps no list of revoked tokens. The page says "revoked, or its sign-in has expired: pair again" and claims no more. A distinct code is an owner follow-up.
+- **The page does not keep the token. The browser does, in a cookie.** The issue says the page "keeps the token". Decision 2 keeps it out of page script. This departs from the issue's wording for a security reason.
+- **The certificate, as built, cannot be trusted by a browser.** `make_identity` (`src/adapters/remote.rs:95-127`) puts no subjectAltName in the certificate, a CN only, and rcgen's default validity (`:92`, "never expires in practice"). **[S: Apple's TLS server certificate rules]** says such a certificate meets none of Apple's rules. Decision 1 reissues it.
+- **The code may already be in history.** `replaceState` removes the code from the address bar and the current entry before anything else runs. The issue's claim that it "never stays in the history" goes further than that. The URL may be recorded in history, the tab list or iCloud tab sync before the script runs **[U 6]**. The plan says so in the dialog.
+- **The key in the URL does not stop a relay.** The issue says a genuine page refuses to send the code to a host whose `/info` key differs. That holds. But `docs/remote-client.md:309` says the host "refuses a pairing whose `spki_sha256` is not its own, so a relayed request through a substituted certificate fails even if the code reached it." For a browser that is false. An impostor page is handed the real key and the code in the URL, so it can post both, and the check at `src/app.rs:3636` passes. The spec sentence is amended for browsers.
+- **The events socket is not the default.** The issue has the page open `/api/v1/events` directly. **[S: Safari and wss after a click-through]** says a click-through did not carry `wss` in Safari (WebKit 41419, open), and worked only after the certificate was always-trusted. The default is REST polling. The socket is an enhancement.
+- **Facts correction, not an issue claim.** Facts *Settled, the tree* says `RemoteReply` is built "at about 15 sites in `src/app.rs`". The grep finds 10 literal sites (`RemoteReply {` without `->`). The plan uses 10.
+
+## Decisions
+
+Each decision names its default and why, and says how the default still works if the open question goes the other way.
+
+### 1. Trust in the self-signed certificate
+
+**Pick:** the click-through is the trust step. The host also serves its public certificate at `/host.cer` as the way out if the warning does not carry the page.
+
+- **Why the click-through.** It is per browser and per address, and it is the only trust step the facts describe as working in Safari, for top-level navigation **[S: Safari and wss]**. A profile install is standing trust in this certificate on the device, and its mechanics are open **[U 3]**. The owner would not want a standing trust as the default step.
+- **What it buys:** a device that accepts the warning talks TLS to whatever answers at that address. **What it does not buy:** anything that answers at that address while the window is open can take the code. The window is single-use and closes after five minutes or three wrong codes (`src/core/remote.rs:46-72`). The dialog says: "open this window only where you are."
+- **Why `/host.cer` is built now.** If the click-through does not carry `fetch` on current iOS Safari **[U 1]**, the page cannot work on that device at all. `/host.cer` returns the certificate's DER bytes (`Content-Type: application/x-x509-ca-cert`). It holds no key, and it is the same bytes the host already sends in the handshake. The devices dialog shows its address so the owner can install it as a profile if the warning cannot be accepted. This is the one way out that works whichever way **[U 1]** goes. It is a static path, not a credential.
+- **Reissue is required, not optional.** **[S: Apple's TLS server certificate rules]** requires a DNS name in subjectAltName, `serverAuth`, and at most 825 days of validity. The reissue keeps the key, so the pin stays **[S: the tree, reissue over the same key]**.
+
+### 2. Where the token lives
+
+**Pick:** on `POST /api/v1/pair` with `"browser": true` in the body, the reply sets `__Host-sb-<server_id>=<token>; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=31536000`, and the body carries no token. The page never holds the token. Native clients keep the bearer header.
+
+- **Why a cookie.** A script cannot read an `HttpOnly` cookie. `localStorage` is readable by any script on the origin. The cookie is the safer store, so it is the default.
+- **Why the name carries the server id.** Cookies are scoped by host, not port **[S: Cookies are not isolated by port]**. Two instances on one Mac would otherwise overwrite each other's token.
+- **Why `Max-Age` is one year.** The token does not expire; the owner revokes it. A session cookie would make the phone sign in again each time Safari restarts.
+- **The mechanics are open, so the first test is the cookie.** **[U 5]** asks whether `Secure` stores on an IP host and whether `SameSite=Strict` reaches the socket. The implementer tests the cookie on a phone first, with the cookie-authenticated `fetch`, which is the default path. If the test fails, the page does not ship with the token in script. The fallback is a token in a `Sec-WebSocket-Protocol` value **[O D]**, and it is a follow-up, not a second transport built now. The socket half of **[U 5]** does not gate the default, because the socket is an enhancement.
+- **Origin check (decision for [O origin], answered by default).** A request that carries the cookie and an `Origin` header must have `Origin` equal to `https://<Host>` (case-insensitive). Otherwise it is refused with `403 bad_origin` and counts toward no window. Native clients send no `Origin` and are unaffected. `SameSite=Strict` is the first defence against cross-site requests. The check is the second, and it covers cross-site WebSocket hijacking. A DNS-rebinding page is a different host name, so the browser does not send the cookie to it.
+
+### 3. One QR or two
+
+**Pick:** one URL, in the QR and in the text beside it. The host emits only the URL. `PairingInvite.parse` accepts the URL first and the JSON it accepts today second.
+
+- **Why keep the JSON parse.** Text already copied still pastes. It costs a few lines. Nothing emits JSON.
+- **The URL's host.** `local_address()` (`src/adapters/remote.rs:962`) gives an `IpAddr`. An IPv6 address goes in brackets. **[O B]** and **[U 2]** ask whether an IP in the certificate's SAN works in Safari, and whether `.local` resolves **[U 9]**. The default URL host is the IP. The certificate carries both the IP and the `.local` name (§The record), so if the owner's device test refuses the IP, the URL host switches to the `.local` name. That is a one-line change in `pairing_url`, and the certificate needs no reissue.
+- **The URL's address on the native side.** **[S: `PairingInvite.addresses` is a list]** means the URL parse fills `addresses` with one `host:port`.
+
+### 4. Static paths on the allowlisted port
+
+**Pick:** four paths, `GET` only, matched exactly. The query is ignored and never logged.
+
+| Path | `Content-Type` | Body |
+|---|---|---|
+| `/` | `text/html; charset=utf-8` | `web/index.html` |
+| `/app.js` | `text/javascript; charset=utf-8` | `web/app.js` |
+| `/app.css` | `text/css; charset=utf-8` | `web/app.css` |
+| `/host.cer` | `application/x-x509-ca-cert` | the certificate's DER |
+
+- **Headers on every static response:** `Cache-Control: no-store` (no caching across versions), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` (so the code is never sent in a `Referer` on the page's own requests), and `Connection: close`.
+- **`Content-Security-Policy` on the HTML:** `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`. No inline script, no inline style, no external resource. The page's icon is `<link rel="icon" href="data:,">`, so the browser does not request `/favicon.ico`.
+- **Where they are served.** On the connection thread, in `connection` (`src/adapters/remote.rs:770`), before the `limits.limited` check. They read no core state, so the frame's share is unchanged. The `/host.cer` bytes are set on `Shared` (built in `bind`, `:667`) next to `tls`.
+- **Which pool and window.** The unauthenticated pool, as today (`MAX_UNAUTHENTICATED = 4`, `:567`). `Connection: close` frees the slot as soon as the reply is written, so a page load's three or four requests do not hold slots for the 30 s idle timeout (`:573`). **No rate window.** Static bytes hold nothing secret and reveal nothing `/info` does not, and the pool is the bound on strangers. **[U 8]** asks whether iOS opens more parallel connections than four. The device test answers it. If the test shows drops at accept, a static pool with its own bound is the follow-up. The page is three requests, so the default does not depend on the answer.
+- **The spec's rule.** `docs/remote-client.md:306` says "require pairing before anything but `/info` and `/pair`". It is amended to name the four paths. The reason is the public-bytes argument above, not a loosening of the rule.
+- **What an unpaired page with no code and no marker shows.** "Open Remote devices on the Mac and scan its code, or open the address that window shows." **[O page without code]** is answered by default with this instruction alone. A typed-code form is not built, because a typed code has no URL key to check against.
+
+### 5. Where the page lives and how it is tested
+
+`web/index.html`, `web/app.js` and `web/app.css` are embedded by `include_str!` in a new `src/adapters/remote_web.rs`, which holds the table in §4. The table is a `const` of `(path, content type, body)`. There is no build step and no package manager. The test for the page's references is in `tests/remote.rs`, and the page's logic is tested by hand (§Tests). The issue rules out a JS dependency, so the page's reconcile logic is not in CI. That gap is stated, not hidden.
+
+### 6. The device record
+
+**Pick:** a browser is a `PairedDevice` like any other. Its name is the page's `device_name`, computed from `navigator.userAgent` as "<browser> on <device>" (for example "Safari on iPhone"). `new_device` caps it at 64 characters (`src/core/remote.rs:166-175`). Scope is chosen in the pairing window as today, and the device is listed and revocable in the devices dialog as today. **[O kind]** is answered by default with no `kind` field. The name is enough.
+
+## The record
+
+- **`devices.json`: no change.** It stays a bare `Vec<PairedDevice>` with no version (`src/adapters/remote.rs:80-83`).
+- **`identity.json` (`Identity`, `src/ports/remote.rs:26-42`): two fields.** `cert_names: Vec<String>` (the subjectAltName names as text) and `cert_issued: SystemTime`, both `#[serde(default)]`. `IDENTITY_SCHEMA_VERSION` is bumped from its value at implementation time, plus one. Today it is 1 (`src/ports/remote.rs:17`), so the bump is to 2 unless another ticket lands first. The loader accepts the previous version, and the defaults make an old file reissue on its first bind, because an empty `cert_names` never matches. The implementer checks the version gate in `load_identity` (`src/adapters/remote.rs:74`) and its test (`:980-990`).
+- **Reissue.** `make_identity` (`src/adapters/remote.rs:95`) sets the SANs on the new certificates: `127.0.0.1`, the LAN address from `local_address()`, and the DNS name `<default_server_name()>.local` (`:304`, the name Bonjour publishes at `src/adapters/bonjour.rs:41`). A DNS name rcgen refuses is dropped, and the IP stays. The certificate gets `ServerAuth` as its extended key usage, `digitalSignature` as its key usage, and a validity of 800 days. The new function `remote::reissue_certificate(identity, key_pem, names) -> Result<Identity, String>` sits beside `make_identity`. It loads the key with `KeyPair::from_pem` (the pattern at `:139` and `:146`) and checks the SPKI is still `identity.spki_sha256`. The rcgen 0.14 API for `SanType` and the DNS name type is checked in `~/.cargo/registry` at implementation time, not from memory.
+- **When.** In `bind_remote` (`src/app.rs:2936`), before `tls_config` (`:2957`), and only when the wanted names differ from `cert_names` or the certificate is more than 700 days old. Otherwise nothing is written. A reissue reaches the core as `AppAction::IdentityReissued` and then `Effect::SaveIdentity` (`src/core/action.rs:734`, handled at `src/app.rs:2893`). That keeps the core's copy and the file the same, so a later save cannot write back the old certificate. If reissue fails, the old certificate stays, the port still binds, and a log line records the failure.
+- **Why not on every bind.** A profile installed from `/host.cer` trusts one certificate. A reissue means a reinstall, so the certificate changes only when the names do or it nears expiry.
+- **Not on disk:** the cookie (in the browser), and the page's `localStorage` marker, which holds `{server_id, spki_sha256, device_name}` and no secret.
+- **Schema versions as they are today:** `SCHEMA_VERSION` 16 (`src/core/model.rs:12`) and `VIEWS_SCHEMA_VERSION` 7 (`src/core/model.rs:612`) are unchanged. No `model.rs` type changes.
+
+## Signals
+
+None new. The page reads `changed` and `removed` only when the socket is up, and both already exist. The page keeps the `revision` each reply carries, per resource. It ignores a reply older than the revision it holds, and it refetches everything on a new `epoch` (§4.4).
+
+## Actions and effects
+
+- **`AppAction::IdentityReissued(Identity)`** (new, `src/core/action.rs`). The core ignores it unless `server_id` and `spki_sha256` are unchanged. Otherwise it replaces the identity and emits `Effect::SaveIdentity`.
+- **`remote_pair`** (`src/app.rs:3606`). With `"browser": true`, the body has no `token`, and the reply's headers carry the `Set-Cookie`. The rest is unchanged: the code is single-use, and `AppAction::Paired(device)` is as today.
+- **`authenticate`** (`src/app.rs:3127`). It reads the bearer first. Failing that, it reads the cookie `__Host-sb-<identity.server_id>` through a pure `cookie_value` helper in `src/adapters/remote.rs`. The Origin check runs before either. Refusals keep their codes.
+- **`GET /api/v1/device`** (new arm in `serve_remote`, `src/app.rs:3017`, after `authenticate`). It returns `{device_id, name, scope, server_name}`, read from the authenticated device and the identity. It has no effect.
+- **The static arm** is in `connection`, not on the frame. Its `GET` and exact-path match write the response with `respond_static` and close. The prefix refusal in `serve_remote` (`src/app.rs:3023`) is unchanged for every other path.
+- **`RemoteRequest`** (`src/adapters/remote.rs:360`) gains `host`, `origin` and `cookie`, taken from the `headers` vector `read_request` already builds (`:444`). No test constructs `RemoteRequest` (grep finds none in `tests/`), so only the adapter changes. **[S: RemoteRequest built only in adapters]**.
+- **`RemoteReply`** (`src/adapters/remote.rs:389`) gains `headers: Vec<(String, String)>`. The 10 literal sites in `src/app.rs` take `headers: Vec::new()`. `respond` (`:530`) writes them.
+- **Refusals.** `refuse` (`src/app.rs:3754`) logs method and path and never the query, and that stays true. The new refusal is `403 bad_origin`.
+- **No new `Effect` variant, no new port method.** `SaveIdentity` is the existing effect.
+
+## The page and the native UI
+
+### The page (`web/`)
+
+**Pairing**, in this order:
+
+1. First statement: read `code`, `key` and `id` from `location.search` into locals, then `history.replaceState(null, '', '/')`.
+2. `GET /api/v1/info`. Its `spki_sha256` must equal `key` and its `server_id` must equal `id`. Otherwise show "This is not the host whose code was scanned" and post nothing.
+3. `POST /api/v1/pair` with `{code, spki_sha256: key, device_name, browser: true}`. The page drops `code` from memory after the call.
+4. On success, write the `localStorage` marker, fetch `/api/v1/device`, and show the list.
+5. On refusal, show the host's message (`wrong_code`, `wrong_key`, or the window's closed state). No retry loop.
+
+**Paired use:**
+
+- **Polling is the default.** While the page is visible, every 3 s it reads `/api/v1/device` (scope and name, so a scope change shows within a poll), the projects and each project's sessions, and the open session's view with `last-response` or `screen`. Excerpts are refetched when a Claude session's `last_stop_at_ms` moves.
+- **The socket is an enhancement.** After `hello`, polling slows to 15 s, the page refreshes on `changed`, and it sends `watch` for the open session's one key only. If the socket fails, the page says "live updates unavailable" and goes back to 3 s polling. Nothing requires the socket.
+- **Marker check on load.** If `/api/v1/info`'s `spki_sha256` differs from the marker's, the page shows "identity changed, pair again" and sends nothing else.
+- **Revoked or expired.** Any `401` after a successful pairing stops polling and shows "This browser was revoked, or its sign-in expired. Pair again."
+- **Reply box.** Shown only when `scope` is `control`, and hidden when the session has `trust_question` set or a `prompt_refusal` (`control/src/lib.rs:662` and `:666`). **[O prompt refusal]** is answered by default with hidden. The op id is `crypto.randomUUID()` when `window.isSecureContext`, and otherwise random hex from `crypto.getRandomValues` **[U 4]**. A timed-out send is checked at `/api/v1/ops/{op}` (§4.5).
+- **Order.** Waiting sessions first, each marked, then the rank in §8 by the card word. Grouped by project.
+- **Excerpt.** The first non-empty line of the last response's `final_text`, cut at 120 characters.
+
+### The native UI (`src/ui/remote.rs`)
+
+- **QR** (`:160-166`). The payload becomes `pairing_url(host, port, code, spki_sha256, server_id)`, a pure function in `src/core/remote.rs` so the core test can pin it. The `serde_json::json!` goes.
+- **Copy invite** (`:199-206`) copies that URL, and the text beside the QR shows it too.
+- **Window text.** "Scan with a phone's camera. Its browser will show a certificate warning for this address; accept it. While this window is open, anyone who can answer at this address can take the code, so open it only where you are. The code is single-use, and the window closes after five minutes or three wrong codes. The code may already be in the phone's history; it stops working once the phone pairs."
+- **Devices dialog** (`:230`). Browser devices show by name, with Revoke. A line reads: "A browser keeps the certificate exception it was given. Revoking a device signs its browser out on the next request. If the browser will not load the page after the warning, install the certificate at the address shown here." It shows `https://<address>/host.cer`.
+- **README** (dev aids, lines 271-276). "Copy invite" now copies the URL. `switchboard-remote pair "$(pbpaste)"` still works.
+
+### Swift
+
+- `PairingInvite.parse` (`client/Sources/SwitchboardProtocol/Info.swift:114`) tries the URL first, with `URLComponents`: the `https` scheme, the host and port, and the `code`, `key` and `id` query items. It sets `addresses` to `["host:port"]`. Otherwise it parses the JSON as before.
+- `switchboard-remote`'s usage text (`client/Sources/switchboard-remote/main.swift:12`) names the URL.
+- No view changes, so no fixture changes. `/device` has no Swift decoder in this cut.
+
+## Tests
+
+Tests are listed by file. Nothing is gated on a device run except the manual checklist.
+
+**Core** (`src/core/tests.rs`):
+- `pairing_url` for an IPv4 host and an IPv6 host (bracketed).
+- `IdentityReissued` keeps the id and the SPKI and emits `SaveIdentity`. A reissue with another SPKI is ignored.
+
+**Adapter** (`src/adapters/remote.rs` tests):
+- `cookie_value` finds the named cookie among several.
+- `reissue_certificate` keeps `spki_sha256`, records the names, and yields a TLS config that accepts a pinned handshake.
+- A version-1 identity loads with the defaults.
+
+**Spike** (`spikes/23-browser-page/README.md`, the next free number after `22-remote-port`). CLAUDE.md requires a spike directory before a risky mechanism is built on. The reissue is that mechanism. The spike writes a certificate, checks it with `openssl x509 -noout -text` (SAN with the IP and the DNS name, `serverAuth`, validity of 825 days or less, SPKI unchanged), and records the numbers. The Safari items (**[U 1]**, **[U 5]**, **[U 8]**, **[O A]**, **[O B]**, **[U 6]**) are device checks, and the spike README lists them.
+
+**Integration** (`tests/remote.rs`, a real TLS listener with the pinned rustls client like `http` at `:245`):
+- `the_page_and_its_files_are_served_before_pairing`: `/`, `/app.js`, `/app.css` and `/host.cer` return 200 with their content types, the headers in §4, and `Connection: close`. The CSP string is checked exactly.
+- `the_page_references_only_served_paths`: parse `web/index.html` and `web/app.js` as text. Every `/api/v1/` literal matches an allowed route, every `src` and `href` is a served path, there is no `<script>` without `src`, no `on*=` attribute, and no `http(s)://` outside the host.
+- `the_allowlist_refuses_everything_else_with_no_side_effect` (`:682`) is extended: the four paths answer, `POST /` and `/app.json` are refused.
+- `browser_pairing_sets_a_cookie_and_keeps_the_token_out_of_the_body`: the cookie's name, `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`, and `Max-Age`. The body has no token.
+- `the_cookie_reads_the_device_and_opens_the_socket`: `/api/v1/device` with the cookie returns the scope, and the upgrade with the cookie returns `101` (via `subscribe_at`, `:1960`).
+- `a_cookie_request_from_another_origin_is_refused`: a foreign `Origin` gets `403 bad_origin`. A matching `Origin` and a request with no `Origin` both succeed.
+- `revoking_a_browser_signs_it_out_on_the_next_request`: the cookie gets `401 unauthorized` after `RevokeDevice`, and the socket closes (as `revoke_closes_the_devices_socket`, `:2892`).
+- `the_url_pairs_the_way_the_cli_does`: the pinned client takes the URL's three values, reads `/info`, compares the key, and posts `/pair` without `browser`. It gets the token.
+- `the_pin_survives_a_reissue`: after a reissue at bind, the pinned client still connects.
+- `static_connections_do_not_starve_a_paired_client`: four static connections close after their replies, and a paired subscriber keeps receiving (the pattern at `:3226`).
+- Logging is checked by review, not a test: the static arm has no log call, and `refuse` logs method and path.
+
+**UI** (`tests/ui.rs`): the pairing window's Copy invite dispatches the URL that `pairing_url` builds, and the devices dialog lists a browser device by name with Revoke.
+
+**Swift** (`client/Tests/SwitchboardProtocolTests`): `PairingInvite.parse` on the URL (IPv4, and IPv6 in brackets) and on the old JSON. The URL literal is the same string the Rust test asserts, so drift fails on one side. The Swift tests are not in the pre-commit hook or CI (`docs/design.md`, remote status A2), so they run by hand with `swift test` in `client/`.
+
+**Manual, on a phone** (owner acceptance, recorded in the spike README): the QR opens the page, the warning is accepted, the sessions appear, a session that starts waiting moves to the top within a poll, a reply arrives, revoking the browser produces "revoked" on the next poll, and the items in **[U 1]**, **[U 5]**, **[U 8]**, **[U 6]** and **[O A]**. The page's JS is not in CI.
+
+## Order of work
+
+Each step builds, and the app runs after it. All steps land in the one commit.
+
+1. Spike 23: the reissue and its checks. No app change.
+2. Adapter plumbing: the `RemoteRequest` and `RemoteReply` fields, `respond`'s headers, `cookie_value`, and the Origin check. Behaviour is unchanged.
+3. The static arm and the page's first screen (the scan instruction). The header and reference tests.
+4. The cookie on `/pair` and in `authenticate`, and `/device`. Their tests.
+5. The reissue at bind, `IdentityReissued`, the identity fields and the schema bump. Their tests.
+6. `pairing_url`, the QR, Copy invite, the window and devices text, the Swift parse, and the README dev-aid text.
+7. The page's pairing, list, session, reply and states. Checked by hand on a phone.
+8. Documentation: `docs/remote-client.md` §4.1 (static paths and pools), §4.3 (the four paths, `/device`, `browser` on `/pair`, `bad_origin`, and line 207's excerpt), §5 (the URL, the browser trust step, the relay sentence at `:309`, the cookie, and line 306's list). `docs/design.md`: a bullet at the end of the remote client status (`:3107`, before `## Versioning and updates` at `:3585`). `README.md`: Layout rows for `web/` and `src/adapters/remote_web.rs`, and the remote adapter's row at `:383` (the static arm). `CHANGELOG.md`: a line under Unreleased.
+
+## Owner follow-ups (named, not built)
+
+- **[O A]** After the device test: if `fetch` fails after the click-through, the page's instructions change to the profile install, and the code does not. If `wss` works only with the always-trust, the socket is the enhancement it already is, and the profile route becomes a decision, because it changes §5's trust story.
+- **[O D]** If the cookie fails the device test: a token in a `Sec-WebSocket-Protocol` value. It is a new decision, because the token then sits in script memory.
+- **[U 9] and [O B]**: if the IP is refused and the `.local` name is needed, the URL host switches (a one-line change, §3). If `.local` does not resolve either, the URL carries the IP and the owner reviews the pairing flow.
+- **A static pool**, with its own bound, if the device test shows drops at accept.
+- **A distinct `device_revoked` code** (additive), if the owner wants the host to name revocation.
+- **A `kind` on the device record**, if the owner wants browser and native devices told apart in the dialog.
+- **An excerpt on `SessionView`**, which needs the Stop message stored on the record (a record change and a `SCHEMA_VERSION` bump), if the per-session `last-response` polling is too heavy.
+- **Profile reinstall on reissue**: a certificate installed as a profile needs reinstalling when its names change. If the address changes often, the owner decides between a stable `.local` URL and reinstalls.
+- **A Host allowlist** beyond the Origin check, if the owner wants one.
+
+## Contract additions
+
+- `src/core/action.rs`: `AppAction::IdentityReissued(Identity)`.
+- `src/ports/remote.rs`: `Identity` gains `cert_names: Vec<String>` and `cert_issued: SystemTime`, both `#[serde(default)]`. `IDENTITY_SCHEMA_VERSION` is bumped from its value at implementation time plus one (1 today, at `:17`).
+- `src/adapters/remote.rs`: `RemoteRequest` gains `host: Option<String>`, `origin: Option<String>`, `cookie: Option<String>`. `RemoteReply` gains `headers: Vec<(String, String)>`.
+- `src/core/remote.rs`: `pairing_url(host, port, code, spki_sha256, server_id) -> String`.
+- `src/adapters/remote.rs`: `reissue_certificate(identity, key_pem, names) -> Result<Identity, String>`, `cookie_value(...)`, `respond_static(...)`.
+- Endpoint `GET /api/v1/device` (authenticated), body `{device_id, name, scope, server_name}`.
+- Endpoint `POST /api/v1/pair`: optional body field `browser` (bool, default false). With `true`, the reply sets the cookie and omits the token.
+- Static paths `GET /`, `/app.js`, `/app.css`, `/host.cer` (unauthenticated).
+- Cookie `__Host-sb-<server_id>`, carrying the bearer token.
+- Refusal `403 bad_origin`.
+- Pairing URL `https://<host>:<port>/?code=<code>&key=<spki_sha256>&id=<server_id>`, accepted by `PairingInvite.parse`.
+- Not changed: `SCHEMA_VERSION` 16 (`src/core/model.rs:12`), `VIEWS_SCHEMA_VERSION` 7 (`:612`), `devices.json` (no version, no new field).
+
+## Commit message
+
+```
+Serve a browser page from the remote port and pair it from a URL
+```
+
+---
+
+# The facts file the planner was given
+
+The plan may cite this file as facts.md or facts:<line>; such a citation is checked against this text, not the tree. It was written by an earlier stage of the same process, not by the owner, so it is not the reference and may itself be wrong.
+
+     1	# Facts for #230 (web control surface)
+     2	
+     3	No spike was run: every open question needing a browser or iPhone is not runnable here, and none of the rest needs an experiment. `git status` is clean.
+     4	
+     5	## Settled
+     6	
+     7	### The tree
+     8	
+     9	- A leaked pairing code is short-lived: the window closes on the first successful pairing, after 3 wrong codes, or at 5 minutes. `src/core/remote.rs:46-72` (`Paired` clears `pairing`, "single-use").
+    10	- `RemoteRequest` is built only inside `src/adapters/remote.rs` (definition `:360`); no test in `tests/` constructs it. Adding `cookie`, `origin` and `user_agent` fields touches the adapter alone. Grep: `RemoteRequest\b` over `src tests`.
+    11	- `RemoteReply { status, body, authenticated }` is built literally at about 15 sites in `src/app.rs` (e.g. `:1664`, `:2365`, `:2754`, `:3570`, `:3723`, `:3736`, `:3767`) and not in `tests/`. A header field on it needs a `Default` or a constructor, or every site changes.
+    12	- `RemoteRequest` and `RemoteReply` live in `adapters/`, not `ports/` or `model.rs`, so CLAUDE.md's additivity rule for the shared contract does not name them. `src/adapters/remote.rs:355-393`.
+    13	- `last_message` exists on the session record: the hook binary writes it from `last_assistant_message` (`src/bin/switchboard-hook.rs:37`) and `src/core/tests.rs:1717` constructs records with `last_message: None`. It is not on the wire: no match in `control/` or `client/Sources`. Adding it to `SessionView` is a new field there.
+    14	- The certificate can be reissued over the same key. `rcgen::KeyPair::from_pem` is already used at `src/adapters/remote.rs:139,146`, the SPKI hash is of the key (`:107`), and `make_identity` (`:95-127`) is the only path that makes a new key. A reissue keeps `spki_sha256`.
+    15	- `PairingInvite` is used by `ConnectionManager.swift`, `BrowserView.swift`, `switchboard-remote/main.swift` and eight test files under `client/Tests`. `addresses` is read as a list at `ConnectionManager.swift:483` and built as a one-element list at `main.swift:120`. A URL parser can fill `addresses` with the one host:port.
+    16	
+    17	### Outside the tree
+    18	
+    19	- **Apple's TLS server certificate rules.** SHA-2 signature, RSA at least 2048 bits, the server's DNS name in subjectAltName (CommonName not trusted), and for certificates issued after 1 July 2019 an EKU of `serverAuth` and a validity of at most 825 days. Non-compliant connections fail and "websites [may] not load in Safari". Evidence: https://support.apple.com/103769 (iOS 13 / macOS 10.15; Citrix says iOS 14 / macOS 11 also). The page does not mention IP-address SANs, user-added roots, or exemptions. The current certificate has no SAN, a CN only, and a not-after of year 4096 (`src/adapters/remote.rs:95-127`), so it meets none of the SAN, EKU or validity rules.
+    20	- **Safari and `wss://` after a click-through.** The behaviour exists and is unfixed: WebKit bug 41419 ("allow wss:// if user has accepted https:// warning") is open, status NEW, last modified 2026-01-12, and the reporter got `wss` working only after marking the certificate always-trusted (https://bugs.webkit.org/show_bug.cgi?id=41419). code-server's iPad doc agrees: Safari "will prevent WebSocket connections unless the certificate is installed as a profile", needs a domain name rather than a bare IP, and needs a SAN matching the host (https://github.com/cdr/code-server/blob/v3.7.0/doc/ipad.md). Two sources agree; they cover Safari up to 2026-01. One more report is mixed: on iOS 26 beta 3, `wss` failed after acceptance and the poster said it was resolved in beta 5 (https://developer.apple.com/forums/thread/792842). That is a forum post, a lead only.
+    21	  - Queries: "Safari iOS WebSocket wss self-signed certificate accepted exception fails fetch works"; "iOS Safari self-signed certificate no subjectAltName IP address proceed certificate warning".
+    22	- **Secure contexts.** `crypto.randomUUID()` is available only in secure contexts (https://developer.mozilla.org/en-US/docs/Web/API/Crypto/randomUUID). The spec decides trustworthiness by the origin's scheme: `https` and `wss` are "Potentially Trustworthy", with no mention of certificate errors (https://w3c.github.io/webappsec-secure-contexts/ §3.1; MDN Secure_Contexts agrees). By the text, an https page on a click-through certificate is a secure context. Whether browsers also treat it so is not stated, and it is under Unresolved.
+    23	- **Cookies are not isolated by port.** RFC 6265 says so, quoted on https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Cookies. `Secure` cookies are sent only over HTTPS. `localStorage` is per origin including port (MDN, general). This confirms the notes' cross-port claim.
+    24	- **WebSocket subprotocol (RFC 6455 §4.1, §4.2.2, https://www.rfc-editor.org/rfc/rfc6455).**
+    25	  - The client must fail if the 101 names a subprotocol it did not offer.
+    26	  - The server's reply is one `token`, and an empty value is illegal.
+    27	  - Offered values are `token`s, so base64url without padding is legal. Base64 `=` is not a token character (a separator).
+    28	  - Whether the client must fail when the server returns none is not normative: §4.2.2 says the server sends none when it agrees to none, and §1.9 (non-normative) says it must include it.
+    29	  - Browsers must send `Origin` on the handshake. A server may validate it, and rejects with 403. "If the server does not validate the origin, it will accept connections from anywhere."
+    30	  - The tree's `respond_upgrade` (`src/adapters/remote.rs:519-527`) echoes no subprotocol.
+    31	- **`history.replaceState` replaces the current entry**; Back then shows the new URL and bypasses the old one (https://developer.mozilla.org/en-US/docs/Web/API/History/replaceState). It says nothing about what the browser recorded before the script ran.
+    32	  - Query: "MDN history.replaceState".
+    33	
+    34	## Unresolved
+    35	
+    36	Each line ends with what the plan builds to. The plan never waits on a line here.
+    37	
+    38	1. **Does a click-through exception cover `wss://` and `fetch` on current iOS Safari, with this no-SAN certificate on a bare IP?**
+    39	   - Tried: the queries above, plus "Safari remember certificate exception visit this website how long self-signed iOS per session". The only evidence is old (2010 bug, iOS 7 and 13 era), the code-server doc (v3.7, 2021), and the one iOS 26 beta post. Nothing current and primary exists.
+    40	   - Favourable: the page may use the events socket directly. Unfavourable, and the plan must do this anyway: the page works with REST polling alone (poll `changed`-equivalent reads on a timer) and treats the socket as an upgrade it may lose, saying "live updates unavailable" rather than failing.
+    41	   - Reissuing the certificate with a SAN, `serverAuth` and a bounded validity over the same key is cheap and helps in both cases (Apple's page; the code-server doc).
+    42	2. **Does a SAN with an IP address, rather than a DNS name, satisfy Safari and Chrome?** The Apple page speaks only of DNS names. Queries: as in 1, plus "iOS Safari self-signed certificate no subjectAltName IP address". No primary source found.
+    43	   - Favourable: put the LAN IP in the SAN. Unfavourable: the page's URL host must be a `.local` name. Either way the plan reissues with the `.local` hostname as a DNS SAN as well.
+    44	3. **Does Apple's 825-day rule apply to a manually trusted self-signed leaf?** The page lists no exemption and no scope. Build to a validity of 825 days or fewer and say in the dialog that the certificate is renewed (the key, and so the pin, is unchanged). If it does not apply, nothing is lost.
+    45	4. **Does a click-through certificate give a secure context in Safari, Chrome and Firefox?** The spec reads yes by scheme, but I found no browser documentation on certificate-error overrides. The plan uses `crypto.randomUUID` only when `window.isSecureContext`, with a fallback id generator built on `getRandomValues`, and does not rely on `Secure` cookies being stored without a manual test (see item 5).
+    46	5. **Are `SameSite=Strict` cookies sent on a same-origin `new WebSocket()` handshake, and do `Secure` cookies work on an IP host, in Safari, Chrome and Firefox?** Query: "SameSite=Strict cookie sent on same-origin WebSocket handshake; Secure cookie IP address host Safari Chrome Firefox". Results were blogs and a Chromium design thread (WebSocket requests carry cookies; `wss` counts as the same scheme as `https`): leads, not evidence. Plan to either transport behind one server-side reader that accepts the bearer header, the cookie and the subprotocol token, and let the first manual run pick the page's transport.
+    47	6. **Is the code-bearing URL recorded in history, tab list or iCloud tab sync before `replaceState` runs?** No source. The plan assumes yes: the code is single-use and the window is 5 minutes or 3 failures (settled above), so a recorded URL is dead once pairing succeeds. The plan says that in the dialog and keeps the query out of server logs (`refuse`, `src/app.rs:3754`, logs path only).
+    48	7. **Per-site exception lifetime across launches, and loss when the IP changes.** Query: "Safari remember certificate exception ... how long". Only a 2013 blog (iOS 7: exception not removable). Plan: an address change means another warning, and the page and dialog say so. A `.local` name or a reissue never makes it worse.
+    49	8. **Pool of 4 under a real page load (iOS Safari parallel connections, keep-alive, `/favicon.ico`).** No source for the connection count; it needs a device. Plan: answer static paths on the connection thread with `Connection: close`, serve the page as few files as possible (HTML plus one script and one stylesheet, inlined where possible by the CSP), and give static paths their own bound so a page load cannot starve `/pair`.
+    50	9. **Bonjour `.local` resolution from iOS Safari.** No query run, so no evidence. Plan: the URL carries the IP from `local_address()` and the `.local` name only if the owner answers item B below.
+    51	
+    52	## For the owner
+    53	
+    54	A. **On a real iPhone/iPad, after accepting the warning, does the page load, do `fetch` calls work, and does `new WebSocket("wss://…")` connect, with the current certificate and with the reissued one?** Ask with the page as built. Favourable branch: use the socket. Unfavourable: ship polling. The plan builds the polling path regardless.
+    55	B. **Does `https://<mac-name>.local:<port>/` resolve from the owner's phone?** Favourable: reissue with that DNS SAN and put it in the URL. Unfavourable: the IP stays the URL host. Reissuing with both works either way.
+    56	C. **Does the owner's phone camera open the URL straight into Safari, and does the tab appear in iCloud tab sync or history before the page script runs?** Either branch: the code is single-use and expires, so the plan holds.
+    57	D. **Does a cookie, or a subprotocol token, work in Safari with the owner's certificate (items 5, 1)?** Favourable: use the one that works, the cookie preferred for the token never being readable by script. Unfavourable: use the other; the server accepts all three transports regardless.

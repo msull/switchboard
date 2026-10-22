@@ -292,3 +292,24 @@ the step ran. Costs are list price from the runs' own reports.
   an errata note weighing that bug; the owner's call.
 - Revision 4 planner, four runs from the revision 3 sonnet-b facts
   file, launched for comparison with the four revision 3 plans.
+
+## 2026-10-22: revision 4's plans
+
+- Four plans from the revision 3 sonnet-b facts file under the
+  revision 4 planner (sonnet $0.94 and $1.17; haiku $0.38 and $0.38;
+  4405 to 4909 words, up from 3481 to 4181 under revision 3).
+- The credential rule held in all four: the token lives in an
+  HttpOnly; Secure; SameSite=Strict cookie named by server id, no
+  localStorage, and no second transport built; sonnet-b and haiku-b
+  say in so many words that none is added. All four stay poll-first.
+- The certificate reissue stayed in all four. The planners do not read
+  it as changing a spec decision: they read the facts file's Apple
+  rules as "the certificate as built cannot be trusted by a browser"
+  and the reissue over the same key as the default that works either
+  way, with the SPKI pin unchanged. Whether that is over-building (the
+  reference's view) or the identity model kept with a renewed
+  certificate is a judgment for the owner, and the guidance should not
+  be tuned further toward the reference on it until the owner says.
+- Graded by both graders, and the revision 4 review round run on the
+  sonnet-b plan with sonnet twice and opus once, for comparison with
+  revision 3's.
