@@ -22405,3 +22405,39 @@ fn report_refresh_fills_a_ticket_without_refs_and_the_report_carries_tokens() {
     assert_eq!(json["usage"][1]["sessions"][0]["kind_from_pipeline"], true);
     assert_eq!(json["usage"][1]["sessions"][0]["source"], "not-found");
 }
+
+/// The same issue is one ticket per project: a second project on the
+/// same repository takes it too, and the first refuses a second take
+/// while its ticket is open.
+#[test]
+fn an_issue_is_taken_once_per_project() {
+    let mut env = Env::new();
+    let first = env.take(7);
+    let trial = pipeline(&env.worktrees).replace("name = \"Switchboard\"", "name = \"Trial\"");
+    std::fs::write(env.data.pipeline("Trial"), &trial).unwrap();
+    let snapshot = || SourceSnapshot {
+        kind: "github".into(),
+        identity: "msull/switchboard#7".into(),
+        number: Some(7),
+        title: "Issue 7: escape leaves the field".into(),
+        body: String::new(),
+        url: None,
+        labels: vec!["dispatch".into()],
+        taken_at_ms: env.now,
+        taken_by: None,
+        pull_requests: Vec::new(),
+    };
+    let second = env
+        .runner
+        .take("Trial", &trial, snapshot(), env.now)
+        .unwrap();
+    assert_ne!(first.id, second.id);
+    assert_eq!(second.project, "Trial");
+    let text = pipeline(&env.worktrees);
+    let err = env
+        .runner
+        .take(PROJECT, &text, snapshot(), env.now)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("is already ticket"), "{err}");
+}
