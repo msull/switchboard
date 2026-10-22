@@ -372,3 +372,6 @@ the step ran. Costs are list price from the runs' own reports.
 - Spend at the end of the stage-level phase: $35.94 of $50. The
   remainder is held for grading the reassembled pipeline's six plans
   when the trial Mac returns them.
+- The owner added two scenarios to the revision 5 set: opus throughout
+  and fable throughout, the latter to see how the strongest model
+  handles each stage. Ten sbf5 arms in all.

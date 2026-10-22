@@ -263,13 +263,15 @@ The stage-level runs (next section, and `results/JOURNAL.md`) produced
 revision 4's planner and reviewer, and one reviewer sentence from
 revision 5. It runs as a second set of arms, `sbf5-<scenario>-<a|b>`,
 with results under `results/sb-230/facts5/`, three scenarios chosen
-from what the isolated runs showed:
+from what the isolated runs showed and two the owner added:
 
 | scenario | investigate | facts | plan | review | why |
 |---|---|---|---|---|---|
 | `lean` | haiku | sonnet | sonnet | sonnet | sonnet is four of four on the central fact where haiku is three of four, and the sonnet planner got the only hand-off of note; haiku reads the tree as well as anything |
 | `sonnet` | sonnet | sonnet | sonnet | sonnet | the all-sonnet baseline the lean arm is measured against |
 | `checked` | sonnet | sonnet | sonnet | opus | the opus reviewer searched in every isolated run where sonnet searched in one of four, and found more |
+| `opus` | opus | opus | opus | opus | the ceiling at the model the first trial spent most on |
+| `fable` | fable | fable | fable | fable | the owner's look at how the strongest model handles each stage; the only fable pipeline arm in the trial |
 
 On the trial Mac:
 
@@ -277,7 +279,7 @@ On the trial Mac:
 ./make-arms.sh                               # the six sbf5-* files beside the rest
 ./take.sh switchboard 230 facts5             # all three scenarios; a later batch names its scenarios
 ./collect.sh switchboard 230 facts5          # when all six wait at finalize
-./blind.sh switchboard 230 facts5            # W to Z, then AA and AB: the trial outgrew the alphabet
+./blind.sh switchboard 230 facts5            # W to Z, then AA onward: the trial outgrew the alphabet
 ```
 
 then commit `results/` and push as before. `grade-all.sh` now grades

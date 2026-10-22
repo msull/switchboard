@@ -41,12 +41,16 @@ facts_models() {
 # runs argued for: lean (haiku reads, sonnet checks and writes), sonnet
 # throughout, and checked (sonnet with the opus reviewer, which searched
 # in every isolated run where sonnet did not).
-FACTS5_SCENARIOS="lean sonnet checked"
+# opus and fable throughout are the owner's two additions: the ceiling,
+# and a look at how the strongest model handles each stage.
+FACTS5_SCENARIOS="lean sonnet checked opus fable"
 facts5_models() {
   case $1 in
     lean)    echo "haiku sonnet sonnet sonnet" ;;
     sonnet)  echo "sonnet sonnet sonnet sonnet" ;;
     checked) echo "sonnet sonnet sonnet opus" ;;
+    opus)    echo "opus opus opus opus" ;;
+    fable)   echo "fable fable fable fable" ;;
     *) echo "unknown scenario $1 ($FACTS5_SCENARIOS)" >&2; exit 2 ;;
   esac
 }
