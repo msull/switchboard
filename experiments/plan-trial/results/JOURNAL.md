@@ -260,3 +260,35 @@ the step ran. Costs are list price from the runs' own reports.
   three times the cost. Worth a second look once revision 4 runs.
 - A first attempt at these runs launched nothing: a zsh loop did not
   split its model and repetition pairs. No cost.
+
+## 2026-10-22: does a better facts file make a better plan? ($23.88 of $50)
+
+- The revision 3 planner on sonnet, held fixed, five times from each
+  of two revision 2 haiku facts files: haiku-a, which never found the
+  WebKit bug and wrote no build line, and haiku-b, which filed it as
+  settled and also found the SameSite cookie bugs
+  (`results/sb-230/stages/plan/v3fa-*` and `v3fb-*`; $0.67 to $1.27 a
+  plan, 3134 to 4123 words).
+- From the file that missed the fact: zero of five plans are
+  poll-first. All five open the socket and wait for hello as §4.4
+  says; three add a polling fallback for a refused socket, two have no
+  polling at all. None cites the WebKit bug.
+- From the file that found it: four of five are poll-first with the
+  socket as the enhancement, and the fifth opens the socket and falls
+  to polling after five seconds. Four of five cite the bug and four
+  carry the SameSite finding, which every one used to argue for the
+  subprotocol token over the cookie.
+- So the facts file drives the plan: the planner does not hedge on
+  its own, and one settled line in the file is the difference between
+  a page that works on the phone and one that does not. A second facts
+  finder or a rectifier is therefore worth exactly what it adds to
+  recall. With sonnet four of four on revision 3 that is little; with
+  haiku three of four it is one plan in four. The cheap rectifier is
+  running the facts stage on sonnet.
+- A true finding that cuts against the reference: the SameSite cookie
+  bugs in restored Safari tabs are real, and four plans took them as a
+  reason to keep the token out of a cookie, which the reference calls
+  the decision to reverse. The reference's cookie decision may deserve
+  an errata note weighing that bug; the owner's call.
+- Revision 4 planner, four runs from the revision 3 sonnet-b facts
+  file, launched for comparison with the four revision 3 plans.
