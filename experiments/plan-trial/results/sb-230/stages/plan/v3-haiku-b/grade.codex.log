@@ -1,0 +1,770 @@
+2026-10-22T22:29:32.170098Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out
+2026-10-22T22:29:32.201085Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out
+OpenAI Codex v0.160.0
+--------
+workdir: /Users/sully/code_repos/plan-trial/sb-230-base
+model: gpt-6-astra
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: medium
+reasoning summaries: none
+session id: 01a165bb-c618-7ca1-9cc3-590f640047d4
+--------
+user
+You are scoring one implementation plan for a GitHub issue, blind: you do not know who or what wrote it, and you score this plan on its own.
+The repository at the issue's base commit is checked out at /Users/sully/code_repos/plan-trial/sb-230-base (read-only; change nothing there). Every file path in the plan is relative to that tree.
+
+Score by the rubric, column by column. Length is not thoroughness. For grounding, take the first five distinct file or line references the plan makes, in order of appearance, open each in the tree, and say what you found. For departures and decisions, use the reference as the yardstick; where you disagree with the reference, say so in the evidence rather than silently scoring your own view.
+
+Your final message must be exactly this shape and nothing else:
+
+```
+| plan | grounding | departures caught | decisions to overturn | over-specification | hand-off |
+|---|---|---|---|---|---|
+| v3-haiku-b | <0-3> | <0-3> | <0-3> | <0-3> | <yes|note|no> |
+```
+
+## Grounding
+- <ref 1 as the plan wrote it>: found / wrong (<what is there>)
+- ... five rows
+## Departures caught
+- <each departure in the reference>: caught / missed / caught with a wrong fix
+- <any departure the plan found that the reference lacks>
+## Decisions to overturn
+- <each call you would reverse, with the reference decision it conflicts with>; or none
+## Over-specification
+- <what an implementer would not need, and roughly what fraction of the plan it is>
+## Hand-off
+- <the one line of guidance if note; why not if no>
+## Notes
+- best: <one line>
+- worst: <one line>
+
+---
+
+# The issue
+
+# A web control surface: the remote port serves a browser page, paired from a URL that carries the code
+
+## What I want
+
+A second control surface beside the headset app: a page the host serves itself, opened in any browser on the local network (a phone, an iPad, another Mac), that lists the sessions with the waiting ones marked, shows a session's last response or screen, and sends a reply. It runs over the remote port that already exists. Nothing to install on the device, no App Store, no Xcode.
+
+## What exists
+
+- The remote port (`docs/remote-client.md`; `src/adapters/remote.rs`; `serve_remote` in `src/app.rs`): TLS with a per-installation self-signed certificate, pairing by a code with a pinned key, bearer tokens, the `/api/v1/*` read and control endpoints, the `/api/v1/events` WebSocket with the revision counter and `changed` events, redaction before every cut. Any path outside `/api/v1/` is refused.
+- The pairing window (`src/ui/remote.rs`): a QR carrying `{server_id, spki_sha256, code, addresses}` as JSON, the same in text beside it, open for five minutes or three wrong codes. The headset pairs from the Bonjour record and a typed code; the command-line `switchboard-remote pair` takes the QR's text as one argument.
+- Three speakers of the protocol already: the visionOS app, `switchboard-remote`, and the fixtures shared by `tests/remote.rs` and the Swift tests.
+
+## The shape
+
+- **The host serves the page from the same port.** `GET /` and the page's few files answer with HTML, CSS and JS embedded in the binary at compile time (`include_str!`), so there is no build step, no bundler and no package manager. Same origin as the API: the page calls `/api/v1/...` and opens `/api/v1/events` directly.
+- **The page speaks the protocol the headset speaks.** REST for reads and commands, the events socket for live changes, replies applied by revision the way §4.4 says. No new read model unless the page cannot do without one.
+- **Pairing from a URL.** The pairing window's QR becomes a URL, `https://<address>:<port>/?code=<code>&key=<spki_sha256>&id=<server_id>`, so a phone's camera opens it in the browser. The page reads the query, removes it from the address bar with `history.replaceState` before anything else happens, compares the key in the URL with the one `/info` presents, posts `/api/v1/pair` only when they match, keeps the token, and shows the sessions. The code never stays in the address bar or the history. The native text path (`switchboard-remote pair`, the headset's paste) takes the URL too, or the JSON as before.
+- **The first cut of the page.** Sessions grouped by project, waiting ones first and marked, each with its kind, state and the one-line excerpt the card shows; a session view with the last response for a Claude Code session or the screen for anything else, refreshed on `changed`; a reply box that posts `send` when the device has `control` scope and is hidden otherwise; the device's scope and host name in the header; "identity changed, pair again" and "revoked" states said plainly.
+
+## Decisions the plan must settle
+
+1. **Browser trust in the self-signed certificate.** The native client pins the SPKI; a browser cannot. The first visit shows a certificate warning the owner clicks through, and the browser then trusts that certificate for that address. The plan says what this buys and what it does not: the `key` in the URL lets a genuine page refuse to send the code to a host whose `/info` key differs, but a page served by an impostor is not a genuine page. Either the click-through on the local network is the trust step, said in the paired-devices dialog, or the host offers its certificate for download so the owner can trust it on the device first. Pick one, say why, and keep §5's rule that no non-loopback bind serves anything but `/info`, `/pair` and now the page itself before pairing.
+2. **How the token reaches the WebSocket.** A browser cannot set a header on `new WebSocket()`, and the spec forbids the token in a URL. Candidates: the `/pair` reply sets an `HttpOnly; Secure; SameSite=Strict` cookie that `fetch` and the WebSocket both carry and the page's script never sees, or the token travels as a `Sec-WebSocket-Protocol` value. The host keeps accepting the bearer header for the native clients. The choice also decides where the token lives on the device; `localStorage` is readable by any script on the origin, a cookie is not.
+3. **One QR or two.** One URL read by the browser and by the native text path is the preference; the headset has no camera and the CLI parses text, so the JSON form can be kept only if something still needs it.
+4. **Static paths on a port whose allowlist is `/api/v1/*`.** The exact set of paths, their `Content-Type`, a `Content-Security-Policy` with no inline script and no external resource, no caching across versions, which pool and rate window an unpaired browser's page load counts against (§4.1 allows four unauthenticated connections), and what the page shows when opened without a code and without a token.
+5. **Where the page lives and how it is tested.** `web/` embedded at compile time; a test in `tests/remote.rs` that the embedded page references only paths the host serves and that the new paths answer with the headers the plan names; the pairing flow tested end to end with the host's own HTTP client as the CLI does, since no UI test drives a browser; the fixture set extended if a view changes.
+6. **The device record.** A browser is a paired device like any other: a name from the user agent (`Safari on iPhone`), scope chosen in the pairing window as today, listed and revocable in the paired-devices dialog.
+
+## Not in this cut
+
+- Dispatch tickets and decisions on the page (the API serves them; a later issue).
+- The conversation beyond the last response, drafts, dictation, runs and pinned files (the API serves them; later).
+- Anything beyond the local network: no relay, no tunnel; §9 of the spec stands.
+- A framework, a build step or a dependency for the page.
+
+## Where to look
+
+- `docs/remote-client.md` §4.1 (bounds), §4.3 (endpoints), §5 (pairing): the plan amends the spec and the remote status section of `docs/design.md`.
+- `src/adapters/remote.rs`: `connection`, `read_request`, the pools and the rate windows.
+- `src/app.rs` `serve_remote`: the `/api/v1/` prefix match and the allowlist.
+- `src/ui/remote.rs`: the pairing window and its QR payload; `src/core/remote.rs` the pairing state.
+- `client/Sources/switchboard-remote/main.swift` and `client/Sources/SwitchboardProtocol/Info.swift`: the text pairing path that has to keep working.
+
+## Acceptance
+
+Open the pairing window, scan the QR with a phone, accept the certificate warning, see the sessions; a session that starts waiting moves to the top without a reload; send a reply from the phone and watch it arrive; revoke the phone in the dialog and the page says so on its next request.
+
+
+---
+
+# The rubric
+
+# Scoring a plan
+
+Score blind: the twelve plans of an issue as A to L, with the key closed
+until every row is filled. Length reads as thoroughness, so score each
+column on its own and never the whole impression.
+
+Each column is 0 to 3 except the last.
+
+- **Grounding.** Open five file or line references the plan makes, in a
+  worktree at the issue's base commit (`results/<short>-<issue>/base.txt`).
+  3: all real and relevant. 2: one wrong. 1: several wrong. 0: the plan
+  cites nothing checkable, or mostly misses.
+- **Departures caught.** Where the issue's claims do not match the code,
+  did the plan say so and say what it does instead? 3: every departure,
+  including ones you had not noticed. 0: it planned the issue as written
+  where the code says otherwise.
+- **Decisions to overturn.** Count the calls you would reverse before
+  implementing. 3: none. 2: one. 1: two. 0: three or more.
+- **Over-specification.** How much of the plan an implementer would not
+  need: restated code, sections with nothing to say, steps the test
+  suite would force anyway. 3: nothing to cut. 0: half or more.
+- **Hand-off.** Would you give this plan to an implementer as it is?
+  `yes`, `note` (with one line of guidance), `no`.
+- **Notes.** One line: the plan's one best and one worst thing.
+
+After the key is opened, put beside each arm's scores what the run
+measured: plan review rounds and whether the cap was hit (from
+`report.json`), wall time, tokens by model, and for a single session the
+`total_cost_usd` and `duration_ms` in `run.json`. Two repetitions per
+arm: note where they disagree, since that is the consistency result.
+
+Write the result per issue as the table and a paragraph of judgment, not
+an average over two issues.
+
+---
+
+# The reference (owner-checked)
+
+# Reference: Switchboard #230 at 7fe8949
+
+Written from the code at the base commit before any plan was read. It is the grader's yardstick for the five rubric columns, not a plan.
+
+## What the code does
+
+- `serve_remote` (`src/app.rs:3017`) strips `/api/v1/`; any other path is `404 not_found` with `authenticated: false`, decided on the frame. Only `info` and `pair` run before `authenticate` (`app.rs:3127`), which reads `request.bearer` and nothing else.
+- `read_request` (`src/adapters/remote.rs` ~440-515) keeps method, path, query, body, the `Authorization: Bearer` value and the `Sec-WebSocket-Key`; every other header is dropped. `respond` (`remote.rs:531`) writes every reply as `Content-Type: application/json`; `RemoteReply` (`remote.rs:389`) is status, body and `authenticated`. Nothing can serve a page today.
+- Pools: `MAX_UNAUTHENTICATED` 4, `MAX_PAIRED` 12 (`remote.rs:567`); a connection moves pools on its first authenticated reply (`connection`, `remote.rs:770`). Rate windows only on `/pair` and `/info`. Idle timeout 30 s, keep-alive, one request in flight per connection.
+- `remote_subscribe` (`app.rs:2723`) needs a device first, so the socket is authenticated by the bearer header; `respond_upgrade` (`remote.rs:519`) echoes no subprotocol.
+- `remote_pair` (`app.rs:3606`): inside the window, `spki_sha256` must equal the host's, the code is case-insensitive, `device_name` is the body's (64 chars, `new_device` in `src/core/remote.rs`); the reply is `{token, scope, server_id, device_id}`; the host keeps the token's SHA-256 in `devices.json`. The code is single-use, three failures close the window.
+- The pairing window (`src/ui/remote.rs:155-227`) builds `{server_id, spki_sha256, code, addresses: ["ip:port"]}` from `remote::local_address()` (`remote.rs:962`), draws it with the `qrcode` crate and "Copy invite" copies the JSON. `PairingInvite.parse` (`client/Sources/SwitchboardProtocol/Info.swift:114`) decodes JSON only; the CLI takes it as one argument (`switchboard-remote/main.swift:12-13`); the headset pairs from Bonjour and a typed code (`docs/design.md:3562`). `tests/ui.rs:7474` asserts the copied invite parses as that JSON.
+- The certificate (`make_identity`, `remote.rs:95`): P-256, self-signed, no SAN, no EKU, CN `Switchboard <id>`, expiry in 4096. Clients pin the SPKI (`pinned_client`, `remote.rs:168`); the identity model deliberately binds nothing to an address or a validity window (spec §5, §9).
+- Embedding precedent: `include_bytes!` for the icon and fonts (`src/main.rs:167`, `src/ui/theme.rs:203`). `tests/remote.rs` has its own TLS client (`http`, line 245) that reads only the status and `Content-Length`; `pair` (406) and `subscribe_at` (1960) are the helpers. Dev aids: `SWITCHBOARD_REMOTE_PORT`, script lines `pairing <code>` and `remote-listen lan <port>` (`src/script.rs:729-746`, README ~267-280).
+
+## Departures from the issue's framing
+
+1. **The WebSocket will not open from Safari.** WebKit refuses `wss://` to a certificate the user only clicked through, on iPhone, iPad and Apple-silicon Macs, a limitation open since 2011 (WebKit bug 41419; Cockpit documents the same), and today's certificate also fails Apple's rules for a trusted certificate (SAN, `serverAuth` EKU, 825 days). The page therefore loads after the click-through but `/api/v1/events` does not. The issue assumes the socket. A plan must say this and make the page work without it: poll the collections and the open session's content on a short interval, use the socket when it opens (Chrome, Firefox, Android). A plan that ships the socket alone has planned a page that is static on the device it is for.
+2. **"Offer the certificate for download" is not an option with this certificate.** Trusting it on the device needs a reissue with the address as a SAN, the EKU and a short validity, which ties the identity to an address and an expiry the spec avoids, and Safari still refuses `wss://` by Cockpit's report. The choice in the issue collapses: the click-through is the trust step. The key in the URL keeps its value against a relayed code.
+3. **Each file of the page is a connection.** A browser fetches subresources on parallel keep-alive connections that each hold an unauthenticated slot for up to 30 s. The issue frames this as "which pool"; the answer is that the page should be at most two files (HTML and script), and the plan must say what the pool leaves for a second device.
+4. **The device name is the page's to send.** The host drops every header but two, so the "name from the user agent" is the page's script filling `device_name` from `navigator.userAgent`, as every client fills it; no host-side parsing.
+
+## Decisions, with the answer I would take
+
+1. **Trust.** The click-through on the local network is the trust step; the paired-devices dialog and spec §5 say so. No certificate download, no reissue. The page compares the URL's key with `/info` before posting the code.
+2. **Token.** `/pair` sets an `HttpOnly; Secure; SameSite=Strict; Path=/` cookie named with the server id (cookies ignore ports, and two instances on one Mac would otherwise overwrite each other's) when the pair body asks for it; `read_request` fills `bearer` from that cookie when the header is absent, so `authenticate` and every handler are untouched and the native clients keep the header. `SameSite=Strict` is the CSRF defence and the plan must name it; an `Origin` check is fine, a CSRF token is over-specification. `localStorage` for the token is the call I would reverse.
+3. **Live updates.** Poll first, socket second (departure 1). Over the socket the page sends `watch` for the open session's `conversation` or `screen` as §4.4 says, else `changed` never arrives for content; polling refetches the same reads.
+4. **One QR, a URL.** `https://<address>:<port>/?code=…&key=…&id=…`; `addresses` is the authority. "Copy invite" copies the URL; `PairingInvite.parse` accepts the URL and the JSON; the UI test at 7474 changes with it. The page clears the query with `history.replaceState` before any fetch.
+5. **Static paths.** `/` and `/app.js` (CSS inline under a hash or in the HTML), answered on the connection thread as constants with `Content-Type`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and a CSP of `default-src 'none'; script-src 'self'; style-src 'self'` (or the hash) `; connect-src 'self'`. Nothing else outside `/api/v1/` changes. Raising `MAX_UNAUTHENTICATED` to 8 is acceptable; a frame-side route for a constant file is the call I would reverse.
+6. **The page.** `web/` with two files embedded by `include_str!`, plain script, no dependency, no build. First cut as the issue says: projects and their sessions, waiting first, the session's last response or screen, a send box under `control`, scope kept from the pair reply. Tickets, the conversation, drafts and files stay out.
+7. **Tests and docs.** In `tests/remote.rs`: the static paths and their headers (`http` learns to return headers), a pair that sets the cookie, a cookie-authenticated read and refusal after revoke, the embedded page's paths all served; in `tests/ui.rs` the invite as a URL; a Swift test for the URL form of `parse`. Spec §4.3 rows and a §5 paragraph, a dated entry in design.md's remote section, a `web/` row and the dev-aid sentence in the README, CHANGELOG under Unreleased. No new Rust or JS dependency.
+
+## Anchors a grounded plan should cite
+
+`src/app.rs:3017` (`serve_remote`), `3127` (`authenticate`), `3606` (`remote_pair`), `3568` (`remote_info`), `2723` (`remote_subscribe`); `src/adapters/remote.rs:389` (`RemoteReply`), `~440-515` (`read_request`), `531` (`respond`), `567-568` (pools), `770` (`connection`), `95` (`make_identity`), `962` (`local_address`); `src/ui/remote.rs:155-227` (the payload and Copy invite); `src/core/remote.rs` (`new_device`, `device_by_token`); `src/ports/remote.rs:96` (`PairedDevice`); `tests/remote.rs:245` (`http`), `406` (`pair`), `1960` (`subscribe_at`); `tests/ui.rs:7424-7495`; `client/Sources/SwitchboardProtocol/Info.swift:94-116`; `docs/remote-client.md` §4.1, §4.3, §4.4, §5; `docs/design.md:3107` (remote section), `3573` (known gaps); `README.md` ~267-280.
+
+## Errata, after grading
+
+Eleven of the twelve plans found a departure this reference missed: the card's one-line excerpt is not on the wire. `SessionView` (`control/src/lib.rs:637`) has `card`, `waiting` and `waiting_reason` but no `last_message`; the spec's sentence at `docs/remote-client.md:207` describes a field that was never added, and `agent_excerpt` (`src/ui/cards.rs:558`) computes the excerpt UI-side. Decision 6's "as the issue says" therefore asked for a field the page cannot read; a plan that reads `last-response` for the waiting sessions, shows `card` and `waiting_reason`, or defers the excerpt was right to depart, and the Codex grader's "restore the excerpt" reversals should be read with that in mind (no score changed: by its own count every plan kept three or more other reversals). Several plans also found that nothing tells a device its scope after a reload behind a cookie (§5's "answers with the device's scope" is true only of the pair reply), that the invite carries a LAN address while the host listens on loopback, and that the pair reply would carry the token in its body even with a cookie. All verified by the graders; a plan that handled them earned it under departures.
+
+---
+
+# The plan (v3-haiku-b)
+
+# Plan: #230, a browser control page on the remote port
+
+Checked against worktree `sb-230-stage-plan-v3-haiku-b` at `7fe8949`. The facts file is cited as "facts", by its heading.
+
+## Where this departs from the issue
+
+- **The card excerpt is not a record field.** The issue, and `docs/remote-client.md` §4.3 (line 207), say the excerpt is `last_message` from the `Stop` hook on the session record. The tree does not keep it. The hook's `last_message` rides on `EventKind::Stopped` (`src/ports/events.rs:24`), and the core discards it (`src/core/events.rs:132`, `Stopped { pending, .. }`). `SessionView` (`control/src/lib.rs`) has no excerpt field. The headset gets its card line from `last-response` per session (`client/Sources/SwitchboardUI/BrowserView.swift:149-163`). The page does the same and re-fetches only when a session's `last_stop_at_ms` moves. This commit corrects spec line 207. The facts file's "last_message exists on the session record" is wrong for the same reason.
+- **The device's scope is on no endpoint after pairing.** It appears only in the `/pair` reply (`src/app.rs:3606`, `remote_pair`). The plan adds an authenticated `GET /api/v1/device`.
+- **"Revoked" cannot be told apart on the wire.** `authenticate` (`src/app.rs:3127`) answers the same `unauthorized` for a revoked token and a token never issued. The page says "no longer paired with this Mac" for either, once it has paired. No new refusal code.
+- **The code may survive in history.** `history.replaceState` changes the current entry only (facts, Unresolved 6). The entry the browser made when the camera opened the URL may keep the code. The plan does not promise otherwise. The code is single-use, the window closes on the first pairing, and the dialog says the link is spent once paired.
+- **The key check proves a claim, not a genuine page.** The page compares the URL's key with `/info`, which shows only that the host claims that key. Spec §5 says a relayed pairing "fails even if the code reached it". That holds for the native client, which pins the key. It does not hold for a browser page served by an impostor. §5 is amended.
+- **Live updates depend on Safari.** The issue says the page refreshes "on `changed`". Whether a WebSocket opened through a click-through certificate works on iOS is unresolved (facts, Unresolved 1). The default is polling, and the socket is an upgrade the header shows as "live". Content `changed` events also need `watch` frames (spec §4.4), which the default does not use.
+
+## Decisions
+
+### D1. Trust in the self-signed certificate
+
+**Pick:** the click-through is the trust step. The host does not offer a profile to install.
+
+**Why:** a profile installs a manually trusted root, and what iOS requires of one is unresolved (facts, Open question on manual trust). The click-through needs nothing on the device.
+
+**What it buys:** the native pin is unchanged. The page's key compare stops a genuine page from sending the code to a second genuine host (a rotated key, or another installation on that port). It does not stop an impostor page. The paired-devices dialog and the pairing window both say the warning is the trust step, and that an address change or a renewal can bring it back.
+
+**What it rests on:** whether a click-through covers `fetch` and `wss` in current Safari is unresolved (facts, Unresolved 1). The default needs `fetch` to work after the click-through, and the plan treats that as the first thing the phone run checks (owner item A). If `fetch` is refused, the fallback is the profile install, which is the owner's call. The socket is not needed for the default.
+
+**Certificate contents (the cheap, settled part):**
+- Reissued over the same key, through `rcgen::KeyPair::from_pem` (`src/adapters/remote.rs:146`). The SPKI hash is of the key (`:247`, `sha256_hex` `:292`), so the pin stays. Facts' "can the certificate be reissued" question is answered by the tree.
+- Subject alternative names: loopback (`127.0.0.1`, `::1`) and the current LAN address as an IP SAN. The default uses an IP SAN and no `.local` name. Whether Safari accepts an IP SAN is unresolved (facts, Unresolved 2). A `.local` DNS SAN is an enhancement behind owner item B.
+- Extended key usage `serverAuth`.
+- Validity 800 days. Apple's rule is 825 days or fewer for certificates issued after 1 July 2019 (facts, Settled: Apple's TLS server certificate rules). The page does not say whether a manually trusted leaf is exempt (Unresolved 3), so the default meets the rule either way.
+- Renewed at bind time when the SAN set differs from the wanted set, or when the certificate is 730 days old or has no `issued` time.
+
+### D2. Where the token travels
+
+**Pick:** the page keeps the token in `localStorage` and sends it as `Authorization: Bearer` on every `fetch`, which the host already accepts. The WebSocket carries it in `Sec-WebSocket-Protocol: switchboard.v1, bearer.<token>`, and the host echoes `switchboard.v1`. No cookie.
+
+**Why a cookie is not the default:** whether a `Secure` cookie is stored for an IP host, and whether `SameSite=Strict` cookies go on a same-origin WebSocket handshake in Safari, are both unresolved (facts, Unresolved 5). A default that needs a cookie would fail on the phone if the answer is no. Cookies are also scoped by host, not port (facts, Settled: RFC 6265 quoted), so a cookie would reach other HTTPS services on the same Mac. A cookie name per `server_id` helps two Switchboard instances but not those services.
+
+**Why no Origin check:** a bearer header and a subprotocol value are not ambient. A cross-site page cannot set either, so it has no credential to forge a request or open a WebSocket with. Cross-site request forgery and cross-site WebSocket hijacking need an ambient credential, and this design has none. So the host reads no `Origin` header. If a cookie is ever added, this decision is reopened.
+
+**The socket:** RFC 6455 §4.2.2 says the server replies with one subprotocol it accepts, and §4.1 says the client fails on one it did not offer (facts, Settled: WebSocket subprotocol). The host echoes `switchboard.v1` and no other value. A base64url token is a legal token (facts, Settled). Whether browsers accept the echo in Safari is not settled, so if the socket fails the page falls back to polling.
+
+**Trade:** any script on the origin can read the token. The page's Content Security Policy (no inline script, no external script) is the control. The owner accepts this, and can ask for the cookie path later.
+
+### D3. One QR, carrying a URL
+
+**Pick:** the QR and "Copy invite" carry the URL only. `PairingInvite.parse` (Swift) and `switchboard-remote pair` accept the URL, and still accept the old JSON, because a copied JSON invite in someone's clipboard should still pair. No code writes JSON any more.
+
+**Address:** one address, the one `local_address()` returns (`src/adapters/remote.rs:962`). A second `.local` QR waits on owner item B.
+
+### D4. Static paths on a port that serves `/api/v1/*`
+
+**Pick:** exactly two `GET` paths are served before pairing, and nothing else.
+- `GET /` answers `text/html; charset=utf-8`, with CSS inline in a `<style>` block and `<link rel="icon" href="data:,">` so the browser does not ask for `/favicon.ico`.
+- `GET /app.js` answers `text/javascript; charset=utf-8`.
+- Both carry: `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src data:; connect-src 'self' wss:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Connection: close`, and `Content-Length`.
+- No other path is static. `/index.html`, `/app.css` and `/favicon.ico` stay on the existing allowlist's 404.
+
+**Where they are answered:** on the connection thread, not the frame. The bytes need no state, and a stalled frame must not blank the page. The reply closes the connection, so the unauthenticated-pool slot frees at once. A request for a static path is not logged, which keeps `?code=` out of the logs as `refuse` already does (`src/app.rs:3754`).
+
+**Pool and rate:** a page load is two requests plus `/info` and `/pair` (facts, Unresolved 8). The unauthenticated pool stays at four (`MAX_UNAUTHENTICATED`, `src/adapters/remote.rs:567`). Static paths get no rate window, since the pool bounds them. If the phone run shows that a page load drops connections at accept, the enhancement is a separate pool for static paths, built behind this default.
+
+**No code and no token:** the page shows the instruction "open the pairing window on the Mac and scan its code". No code-entry form is built. A typed form would need the key typed too, and the headset's typed-code path already covers a device without a camera.
+
+**Spec bounds (§4.1) are unchanged** except for one sentence about static pages closing their connection.
+
+### D5. Where the page lives, and how it is tested
+
+**Pick:** `web/index.html` and `web/app.js`, embedded with `include_str!` in a new adapter module `src/adapters/remote_web.rs`, which `src/adapters/mod.rs` declares. No build step, no bundler, no dependency. The page's protocol logic has no CI test, because the issue rules out a JS harness dependency. The tests cover the endpoints the page calls, and the phone run covers the page itself. The design status says so.
+
+### D6. The device record
+
+**Pick:** the page names the device from its user agent (`Safari on iPhone`) and sends it as `device_name`. The host already cuts it to 64 characters (`new_device` in `src/core/remote.rs`). No `kind` field.
+
+**Why:** the name is enough for the acceptance steps. A `kind` would be an additive `#[serde(default)]` field in `devices.json`, which has no version (`load_devices` in `src/adapters/remote.rs`), so it costs nothing to add later if the owner wants it.
+
+## The record
+
+- **No new record kind. No `model.rs` change.** `SCHEMA_VERSION` stays `16` (`src/core/model.rs:12`). `VIEWS_SCHEMA_VERSION` stays `7` (`src/core/model.rs:612`). Neither is bumped.
+- **`identity.json`** (`Identity`, `src/ports/remote.rs:26-42`) gains two fields, both `#[serde(default)]`:
+  - `pub addresses: Vec<IpAddr>`, the IP SANs the certificate carries. Empty for an identity made before this field.
+  - `pub issued: Option<SystemTime>`, when the certificate was made. `None` marks a certificate that is due for renewal.
+  `IDENTITY_SCHEMA_VERSION` stays `1` (`src/ports/remote.rs:17`). `Identity` has no `deny_unknown_fields`, and an older build reads the file with the new fields ignored. If the implementer finds a reason to version the file, the new value is the constant at implementation time plus one, with a step in the identity loader.
+- **`devices.json`:** unchanged. A browser is one `PairedDevice`.
+- **Browser state (not a record):** `localStorage` under `switchboard.pairing.<server_id>` holds `{token, device_id, server_name, spki_sha256, scope}`. The code is never stored.
+
+## Signals (the wire)
+
+- **`GET /` and `GET /app.js`:** the static answers in D4. Served before the bearer check, on the connection thread.
+- **`GET /api/v1/device`:** new, authenticated. Body `{device_id, name, scope, server_name}` in the envelope, `authenticated: true`. `authenticate` is unchanged. Added to `serve_remote` (`src/app.rs:3017`) after the `authenticate` call, beside the `events` arm.
+- **`GET /api/v1/events` upgrade:** the token may come from `Sec-WebSocket-Protocol`, but only on an upgrade request and only when there is no `Authorization` header. The 101 echoes `switchboard.v1` when offered.
+- **`POST /api/v1/pair`:** unchanged. The page sends `{code, spki_sha256, device_name}`.
+- **`/info` reads:** the page reads `/info` on load, after pairing, and after an `unauthorized` reply. Never on a timer, because `/info` is limited to 60 a minute per listener (`INFO_PER_MINUTE`, `src/adapters/remote.rs`).
+- **Events:** no new kinds. `changed` and `removed` keep their meaning.
+
+**Adapter changes (`src/adapters/remote.rs`):**
+- `read_request` (`:444`) reads `Sec-WebSocket-Protocol` into a new `subprotocols: Vec<String>` field on `RemoteRequest` (`:360`). It takes the bearer from a `bearer.` entry only on an upgrade, when `Authorization` is absent. The grep confirms `RemoteRequest` is constructed only at `:506`, and no test builds one.
+- `respond_upgrade` (`:519`) takes the echo as a parameter. The caller computes it before the request moves into `RemoteIncoming`.
+- A new `respond_page` writes the static headers. `respond` (`:530`) is unchanged.
+- `RemoteReply` (`:389`) is **unchanged**, so the ~15 literal sites in `src/app.rs` do not move.
+
+## Actions and effects
+
+- **`AppAction::IdentityRenewed(Identity)`** (`src/core/action.rs`, additive). The core accepts it only when `spki_sha256` matches the identity it holds. It then sets the identity and pushes `Effect::SaveIdentity`, unless read-only, the same as `update_identity` in `src/core/remote.rs`. Devices are untouched. A key that differs is a rotation, which is not this action.
+- **Renewal, in the adapter:** `certificate_wants_renewal(identity, lan: Option<IpAddr>, now: SystemTime) -> bool` (pure) and `reissue_certificate(identity, key_pem, addresses, now) -> Result<Identity, String>`. Both live in `src/adapters/remote.rs`. `make_identity` (`:95`) and the reissue share one `certificate_for` helper, so they cannot diverge.
+- **`bind_remote` (`src/app.rs:2936`):** before `remote::tls_config` (`:2957`), when renewal is wanted, it reissues over the Keychain key, dispatches `IdentityRenewed`, and uses the new identity for TLS. A failed reissue logs and binds the old certificate, as today.
+- **Certificate parameters:** `CertificateParams::new` with the IP addresses as strings, or `SanType::IpAddress` directly (check at implementation). `ExtendedKeyUsagePurpose::ServerAuth`. `not_before` one hour back, `not_after` 800 days out. The `time` crate may need to be a direct dependency at the version `Cargo.lock` already holds (check the rcgen 0.14 source, `Cargo.toml:62`).
+- **`pairing_url`** (new, `src/adapters/remote.rs`, pure): `pairing_url(addr: SocketAddr, server_id: Uuid, spki_sha256: &str, code: &str) -> String` gives `https://{addr}/?code={code}&key={spki}&id={server_id}`. `SocketAddr` display brackets an IPv6 address.
+- **`remote_web::page`** (new, `src/adapters/remote_web.rs`, pure): `page(method, path) -> Option<Page>`, where `Page` holds the content type and body. Called in `connection()` before the rate window.
+- No new `Effect`, no new port, no `Clock` use outside the adapter.
+
+## The UI
+
+**The pairing window (`src/ui/remote.rs`):**
+- The QR payload (around `:160`) becomes `remote::pairing_url(SocketAddr::new(ip, port), identity.server_id, &identity.spki_sha256, &window.code)`. The address line uses the same `SocketAddr`.
+- The URL is shown in monospace under the QR, so it can be selected.
+- "Copy invite" (`:201`) copies the URL.
+- The meta line says: "Scan with the phone's camera. Your browser will warn about the certificate; accept it for this address. The link pairs once, and is spent after." The key short form stays, so the owner can compare it on the device.
+
+**The paired-devices dialog:** a sentence under the list: "A browser warns about the certificate on first use, and again if the address changes or the certificate is renewed."
+
+**The page (`web/index.html`, `web/app.js`):**
+- **Start:** the first statement reads the query, then calls `history.replaceState(null, "", "/")`. Nothing else runs before it.
+- **Unpaired** (no query, no stored marker): the instruction text from D4.
+- **Pairing** (query present): fetch `/info`, compare `spki_sha256` and `server_id` with the query's `key` and `id`. Only on a match, post `/pair` with `{code, spki_sha256: key, device_name}`. Store the result in `localStorage`. Errors map as follows: `wrong_code` says the code did not match; `pairing_closed` says the window is closed on the Mac; `wrong_key` says the page refused to send the code.
+- **Ready:** header shows device name, scope word, server name, and "live" or "updating every 3 s". Sessions grouped by project, waiting ones first with a "Waiting on you" mark. Each row shows kind, the card's word (`card`), and for Claude sessions the first line of `last-response`.
+- **Session:** Claude sessions show `last-response`; others show `screen?lines=40`. The reply box appears only under `control` scope. Send posts `sessions/{id}/send` with `{op, text}`. `op` is `crypto.randomUUID()` when `window.isSecureContext`, else an id from `crypto.getRandomValues` (facts, Unresolved 4). On a timeout the page follows §4.5 and reads `ops/{op}`.
+- **Identity changed:** if `/info` now shows a different `spki_sha256` or `server_id` from the marker, the page says "identity changed, pair again", drops the token, and sends nothing.
+- **Revoked:** an `unauthorized` reply after pairing re-reads `/info` once. If the key still matches, the page says "this device is no longer paired with this Mac" and drops the token.
+- **Revisions:** keep the `revision` per collection, apply a reply only when it is newer, and refetch in full on an `epoch` change.
+- **Polling:** list every 3 s, open session every 2 s, `/device` every 30 s.
+- **Socket:** `new WebSocket("wss://" + host + "/api/v1/events", ["switchboard.v1", "bearer." + token])`. On `hello` take the revision. On `changed`, refetch that collection. On `resync_required` or close, refetch and keep polling. The header shows "live" only while the socket is open.
+
+## Tests
+
+**Adapter (`src/adapters/remote.rs`, `src/adapters/remote_web.rs`):**
+- `read_request` takes the bearer from the subprotocol only on an upgrade, and `Authorization` wins when both are present.
+- `respond_upgrade` echoes `switchboard.v1` only when it was offered.
+- `pairing_url` produces the shape above, with IPv6 bracketed; the test parses the query back.
+- `reissue_certificate` keeps `spki_sha256`, carries the IP SAN (the four octets follow tag `0x87` in the DER), and gives `not_after` at most 825 days after `not_before`.
+- `certificate_wants_renewal` over a small truth table: SAN missing, SAN present and young, SAN present and 730 days old, `issued` absent.
+- `page("/", "GET")` and `page("/app.js", "GET")` return the content types and the CSP; `page("/index.html", "GET")` returns `None`.
+
+**Core (`src/core/tests.rs`):**
+- `IdentityRenewed` with the same SPKI sets the identity and emits `SaveIdentity`.
+- `IdentityRenewed` with another SPKI is ignored.
+- Read-only: no effect.
+
+**Integration (`tests/remote.rs`):**
+- `the_page_is_served_without_pairing_with_its_headers`: `GET /` and `GET /app.js` answer 200 with exactly the headers in D4. A new helper, `fetch_with_headers`, returns the response headers, because the existing `http` helper (`:245`) keeps none.
+- `the_allowlist_still_refuses_other_static_paths`: `/index.html`, `/app.css` and `/favicon.ico` answer 404 `not_found`. Added to the neighbourhood of `the_allowlist_refuses_everything_else_with_no_side_effect` (`:682`).
+- `a_page_load_is_answered_off_the_frame`: six sequential `GET /` and `GET /app.js` requests are answered while the app is not pumped, so the answer cannot depend on the frame. Each closes its connection.
+- `the_script_calls_only_served_paths`: scans `web/app.js` (via `include_str!`) for `/api/v1/` literals, substitutes `${…}` placeholders with seeded ids, and calls each with a paired token. None may be refused with "not available on this port" or "no such endpoint".
+- `a_browser_pairs_from_the_url_as_the_page_does`: opens the window, builds the URL with `pairing_url`, parses its query, reads `/info`, compares the key and id, posts `/pair` with a body shaped as the page sends it, reads `/device` (the name `Safari on iPhone`, the granted scope), revokes, and sees `/device` answer 401 `unauthorized`. Uses the helpers beside `pair` (`:406`) and the revoke test (`:658`).
+- `a_socket_takes_its_token_from_the_subprotocol`: an upgrade with `Sec-WebSocket-Protocol: switchboard.v1, bearer.<token>` gets 101 with the echo. A wrong token gets 401 before any upgrade. No token gets 401. A new helper beside `subscribe_at` (`:1960`) sends the header.
+- `the_client_fixtures_decode_on_both_sides` (`:1829`) also covers `client/Fixtures/pairing_url.txt`, which `write_fixtures` (`:1587`) writes from `pairing_url`.
+
+**UI (`tests/ui.rs`):** with the pairing window open, the copied text from "Copy invite" equals the `pairing_url` the adapter builds. Check how kittest exposes copied text at implementation.
+
+**Swift (`client/Tests/SwitchboardProtocolTests`):** `PairingInvite.parse` accepts the URL fixture, the legacy JSON, and an IPv6 URL, which becomes `[addr]:port`. Run `swift test` in `client/` on macOS. If the Swift toolchain is not present in the implementer's environment, say so in the final report.
+
+**Gate:** `cargo test --locked --workspace`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all`. The new code is portable, so CI's Linux clippy needs nothing extra.
+
+**Live check (the app runs at every step):** with `SWITCHBOARD_DATA_DIR` and `SWITCHBOARD_TMUX_SOCKET` pointing at test locations, run `remote-listen lan <port>` and `pairing <code>` through `SWITCHBOARD_SCRIPT`. Then `curl -k -sD- https://<lan-ip>:<port>/` for the headers, `curl -k https://<lan-ip>:<port>/api/v1/info` for the key, and `switchboard-remote pair '<url>'` against a test `SWITCHBOARD_REMOTE_DIR`.
+
+**Not testable here, and owned by the owner:** the page in a real browser, and the phone run (see Acceptance).
+
+## Docs
+
+- **`docs/remote-client.md`:**
+  - §4.1: static pages are answered on the connection thread and close their connection. The pool bounds are unchanged.
+  - §4.3: a `GET /api/v1/device` row. A "static pages" note listing the two paths. Line 207 corrected: the excerpt is the last response, not a record field.
+  - §5: the QR is a URL. The sentence that a relayed pairing fails is limited to the native client. Browser token carriers are the bearer header and the WebSocket subprotocol. "Never in a URL" stays true. "Require pairing before anything but `/info`, `/pair`" gains the two page files.
+- **`docs/design.md`:** the "Remote client" section's "Built so far" gets a bullet for the browser page. "Known gaps" gains three lines: no phone run recorded; the socket depends on Safari; the page's logic has no CI test.
+- **`README.md`:**
+  - Layout: a row for `web/` and one for `src/adapters/remote_web.rs`.
+  - The `identity.json` description (around `:78-83`) gains `addresses` and `issued`.
+  - Development (around `:265-278`): "Copy invite" copies the URL, the `switchboard-remote pair` example takes it, and the page is at `https://<address>:<port>/`.
+- **`CHANGELOG.md`:** one line under `## [Unreleased]`: the remote port serves a browser page; the pairing QR is a link; the page lists sessions and sends replies.
+
+## Build order
+
+Each step leaves the app running.
+
+1. Identity fields, `certificate_for`, renewal, `IdentityRenewed`, core and adapter tests.
+2. `read_request` subprotocols and bearer fallback, `respond_upgrade` echo, tests.
+3. `remote_web.rs` with minimal placeholder pages, the connection-thread arm, `respond_page`, the static tests.
+4. `GET /api/v1/device`, its arm in `serve_remote`, tests.
+5. `pairing_url`, the pairing window, the CLI and Swift parse, the fixture, tests.
+6. The real `web/index.html` and `web/app.js`, and the script test.
+7. Docs, README, CHANGELOG.
+8. Gate, then the live check.
+
+## Acceptance
+
+The issue's steps, each of which the polling path satisfies. The socket only shortens the wait.
+
+1. Open the pairing window; the QR is a URL. (UI test.)
+2. Scan with the phone, accept the warning, see the sessions. (Owner, phone. Needs `fetch` after the click-through, owner item A.)
+3. A session that starts waiting moves to the top within 3 seconds with no reload. (Owner, phone.)
+4. A reply from the phone arrives. (Owner, phone. The `send` path is covered by the existing control tests.)
+5. Revoke the phone in the dialog; the page says so on its next request. (Test: revoke, then 401. Owner, phone.)
+
+## Left to the owner
+
+- **Item A (phone run):** whether `fetch` and `wss` work after the click-through, with the current and the renewed certificate.
+- **Item B:** a `.local` DNS SAN. An enhancement; the default does not need it.
+- **Item C and the history question:** if the phone run shows the code persisting, the plan still holds (single-use, expires). Nothing to change.
+- **Pool:** if the phone run shows drops at accept, a separate static pool, built later.
+- **Cookie:** if the owner wants the token out of script reach, the cookie carrier is a later change, and needs items 5 and D favourable.
+- **Excerpt:** if fetching `last-response` for many sessions is slow, an `excerpt` field on `SessionView`, additive.
+- **`kind` on the device record, and a code-entry form:** only if the owner asks.
+- **Browser tab limit:** a tab can hold several keep-alive connections, each a paired-pool slot (`MAX_PAIRED`, 12). The phone run should check that the headset is not refused `full` while the page is open. Not mitigated in this cut.
+
+## Contract additions
+
+- `src/core/action.rs`: `AppAction::IdentityRenewed(Identity)`.
+- `src/ports/remote.rs`: `Identity.addresses: Vec<IpAddr>` and `Identity.issued: Option<SystemTime>`, both `#[serde(default)]`.
+- `src/adapters/remote.rs`: `RemoteRequest.subprotocols: Vec<String>`; `pairing_url`, `reissue_certificate`, `certificate_wants_renewal`; the echo parameter on the private `respond_upgrade`.
+- `src/adapters/remote_web.rs` (new): `page`, `Page`.
+- Wire: `GET /api/v1/device` (new, authenticated); `GET /` and `GET /app.js` (new, before pairing, not under `/api/v1/`).
+- Swift: `PairingInvite.parse` accepts the URL form; `client/Fixtures/pairing_url.txt`.
+- Spec: §4.3 row for `/device`; line 207 corrected.
+
+## Commit message
+
+`Serve a browser control page on the remote port and pair it from a URL`
+
+---
+
+# The facts file the planner was given
+
+The plan may cite this file as facts.md or facts:<line>; such a citation is checked against this text, not the tree. It was written by an earlier stage of the same process, not by the owner, so it is not the reference and may itself be wrong.
+
+     1	# Facts for #230 (web control surface)
+     2	
+     3	No spike was run: every open question needing a browser or iPhone is not runnable here, and none of the rest needs an experiment. `git status` is clean.
+     4	
+     5	## Settled
+     6	
+     7	### The tree
+     8	
+     9	- A leaked pairing code is short-lived: the window closes on the first successful pairing, after 3 wrong codes, or at 5 minutes. `src/core/remote.rs:46-72` (`Paired` clears `pairing`, "single-use").
+    10	- `RemoteRequest` is built only inside `src/adapters/remote.rs` (definition `:360`); no test in `tests/` constructs it. Adding `cookie`, `origin` and `user_agent` fields touches the adapter alone. Grep: `RemoteRequest\b` over `src tests`.
+    11	- `RemoteReply { status, body, authenticated }` is built literally at about 15 sites in `src/app.rs` (e.g. `:1664`, `:2365`, `:2754`, `:3570`, `:3723`, `:3736`, `:3767`) and not in `tests/`. A header field on it needs a `Default` or a constructor, or every site changes.
+    12	- `RemoteRequest` and `RemoteReply` live in `adapters/`, not `ports/` or `model.rs`, so CLAUDE.md's additivity rule for the shared contract does not name them. `src/adapters/remote.rs:355-393`.
+    13	- `last_message` exists on the session record: the hook binary writes it from `last_assistant_message` (`src/bin/switchboard-hook.rs:37`) and `src/core/tests.rs:1717` constructs records with `last_message: None`. It is not on the wire: no match in `control/` or `client/Sources`. Adding it to `SessionView` is a new field there.
+    14	- The certificate can be reissued over the same key. `rcgen::KeyPair::from_pem` is already used at `src/adapters/remote.rs:139,146`, the SPKI hash is of the key (`:107`), and `make_identity` (`:95-127`) is the only path that makes a new key. A reissue keeps `spki_sha256`.
+    15	- `PairingInvite` is used by `ConnectionManager.swift`, `BrowserView.swift`, `switchboard-remote/main.swift` and eight test files under `client/Tests`. `addresses` is read as a list at `ConnectionManager.swift:483` and built as a one-element list at `main.swift:120`. A URL parser can fill `addresses` with the one host:port.
+    16	
+    17	### Outside the tree
+    18	
+    19	- **Apple's TLS server certificate rules.** SHA-2 signature, RSA at least 2048 bits, the server's DNS name in subjectAltName (CommonName not trusted), and for certificates issued after 1 July 2019 an EKU of `serverAuth` and a validity of at most 825 days. Non-compliant connections fail and "websites [may] not load in Safari". Evidence: https://support.apple.com/103769 (iOS 13 / macOS 10.15; Citrix says iOS 14 / macOS 11 also). The page does not mention IP-address SANs, user-added roots, or exemptions. The current certificate has no SAN, a CN only, and a not-after of year 4096 (`src/adapters/remote.rs:95-127`), so it meets none of the SAN, EKU or validity rules.
+    20	- **Safari and `wss://` after a click-through.** The behaviour exists and is unfixed: WebKit bug 41419 ("allow wss:// if user has accepted https:// warning") is open, status NEW, last modified 2026-01-12, and the reporter got `wss` working only after marking the certificate always-trusted (https://bugs.webkit.org/show_bug.cgi?id=41419). code-server's iPad doc agrees: Safari "will prevent WebSocket connections unless the certificate is installed as a profile", needs a domain name rather than a bare IP, and needs a SAN matching the host (https://github.com/cdr/code-server/blob/v3.7.0/doc/ipad.md). Two sources agree; they cover Safari up to 2026-01. One more report is mixed: on iOS 26 beta 3, `wss` failed after acceptance and the poster said it was resolved in beta 5 (https://developer.apple.com/forums/thread/792842). That is a forum post, a lead only.
+    21	  - Queries: "Safari iOS WebSocket wss self-signed certificate accepted exception fails fetch works"; "iOS Safari self-signed certificate no subjectAltName IP address proceed certificate warning".
+    22	- **Secure contexts.** `crypto.randomUUID()` is available only in secure contexts (https://developer.mozilla.org/en-US/docs/Web/API/Crypto/randomUUID). The spec decides trustworthiness by the origin's scheme: `https` and `wss` are "Potentially Trustworthy", with no mention of certificate errors (https://w3c.github.io/webappsec-secure-contexts/ §3.1; MDN Secure_Contexts agrees). By the text, an https page on a click-through certificate is a secure context. Whether browsers also treat it so is not stated, and it is under Unresolved.
+    23	- **Cookies are not isolated by port.** RFC 6265 says so, quoted on https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Cookies. `Secure` cookies are sent only over HTTPS. `localStorage` is per origin including port (MDN, general). This confirms the notes' cross-port claim.
+    24	- **WebSocket subprotocol (RFC 6455 §4.1, §4.2.2, https://www.rfc-editor.org/rfc/rfc6455).**
+    25	  - The client must fail if the 101 names a subprotocol it did not offer.
+    26	  - The server's reply is one `token`, and an empty value is illegal.
+    27	  - Offered values are `token`s, so base64url without padding is legal. Base64 `=` is not a token character (a separator).
+    28	  - Whether the client must fail when the server returns none is not normative: §4.2.2 says the server sends none when it agrees to none, and §1.9 (non-normative) says it must include it.
+    29	  - Browsers must send `Origin` on the handshake. A server may validate it, and rejects with 403. "If the server does not validate the origin, it will accept connections from anywhere."
+    30	  - The tree's `respond_upgrade` (`src/adapters/remote.rs:519-527`) echoes no subprotocol.
+    31	- **`history.replaceState` replaces the current entry**; Back then shows the new URL and bypasses the old one (https://developer.mozilla.org/en-US/docs/Web/API/History/replaceState). It says nothing about what the browser recorded before the script ran.
+    32	  - Query: "MDN history.replaceState".
+    33	
+    34	## Unresolved
+    35	
+    36	Each line ends with what the plan builds to. The plan never waits on a line here.
+    37	
+    38	1. **Does a click-through exception cover `wss://` and `fetch` on current iOS Safari, with this no-SAN certificate on a bare IP?**
+    39	   - Tried: the queries above, plus "Safari remember certificate exception visit this website how long self-signed iOS per session". The only evidence is old (2010 bug, iOS 7 and 13 era), the code-server doc (v3.7, 2021), and the one iOS 26 beta post. Nothing current and primary exists.
+    40	   - Favourable: the page may use the events socket directly. Unfavourable, and the plan must do this anyway: the page works with REST polling alone (poll `changed`-equivalent reads on a timer) and treats the socket as an upgrade it may lose, saying "live updates unavailable" rather than failing.
+    41	   - Reissuing the certificate with a SAN, `serverAuth` and a bounded validity over the same key is cheap and helps in both cases (Apple's page; the code-server doc).
+    42	2. **Does a SAN with an IP address, rather than a DNS name, satisfy Safari and Chrome?** The Apple page speaks only of DNS names. Queries: as in 1, plus "iOS Safari self-signed certificate no subjectAltName IP address". No primary source found.
+    43	   - Favourable: put the LAN IP in the SAN. Unfavourable: the page's URL host must be a `.local` name. Either way the plan reissues with the `.local` hostname as a DNS SAN as well.
+    44	3. **Does Apple's 825-day rule apply to a manually trusted self-signed leaf?** The page lists no exemption and no scope. Build to a validity of 825 days or fewer and say in the dialog that the certificate is renewed (the key, and so the pin, is unchanged). If it does not apply, nothing is lost.
+    45	4. **Does a click-through certificate give a secure context in Safari, Chrome and Firefox?** The spec reads yes by scheme, but I found no browser documentation on certificate-error overrides. The plan uses `crypto.randomUUID` only when `window.isSecureContext`, with a fallback id generator built on `getRandomValues`, and does not rely on `Secure` cookies being stored without a manual test (see item 5).
+    46	5. **Are `SameSite=Strict` cookies sent on a same-origin `new WebSocket()` handshake, and do `Secure` cookies work on an IP host, in Safari, Chrome and Firefox?** Query: "SameSite=Strict cookie sent on same-origin WebSocket handshake; Secure cookie IP address host Safari Chrome Firefox". Results were blogs and a Chromium design thread (WebSocket requests carry cookies; `wss` counts as the same scheme as `https`): leads, not evidence. Plan to either transport behind one server-side reader that accepts the bearer header, the cookie and the subprotocol token, and let the first manual run pick the page's transport.
+    47	6. **Is the code-bearing URL recorded in history, tab list or iCloud tab sync before `replaceState` runs?** No source. The plan assumes yes: the code is single-use and the window is 5 minutes or 3 failures (settled above), so a recorded URL is dead once pairing succeeds. The plan says that in the dialog and keeps the query out of server logs (`refuse`, `src/app.rs:3754`, logs path only).
+    48	7. **Per-site exception lifetime across launches, and loss when the IP changes.** Query: "Safari remember certificate exception ... how long". Only a 2013 blog (iOS 7: exception not removable). Plan: an address change means another warning, and the page and dialog say so. A `.local` name or a reissue never makes it worse.
+    49	8. **Pool of 4 under a real page load (iOS Safari parallel connections, keep-alive, `/favicon.ico`).** No source for the connection count; it needs a device. Plan: answer static paths on the connection thread with `Connection: close`, serve the page as few files as possible (HTML plus one script and one stylesheet, inlined where possible by the CSP), and give static paths their own bound so a page load cannot starve `/pair`.
+    50	9. **Bonjour `.local` resolution from iOS Safari.** No query run, so no evidence. Plan: the URL carries the IP from `local_address()` and the `.local` name only if the owner answers item B below.
+    51	
+    52	## For the owner
+    53	
+    54	A. **On a real iPhone/iPad, after accepting the warning, does the page load, do `fetch` calls work, and does `new WebSocket("wss://…")` connect, with the current certificate and with the reissued one?** Ask with the page as built. Favourable branch: use the socket. Unfavourable: ship polling. The plan builds the polling path regardless.
+    55	B. **Does `https://<mac-name>.local:<port>/` resolve from the owner's phone?** Favourable: reissue with that DNS SAN and put it in the URL. Unfavourable: the IP stays the URL host. Reissuing with both works either way.
+    56	C. **Does the owner's phone camera open the URL straight into Safari, and does the tab appear in iCloud tab sync or history before the page script runs?** Either branch: the code is single-use and expires, so the plan holds.
+    57	D. **Does a cookie, or a subprotocol token, work in Safari with the owner's certificate (items 5, 1)?** Favourable: use the one that works, the cookie preferred for the token never being readable by script. Unfavourable: use the other; the server accepts all three transports regardless.
+
+2026-10-22T22:29:45.214385Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out
+codex
+I’ll open the plan’s first five references, then score its departures and decisions against the owner-checked reference.
+exec
+/bin/zsh -lc "sed -n '195,214p' docs/remote-client.md
+sed -n '1,42p' src/ports/events.rs
+sed -n '115,150p' src/core/events.rs
+sed -n '625,695p' control/src/lib.rs
+sed -n '135,175p' client/Sources/SwitchboardUI/BrowserView.swift" in /Users/sully/code_repos/plan-trial/sb-230-base
+ succeeded in 0ms:
+
+**Redaction, one policy for every text that leaves the port, applied before any cut.** `session.screen` today masks the values of the project's secret variables and of the session's granted environment sets, and it reads slack lines above the window first so a value wrapped across the window's first line is still found whole. The port generalizes both halves of that: one `redact` function in `app.rs`, and the rule that **masking runs over complete source text, and every cut comes after**, since a value split by a cut no longer matches. Per kind:
+  - **conversation**: the parser caps tool detail at `DETAIL_CAP` while parsing, so masking a parsed turn would miss a value crossing that cap. The transcript reader gains an additive `read_masked(handle, &dyn Fn(&str) -> String)` that applies the mask to every string field before `cap`; the port's conversation cache (§4.4) is populated through it, keyed by the secret set's fingerprint as well, and is separate from the UI's unmasked cache. The 256 KiB turn cut then runs on masked text.
+  - **run output**: `scrollback::tail_text` cuts bytes before stripping escapes and choosing lines. It gains an overlap: the read starts `longest secret length` bytes before the tail window, the mask runs over the whole buffer, and the line selection then discards the overlap; a value straddling the window's first byte is therefore masked whole. A secret value containing a newline is masked only within a line, which the dialog's sentence on redaction covers.
+  - **screen**: the existing slack-lines read, unchanged.
+  - **file content**: the file is read whole under its limit, masked, then sent.
+  - **last response** and the card excerpt: masked from the turn's full text, then cut.
+  The secret set for a session is the project's secret variables plus its granted sets; for a file it is the owning project's. The set is resolved **before any cached content is returned**, on every read, and its **policy fingerprint** (a hash over the sorted names and values, held in memory only, never logged or stored) is part of every masked cache's version (§4.4): a new grant, a changed value or a removed set makes previously masked bytes stale even when their source did not move. If the secret set cannot be resolved (a Keychain error, a missing set), the reply is **refused** with that reason, never sent unredacted and never served from a cached success. What this covers is exactly the values Switchboard holds: a secret the user pasted into a prompt, or one a tool printed that Switchboard never knew, is not found. The paired-devices dialog says this in a sentence, and the claim in design.md's trust boundary is widened to "or as redacted text on the remote port".
+
+New read models, added to the wire crate:
+
+- `session.conversation`: the `Conversation` from `ports::transcript` as a wire shape: title, model, branch, usage, and turns paged by **turn number** (`n`, 1-based). The host parses the whole JSONL, as the session view does, from the app-level cache (§4.4); a transcript the app can show is one the port can serve, and the supported size is whatever the app handles, which the spike measures. What paging bounds is the **response**: a page anchored at its start (`from=turn`) stops at `limit` turns or at the body cap, whichever first, and says `next` for the turn to continue from; a page anchored at its end (`from=last`, or `before=turn` for the page ending before a turn the client holds) fills backward from the anchor, so it always reaches it and `from` is wherever it filled up. The client opens on the tail and walks back with `before`, so a transcript whose turns are large never shows a stale end or a gap; a change is followed from the last turn held page after page until `next` is empty, up to ten pages. A page carries only the first 512 bytes of each tool call's input and result and of each activity's text, marked `more`, which is what keeps a turn with a hundred tool calls to tens of kilobytes rather than hundreds; `session.turn` reads one turn whole, at the conversation's revision, and the client asks for it when a turn's activity is opened. A single turn larger than 256 KiB is cut (final text kept whole where possible, activity text trimmed) and marked `truncated`. The page carries the `resume_id` it was read from: `/clear` and a discard rebind the record to a new transcript, and a client holding turn numbers from another handle drops them and refetches from 1. The last turn is always in progress until a `Stop` event: on a `changed {conversation}` the client refetches from the last turn it holds and **replaces** that turn and everything after it. A handle rebind (`resume_id` moved on the session view) changes the conversation cache's key, which emits `changed {conversation}` of its own, so the client needs no rule linking the two. Only Claude Code sessions have a conversation; Codex, shell, command and service sessions answer with a "no conversation" reason and the client falls back to `screen` (and, for commands and services, `run_output`).
+- `session.last_response`: the last turn's `final_text`, its `n` and `end`. It is a **projection of the `conversation` key**: it is read from the same cache, carries the conversation's content revision, is watched by watching `conversation`, and refreshes on `changed {conversation}`; a window showing only the last response registers that watch. The compact card's one-line excerpt is not part of it: that is `last_message` from the `Stop` hook on the record, a field of the session's metadata, and moves with `changed {session}`.
+- `session.runs`: a command's or service's runs as the record holds them (`Run`: `n`, started, ended, exit, artifacts' names, not their paths). `session.run_output`: the tail of one run's scrollback log (`scrollback::tail_text`, escapes stripped, `lines` clamped to 500), redacted; a run whose log was pruned or rotated answers with that reason. This is how an exited command whose pane is gone is still readable: `session.screen` refuses a session that is not running, by design.
+- `file.read`: content of a file **only if some working set pins it** (`PinTarget::File` with that project and path). The read goes through a new `ports::files` method, `read_pinned(root, relative)`, not through the UI's preview loader. Confinement is by descriptors, not by path strings, so it stays valid while names change under it:
+  - the relative path is rejected if it is absolute, empty, or has a `..` or `.` component, before anything touches the disk (a persisted pin can hold anything);
+  - the project root is opened once as a directory descriptor (`O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`) and the walk proceeds **one component at a time** with `openat` from the previous descriptor: every directory component with `O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, the last with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`. A component that is a symlink fails the open (`ELOOP`), so **no symlink anywhere in the path is followed, parent or leaf**; a swap of any directory for a link between two hops is refused at the next hop, and a swap after the hop cannot move the descriptor already held. `openat` comes through a safe wrapper crate (`rustix`; or `cap-std`, which does this walk itself, if the spike prefers it); the crate-wide `unsafe` ban stands;
+  - `O_NONBLOCK` on the open is what keeps a FIFO from parking the connection thread for good: the open returns at once, `fstat` on the descriptor must say regular file, and anything else (a FIFO, a socket, a device, a directory as the leaf) is refused before any read. The flag is cleared on the regular file before reading. The read runs on the content worker (§4.1), so even a stall here costs the worker its time, never a frame;
+  - the read is `take(limit + 1)` with the port's limit of 768 KiB (§4.2), so growth after the check cannot exceed the limit;
+  - dotenv names (`.env`, `.env.*`) are refused whatever is pinned, since those hold the project's secrets;
+//! Session events: what hooks tell us about a session, independent of
+//! where the signal came from.
+
+use std::path::PathBuf;
+use std::time::SystemTime;
+
+use serde::{Deserialize, Serialize};
+
+use crate::core::{RecordId, StopPending};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventKind {
+    SessionStart,
+    PromptSubmitted,
+    ToolFinished,
+    /// A turn started by a background task's notification or a harness
+    /// reminder, not by the owner.
+    PromptInjected,
+    PermissionRequested {
+        tool: Option<String>,
+    },
+    PermissionDenied,
+    Stopped {
+        last_message: Option<String>,
+        /// What the Stop listed as still in flight; `None` when the
+        /// hook line had neither list (an older helper or Claude Code).
+        #[serde(default)]
+        pending: Option<StopPending>,
+    },
+    /// The turn ended on an API error; `reason` is the provider's short
+    /// code (`rate_limit`, `authentication_failed`, ...).
+    StopFailed {
+        reason: Option<String>,
+    },
+    Notification {
+        kind: String,
+    },
+    SessionEnded {
+        reason: Option<String>,
+    },
+}
+
+        let relayed = typed && self.relayed.contains(&id);
+        // A submitted prompt took whatever the input box held.
+        if typed {
+            self.typed.retain(|(r, ..)| *r != id);
+        }
+        if relayed {
+            self.relayed.retain(|r| *r != id);
+        }
+        let answers = typed && !relayed && !turn_open;
+        // The typed reply wins over an answer left on the card; sending
+        // that after it would be a second, stale reply.
+        let dropped = pending.filter(|_| answers);
+        let stopped = matches!(event.kind, EventKind::Stopped { .. });
+        self.edit_session(id, out, |s| {
+            s.last_event_at = Some(event.at);
+            s.last_seen = s.last_seen.max(event.at);
+            match &event.kind {
+                EventKind::Stopped { pending, .. } => {
+                    s.last_stop_at = Some(event.at);
+                    s.pending_at_stop.clone_from(pending);
+                }
+                EventKind::SessionStart
+                | EventKind::StopFailed { .. }
+                | EventKind::SessionEnded { .. } => s.pending_at_stop = None,
+                _ => {}
+            }
+            if let Some((activity, reason)) = change {
+                s.activity = activity;
+                s.activity_reason = reason;
+            }
+            // A prompt older than the ask started the turn that asked it.
+            if answers && s.asking.as_ref().is_some_and(|a| a.at < event.at) {
+                s.asking = None;
+            }
+            if event.kind == EventKind::SessionStart
+                && let Some(path) = event.transcript_path
+
+/// Whether the pane exists and what it is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum Liveness {
+    Running,
+    Exited { code: Option<i32> },
+    Missing,
+}
+
+/// One session as the port reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub struct SessionView {
+    pub id: String,
+    pub project: String,
+    pub name: String,
+    pub kind: SessionKind,
+    pub cwd: PathBuf,
+    pub notes: String,
+    pub liveness: Liveness,
+    /// The card's word: `CARD_WORKING`, `CARD_IDLE`, "waiting on you", ...
+    pub card: String,
+    pub last_exit: Option<i32>,
+    /// When the agent last reported that it finished a turn (Claude
+    /// Code's Stop hook), in milliseconds since the epoch.
+    pub last_stop_at_ms: Option<u64>,
+    /// How long the pane has printed nothing, when it is running.
+    pub quiet_secs: Option<u64>,
+    /// When the pane last printed, in milliseconds since the epoch, for
+    /// a client that derives quiet itself. An older app omits it.
+    #[serde(default)]
+    pub last_activity_ms: Option<u64>,
+    pub waiting: bool,
+    pub waiting_reason: Option<String>,
+    /// The pane shows Claude Code's own folder trust question, which
+    /// comes before any hook and which `session.trust` answers.
+    #[serde(default)]
+    pub trust_question: bool,
+    /// Why a `session.prompt` now would be refused, or `None` when it
+    /// would type. An older app omits it.
+    #[serde(default)]
+    pub prompt_refusal: Option<String>,
+    /// The provider's session id, once the agent has one.
+    pub resume_id: Option<String>,
+    pub op: Option<String>,
+    /// What the agent's last Stop listed as still in flight: background
+    /// task kinds (`shell`, `subagent general-purpose`), then `wakeup` or
+    /// `recurring wakeup` per cron. Empty from an older app.
+    #[serde(default)]
+    pub pending: Vec<String>,
+    /// The earliest one-shot wakeup's fire time, in milliseconds since
+    /// the epoch.
+    #[serde(default)]
+    pub wakeup_at_ms: Option<u64>,
+    /// Until when the last Stop is not the end of the agent's work: the
+    /// wakeup's time plus a grace, or a cap on background work. `None`
+    /// when nothing is pending; an older app omits it.
+    #[serde(default)]
+    pub held_until_ms: Option<u64>,
+    /// The agent's transcript file as last seen, for a reader that
+    /// counts what the session spent. An older app omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub struct ProjectView {
+    pub id: String,
+    pub name: String,
+    pub root: PathBuf,
+    pub space: String,
+        let ticketChoices = TicketFilterChoices(store: store)
+        if ticketChoices != ticketFilterChoices { ticketFilterChoices = ticketChoices }
+        let evidence = await manager.evidenceHosts
+        if evidence != evidenceHosts { evidenceHosts = evidence }
+        let create = await manager.createHosts
+        if create != createHosts { createHosts = create }
+        discovered = await manager.discovered.map {
+            DiscoveredServerRow(instance: $0.instance, serverID: $0.serverID, name: $0.name)
+        }.sorted { $0.instance < $1.instance }
+        var screens: [SessionRef: ScreenBody] = [:]
+        for ref in holders.keys {
+            screens[ref] = await manager.screen(for: ref)
+        }
+        self.screens = screens
+        var lastResponses: [SessionRef: LastResponseBody] = [:]
+        var conversations: [SessionRef: ConversationState] = [:]
+        var runs: [SessionRef: [RunView]] = [:]
+        for ref in conversationHolders.keys {
+            lastResponses[ref] = await manager.lastResponse(for: ref)
+            conversations[ref] = await manager.conversation(for: ref)
+        }
+        for ref in Set(runHolders.keys.map(\.session)).union(self.runs.keys) {
+            runs[ref] = await manager.runs(for: ref)
+        }
+        var runOutputs: [RunRef: RunOutputBody] = [:]
+        for ref in runHolders.keys {
+            runOutputs[ref] = await manager.runOutput(for: ref)
+        }
+        self.lastResponses = lastResponses
+        self.conversations = conversations
+        self.runs = runs
+        self.runOutputs = runOutputs
+        var drafts: [SessionRef: DraftView] = [:]
+        for ref in draftHolders.keys {
+            drafts[ref] = await manager.draft(for: ref)
+        }
+        self.drafts = drafts
+        var draftHosts: Set<ServerID> = []
+        for host in store.hosts where await manager.hasDraft(host.id) {
+            draftHosts.insert(host.id)
+        }
+
+2026-10-22T22:29:51.129406Z ERROR codex_models_manager::manager: failed to refresh available models: request timed out
+codex
+| plan | grounding | departures caught | decisions to overturn | over-specification | hand-off |
+|---|---|---|---|---|---|
+| v3-haiku-b | 3 | 2 | 0 | 1 | no |
+
+## Grounding
+- `docs/remote-client.md` §4.3 (line 207): found (incorrectly describes the card excerpt as `last_message` on the session record, exactly as the plan reports).
+- `src/ports/events.rs:24`: found (`Stopped` carries `last_message: Option<String>`).
+- `src/core/events.rs:132`: found (`Stopped { pending, .. }` records the stop time and pending work, ignoring `last_message`).
+- `control/src/lib.rs`: found (`SessionView` has `card`, waiting metadata and `last_stop_at_ms`, but no excerpt).
+- `client/Sources/SwitchboardUI/BrowserView.swift:149-163`: found (collects last responses through `manager.lastResponse`; relevant support for the proposed excerpt source).
+
+## Departures caught
+- Safari WebSocket failure after certificate click-through: caught (described too tentatively as unresolved, but polling makes the page functional).
+- Certificate download is unsuitable with the existing certificate: caught with a wrong fix (introduces SANs, expiry and certificate renewal instead of retaining click-through without reissue).
+- Parallel page requests consume unauthenticated slots: caught (two files and immediate connection closure address retention; capacity for a second device remains insufficiently explicit).
+- Device naming belongs in page script: caught (script supplies `device_name`; no host-side user-agent parsing).
+- Missing excerpt on the wire: caught, including correcting the supplied facts file; consistent with the reference’s errata.
+- Scope unavailable after reload: caught and addressed with an authenticated device endpoint.
+- Indistinguishable revoked and unknown tokens: additionally identified, with appropriate user-facing wording.
+- Browser key comparison cannot authenticate an impostor-served page: additionally identified and documented.
+
+## Decisions to overturn
+- Certificate reissue, renewal and identity fields conflict with reference decision 1: retain the existing certificate and make click-through the trust step.
+- `localStorage` bearer persistence conflicts with decision 2: use an explicitly requested, server-id-named `HttpOnly; Secure; SameSite=Strict` cookie while preserving native bearer authentication.
+- Omitting socket `watch` frames conflicts with decision 3: subscribe to the open session’s conversation or screen. Polling preserves functionality, but the advertised socket upgrade cannot deliver content changes as specified.
+- CSP `connect-src 'self' wss:` conflicts with decision 5’s same-origin restriction; remove permission to connect to arbitrary secure WebSocket origins.
+
+## Over-specification
+- Roughly one-third is avoidable: detailed certificate-renewal contracts and tests, repeated decisions across build order and contract summaries, speculative future options, and exact helper signatures. The certificate subsystem is particularly substantial work the reference explicitly excludes.
+
+## Hand-off
+- No: revise credential storage, remove certificate lifecycle changes, and complete socket subscriptions and same-origin CSP before implementation.
+
+## Notes
+- best: Precisely catches the missing excerpt and corrects the planner’s own supplied facts.
+- worst: Turns browser uncertainty into unnecessary certificate machinery and script-readable token persistence.
+tokens used
+26,358
+| plan | grounding | departures caught | decisions to overturn | over-specification | hand-off |
+|---|---|---|---|---|---|
+| v3-haiku-b | 3 | 2 | 0 | 1 | no |
+
+## Grounding
+- `docs/remote-client.md` §4.3 (line 207): found (incorrectly describes the card excerpt as `last_message` on the session record, exactly as the plan reports).
+- `src/ports/events.rs:24`: found (`Stopped` carries `last_message: Option<String>`).
+- `src/core/events.rs:132`: found (`Stopped { pending, .. }` records the stop time and pending work, ignoring `last_message`).
+- `control/src/lib.rs`: found (`SessionView` has `card`, waiting metadata and `last_stop_at_ms`, but no excerpt).
+- `client/Sources/SwitchboardUI/BrowserView.swift:149-163`: found (collects last responses through `manager.lastResponse`; relevant support for the proposed excerpt source).
+
+## Departures caught
+- Safari WebSocket failure after certificate click-through: caught (described too tentatively as unresolved, but polling makes the page functional).
+- Certificate download is unsuitable with the existing certificate: caught with a wrong fix (introduces SANs, expiry and certificate renewal instead of retaining click-through without reissue).
+- Parallel page requests consume unauthenticated slots: caught (two files and immediate connection closure address retention; capacity for a second device remains insufficiently explicit).
+- Device naming belongs in page script: caught (script supplies `device_name`; no host-side user-agent parsing).
+- Missing excerpt on the wire: caught, including correcting the supplied facts file; consistent with the reference’s errata.
+- Scope unavailable after reload: caught and addressed with an authenticated device endpoint.
+- Indistinguishable revoked and unknown tokens: additionally identified, with appropriate user-facing wording.
+- Browser key comparison cannot authenticate an impostor-served page: additionally identified and documented.
+
+## Decisions to overturn
+- Certificate reissue, renewal and identity fields conflict with reference decision 1: retain the existing certificate and make click-through the trust step.
+- `localStorage` bearer persistence conflicts with decision 2: use an explicitly requested, server-id-named `HttpOnly; Secure; SameSite=Strict` cookie while preserving native bearer authentication.
+- Omitting socket `watch` frames conflicts with decision 3: subscribe to the open session’s conversation or screen. Polling preserves functionality, but the advertised socket upgrade cannot deliver content changes as specified.
+- CSP `connect-src 'self' wss:` conflicts with decision 5’s same-origin restriction; remove permission to connect to arbitrary secure WebSocket origins.
+
+## Over-specification
+- Roughly one-third is avoidable: detailed certificate-renewal contracts and tests, repeated decisions across build order and contract summaries, speculative future options, and exact helper signatures. The certificate subsystem is particularly substantial work the reference explicitly excludes.
+
+## Hand-off
+- No: revise credential storage, remove certificate lifecycle changes, and complete socket subscriptions and same-origin CSP before implementation.
+
+## Notes
+- best: Precisely catches the missing excerpt and corrects the planner’s own supplied facts.
+- worst: Turns browser uncertainty into unnecessary certificate machinery and script-readable token persistence.

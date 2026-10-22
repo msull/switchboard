@@ -194,3 +194,43 @@ the step ran. Costs are list price from the runs' own reports.
   run's consistency is known over four repetitions; the trap test
   (revision 2 sonnet-b's false claim against haiku-b's true one) is
   the thing that would decide it.
+
+## 2026-10-22: revision 3's plans, graded ($12.5 of $50 so far)
+
+- Two more sonnet facts runs (c, d): both found and settled the WebKit
+  bug, so sonnet is four of four on revision 3; 1303 and 2044 words.
+- Four plan-stage runs from the sonnet-b facts file and opus-a's notes
+  (sonnet a, b at about $1.00 and five minutes; haiku a, b at about
+  $0.40 and seven minutes; 3481 to 4181 words). Every one is
+  poll-first with the socket as the upgrade, which none of the
+  twenty-two earlier plans was. sonnet-b's plan opened by contradicting
+  the facts file's false Settled line (the Stop hook's message on the
+  record) with the tree; haiku-a corrected two facts line numbers;
+  sonnet-a believed the false line.
+- Graded by both graders against the same reference
+  (`results/sb-230/stages/plan/v3-*/grade.*.md`): Fable 3/3/1/2/note
+  for three and 3/2/1/2/note for sonnet-b; Codex 3/2/0/1/no for all
+  four. That equals the best rows of the first trial (pipeline opus-b,
+  single sonnet-a) and the four are near-identical to each other,
+  which the first trial's a and b pairs never were.
+- The two decisions every plan lost are the same two: a certificate
+  reissue with SAN, EKU and a bounded validity plus identity fields
+  and renewal (the reference keeps the identity model), and a token in
+  localStorage with a subprotocol carrier because the cookie's
+  behaviour on a WebSocket had an unresolved line (the reference
+  takes the cookie). Both follow from the planner's rules as written:
+  the facts files said the reissue "works either way", and the
+  robust-default rule read an unresolved cookie mechanic as a reason
+  to pick the weaker store.
+- Revision 4 (`pipelines/switchboard-facts-v4.toml`, planner only): a
+  decision the spec already made stands unless the issue asks to
+  change it; where a credential lives is a security decision, the
+  safer store wins, and its unresolved mechanic is the implementer's
+  first test, not a reason to ship the weaker one. Not yet run.
+- The resolver idea (two facts finders, one resolver): not taken for
+  now. The single sonnet run is four of four on the central fact, so
+  recall is not the problem; the one facts error that reached a plan
+  was caught by two planners of three. Revisit if an error reaches a
+  graded plan.
+- Review stage, round one of revision 3's template, running on the
+  sonnet-b plan with sonnet twice and opus once.
