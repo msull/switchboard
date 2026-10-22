@@ -253,15 +253,24 @@ public final class EditField {
             guard let selection else { return }
             switch selection.indices {
             case .selection(let range):
-                caret = EditState.clamp(range.lowerBound.utf16Offset(in: text)..<range.upperBound.utf16Offset(in: text), in: text)
+                take(range)
             case .multiSelection(let ranges):
-                if let range = ranges.ranges.first {
-                    caret = EditState.clamp(range.lowerBound.utf16Offset(in: text)..<range.upperBound.utf16Offset(in: text), in: text)
-                }
+                if let range = ranges.ranges.first { take(range) }
             @unknown default:
                 break
             }
         }
+    }
+
+    /// A range the text field placed, as offsets. The field's indices
+    /// are into its own copy of the text, which can be a different
+    /// length from this one in the same frame (it reports a selection
+    /// change before the text binding settles), and an index past the
+    /// end traps when it is measured, so one that does not fit is left
+    /// alone: the caret last placed stands until the next one.
+    private func take(_ range: Range<String.Index>) {
+        guard range.lowerBound >= text.startIndex, range.upperBound <= text.endIndex else { return }
+        caret = EditState.clamp(range.lowerBound.utf16Offset(in: text)..<range.upperBound.utf16Offset(in: text), in: text)
     }
     /// The selection as offsets, empty at the caret; at the end until
     /// the field places one.

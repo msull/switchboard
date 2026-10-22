@@ -8,7 +8,7 @@ targets visionOS 26.
 
 ```sh
 swift build                      # every target
-swift test                       # 89 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing, the keys
+swift test                       # 90 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing, the keys
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```

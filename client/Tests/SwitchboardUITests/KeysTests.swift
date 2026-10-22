@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 
 @testable import SwitchboardUI
@@ -102,6 +103,25 @@ final class KeysTests: XCTestCase {
         field.press(.exclamation)
         XCTAssertEqual(field.text, "from the host!")
         XCTAssertNotEqual(field.text, field.hostText)
+    }
+
+    /// The text field reports a selection with indices into its own
+    /// copy of the text, which can be longer than the field's in the
+    /// same frame; this crashed the app on the headset on launch.
+    @MainActor func testASelectionFromALongerTextIsLeftAloneRatherThanTrapping() {
+        let field = EditField()
+        field.text = "short"
+        field.press(.end)
+        XCTAssertEqual(field.caret, 5..<5)
+        let longer = "a much longer text than the field holds"
+        let past = longer.index(longer.startIndex, offsetBy: 20)
+        field.selection = TextSelection(range: past..<past)
+        XCTAssertEqual(field.caret, 5..<5)
+        // One that fits is taken, even from another string of the length.
+        let other = "shout"
+        let two = other.index(other.startIndex, offsetBy: 2)
+        field.selection = TextSelection(range: two..<two)
+        XCTAssertEqual(field.caret, 2..<2)
     }
 
     func testTheRowsHoldEveryKeyOnce() {
