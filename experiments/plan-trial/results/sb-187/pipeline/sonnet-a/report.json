@@ -1,0 +1,372 @@
+{
+  "id": "e8963419",
+  "project": "sb-sonnet-a",
+  "title": "Dispatch: a review rerun after a failed attempt starts from the plan stage's original output, discarding the owner's revise",
+  "state": "active",
+  "stages": [
+    {
+      "stage": "investigate",
+      "attempts": 1,
+      "ms": 85147,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 28,
+          "output": 7139,
+          "cache_write": 49568,
+          "cache_write_1h": 49568,
+          "cache_read": 773475,
+          "messages": 14
+        }
+      }
+    },
+    {
+      "stage": "lanes",
+      "attempts": 1,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "plan",
+      "attempts": 1,
+      "ms": 79737,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 18,
+          "output": 9552,
+          "cache_write": 46388,
+          "cache_write_1h": 46388,
+          "cache_read": 494083,
+          "messages": 9
+        }
+      }
+    },
+    {
+      "stage": "review",
+      "attempts": 2,
+      "ms": 739843,
+      "waiting_ms": 22994,
+      "nudges": 0,
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 78,
+          "output": 30328,
+          "cache_write": 207099,
+          "cache_write_1h": 207099,
+          "cache_read": 2420809,
+          "messages": 39
+        }
+      }
+    },
+    {
+      "stage": "implement",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "review-code",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "pr",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "ready",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "merge",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    }
+  ],
+  "plan_lines": 75,
+  "plan_bytes": 8543,
+  "plans": [
+    {
+      "lane": "repo",
+      "lines": 75,
+      "bytes": 8543
+    }
+  ],
+  "plan_reviews": [
+    {
+      "stage": "review",
+      "attempt": 1,
+      "rounds": [
+        {
+          "n": 1,
+          "new": 5,
+          "open": 5
+        }
+      ]
+    },
+    {
+      "stage": "review",
+      "attempt": 2,
+      "rounds": [
+        {
+          "n": 1,
+          "new": 7,
+          "open": 7
+        },
+        {
+          "n": 2,
+          "new": 0,
+          "open": 0
+        }
+      ]
+    }
+  ],
+  "plan_rounds": 3,
+  "plan_points": 12,
+  "code_reviews": [],
+  "code_rounds": 0,
+  "code_points": 0,
+  "code_points_by_reviewer": {},
+  "code_incomplete": false,
+  "fix_passes": 0,
+  "rebases": 0,
+  "pr_url": null,
+  "commits": null,
+  "range": null,
+  "tickets": 1,
+  "answered_by": {
+    "you": 1
+  },
+  "evidence_files": 0,
+  "evidence_bytes": 0,
+  "usage": [
+    {
+      "stage": "investigate",
+      "n": 1,
+      "context": "root",
+      "models": {
+        "claude-sonnet-5-5": {
+          "input": 28,
+          "output": 7139,
+          "cache_write": 49568,
+          "cache_write_1h": 49568,
+          "cache_read": 773475,
+          "messages": 14
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "63d35881-2377-4bad-acb6-2509e2cbaa29",
+          "source": "transcript",
+          "models": {
+            "claude-sonnet-5-5": {
+              "input": 28,
+              "output": 7139,
+              "cache_write": 49568,
+              "cache_write_1h": 49568,
+              "cache_read": 773475,
+              "messages": 14
+            }
+          },
+          "span_ms": 65269,
+          "active_ms": 65269,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "plan",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-sonnet-5-5": {
+          "input": 18,
+          "output": 9552,
+          "cache_write": 46388,
+          "cache_write_1h": 46388,
+          "cache_read": 494083,
+          "messages": 9
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "d2b3de9f-d892-4e44-a82d-06da05ddb5d5",
+          "source": "transcript",
+          "models": {
+            "claude-sonnet-5-5": {
+              "input": 18,
+              "output": 9552,
+              "cache_write": 46388,
+              "cache_write_1h": 46388,
+              "cache_read": 494083,
+              "messages": 9
+            }
+          },
+          "span_ms": 75354,
+          "active_ms": 75354,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "review",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-sonnet-5-5": {
+          "input": 36,
+          "output": 15875,
+          "cache_write": 105407,
+          "cache_write_1h": 105407,
+          "cache_read": 1147352,
+          "messages": 18
+        }
+      },
+      "sessions": [
+        {
+          "role": "planner",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "9e444cb1-7c48-4874-85e2-4ad414420705",
+          "source": "transcript",
+          "models": {
+            "claude-sonnet-5-5": {
+              "input": 16,
+              "output": 10754,
+              "cache_write": 66929,
+              "cache_write_1h": 66929,
+              "cache_read": 628275,
+              "messages": 8
+            }
+          },
+          "span_ms": 86708,
+          "active_ms": 86708,
+          "asking_ms": 0,
+          "idle_ms": 0
+        },
+        {
+          "role": "plan reviewer",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "7006bb9f-56b9-43b6-af9f-a58fd8f56344",
+          "source": "transcript",
+          "models": {
+            "claude-sonnet-5-5": {
+              "input": 20,
+              "output": 5121,
+              "cache_write": 38478,
+              "cache_write_1h": 38478,
+              "cache_read": 519077,
+              "messages": 10
+            }
+          },
+          "span_ms": 128800,
+          "active_ms": 52288,
+          "asking_ms": 0,
+          "idle_ms": 76512
+        }
+      ]
+    },
+    {
+      "stage": "review",
+      "n": 2,
+      "context": "repo",
+      "models": {
+        "claude-sonnet-5-5": {
+          "input": 42,
+          "output": 14453,
+          "cache_write": 101692,
+          "cache_write_1h": 101692,
+          "cache_read": 1273457,
+          "messages": 21
+        }
+      },
+      "sessions": [
+        {
+          "role": "planner",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "a4b4a585-f8a9-443f-aeba-90af1c28a22a",
+          "source": "transcript",
+          "models": {
+            "claude-sonnet-5-5": {
+              "input": 12,
+              "output": 8327,
+              "cache_write": 63340,
+              "cache_write_1h": 63340,
+              "cache_read": 448308,
+              "messages": 6
+            }
+          },
+          "span_ms": 61534,
+          "active_ms": 61534,
+          "asking_ms": 0,
+          "idle_ms": 0
+        },
+        {
+          "role": "plan reviewer",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "f467a3ba-6eba-42eb-8444-c65f773ecf62",
+          "source": "transcript",
+          "models": {
+            "claude-sonnet-5-5": {
+              "input": 30,
+              "output": 6126,
+              "cache_write": 38352,
+              "cache_write_1h": 38352,
+              "cache_read": 825149,
+              "messages": 15
+            }
+          },
+          "span_ms": 114099,
+          "active_ms": 61564,
+          "asking_ms": 0,
+          "idle_ms": 52535
+        }
+      ]
+    }
+  ],
+  "tokens": {
+    "claude-sonnet-5-5": {
+      "input": 124,
+      "output": 47019,
+      "cache_write": 303055,
+      "cache_write_1h": 303055,
+      "cache_read": 3688367,
+      "messages": 62
+    }
+  },
+  "not_counted": 0,
+  "not_found": 0,
+  "kind_unknown": 0
+}

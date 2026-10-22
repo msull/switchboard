@@ -1,0 +1,320 @@
+{
+  "id": "b0b9af6f",
+  "project": "sb-haiku-a",
+  "title": "Dispatch: a review rerun after a failed attempt starts from the plan stage's original output, discarding the owner's revise",
+  "state": "active",
+  "stages": [
+    {
+      "stage": "investigate",
+      "attempts": 1,
+      "ms": 199425,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-haiku-5-5": {
+          "input": 70,
+          "output": 30614,
+          "cache_write": 105027,
+          "cache_write_1h": 105027,
+          "cache_read": 3132621,
+          "messages": 35
+        }
+      }
+    },
+    {
+      "stage": "lanes",
+      "attempts": 1,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "plan",
+      "attempts": 1,
+      "ms": 294945,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-haiku-5-5": {
+          "input": 38,
+          "output": 57939,
+          "cache_write": 113209,
+          "cache_write_1h": 113209,
+          "cache_read": 1617300,
+          "messages": 19
+        }
+      }
+    },
+    {
+      "stage": "review",
+      "attempts": 1,
+      "ms": 400559,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-haiku-5-5": {
+          "input": 120,
+          "output": 74365,
+          "cache_write": 223479,
+          "cache_write_1h": 223479,
+          "cache_read": 6884296,
+          "messages": 60
+        }
+      }
+    },
+    {
+      "stage": "implement",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "review-code",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "pr",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "ready",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "merge",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    }
+  ],
+  "plan_lines": 62,
+  "plan_bytes": 7730,
+  "plans": [
+    {
+      "lane": "repo",
+      "lines": 62,
+      "bytes": 7730
+    }
+  ],
+  "plan_reviews": [
+    {
+      "stage": "review",
+      "attempt": 1,
+      "rounds": [
+        {
+          "n": 1,
+          "new": 6,
+          "open": 6
+        },
+        {
+          "n": 2,
+          "new": 6,
+          "open": 6
+        },
+        {
+          "n": 3,
+          "new": 6,
+          "open": 6
+        },
+        {
+          "n": 4,
+          "new": 6,
+          "open": 6
+        },
+        {
+          "n": 5,
+          "new": 6,
+          "open": 6
+        },
+        {
+          "n": 6,
+          "new": 6,
+          "open": 6
+        }
+      ]
+    }
+  ],
+  "plan_rounds": 6,
+  "plan_points": 36,
+  "code_reviews": [],
+  "code_rounds": 0,
+  "code_points": 0,
+  "code_points_by_reviewer": {},
+  "code_incomplete": false,
+  "fix_passes": 0,
+  "rebases": 0,
+  "pr_url": null,
+  "commits": null,
+  "range": null,
+  "tickets": 1,
+  "answered_by": {},
+  "evidence_files": 0,
+  "evidence_bytes": 0,
+  "usage": [
+    {
+      "stage": "investigate",
+      "n": 1,
+      "context": "root",
+      "models": {
+        "claude-haiku-5-5": {
+          "input": 70,
+          "output": 30614,
+          "cache_write": 105027,
+          "cache_write_1h": 105027,
+          "cache_read": 3132621,
+          "messages": 35
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "fec47659-ba59-484c-a7c0-d727658b7e57",
+          "source": "transcript",
+          "models": {
+            "claude-haiku-5-5": {
+              "input": 70,
+              "output": 30614,
+              "cache_write": 105027,
+              "cache_write_1h": 105027,
+              "cache_read": 3132621,
+              "messages": 35
+            }
+          },
+          "span_ms": 188735,
+          "active_ms": 188735,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "plan",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-haiku-5-5": {
+          "input": 38,
+          "output": 57939,
+          "cache_write": 113209,
+          "cache_write_1h": 113209,
+          "cache_read": 1617300,
+          "messages": 19
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "e74549e9-b5fd-4d59-ac88-98181209487f",
+          "source": "transcript",
+          "models": {
+            "claude-haiku-5-5": {
+              "input": 38,
+              "output": 57939,
+              "cache_write": 113209,
+              "cache_write_1h": 113209,
+              "cache_read": 1617300,
+              "messages": 19
+            }
+          },
+          "span_ms": 291440,
+          "active_ms": 291440,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "review",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-haiku-5-5": {
+          "input": 120,
+          "output": 74365,
+          "cache_write": 223479,
+          "cache_write_1h": 223479,
+          "cache_read": 6884296,
+          "messages": 60
+        }
+      },
+      "sessions": [
+        {
+          "role": "planner",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "dcb923f9-1259-4227-a0c3-de06159a3e80",
+          "source": "transcript",
+          "models": {
+            "claude-haiku-5-5": {
+              "input": 56,
+              "output": 38288,
+              "cache_write": 126431,
+              "cache_write_1h": 126431,
+              "cache_read": 3862305,
+              "messages": 28
+            }
+          },
+          "span_ms": 224060,
+          "active_ms": 178847,
+          "asking_ms": 0,
+          "idle_ms": 45213
+        },
+        {
+          "role": "plan reviewer",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "abe63e95-3e84-4aee-95fd-c3083f133610",
+          "source": "transcript",
+          "models": {
+            "claude-haiku-5-5": {
+              "input": 64,
+              "output": 36077,
+              "cache_write": 97048,
+              "cache_write_1h": 97048,
+              "cache_read": 3021991,
+              "messages": 32
+            }
+          },
+          "span_ms": 361853,
+          "active_ms": 210911,
+          "asking_ms": 0,
+          "idle_ms": 150942
+        }
+      ]
+    }
+  ],
+  "tokens": {
+    "claude-haiku-5-5": {
+      "input": 228,
+      "output": 162918,
+      "cache_write": 441715,
+      "cache_write_1h": 441715,
+      "cache_read": 11634217,
+      "messages": 114
+    }
+  },
+  "not_counted": 0,
+  "not_found": 0,
+  "kind_unknown": 0
+}

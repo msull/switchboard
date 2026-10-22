@@ -1,0 +1,275 @@
+{
+  "id": "bbd9fdb6",
+  "project": "sb-opus-a",
+  "kind": "github",
+  "number": 187,
+  "title": "Dispatch: a review rerun after a failed attempt starts from the plan stage's original output, discarding the owner's revise",
+  "body": "## What happened\n\nA plan ticket on a client project reached the review stage's finalize decision and the owner answered `revise` with a note of lead decisions. The reviser wrote the revised plan to `review/1/joined/plan.md` (09:28). The review run then failed with `review run gone: no such run`, and the rerun decision was answered `rerun`.\n\nAttempt 2 started one minute later from `plan/1/joined/plan.md`, the plan stage's original output, not from the revised copy in attempt 1. Its rounds converged and the finalize decision came back for a plan that still lists every question as open and contradicts one of the owner's answers. Two of attempt 2's three round-1 points were things the revised copy had already fixed.\n\nNothing warned that the revision had been discarded. `show` lists `review/1 joined failed` and `review/2 joined running`, and the files line names only the attempt-2 copy as the plan.\n\n## Expected\n\nA rerun after a failed review attempt should start from the newest plan the stage holds, which after a `revise` is the previous attempt's revised copy, or at least say in the rerun question and in `show` which copy it will review. The `revise` note is owner input and should survive a runner failure the same way an answered decision does.\n\n## Where to look\n\n- the review stage's rerun path: what it takes as the plan input for a new attempt;\n- `show`'s `files:` block: when more than one attempt has a `plan.md`, say which is the reviewed copy and which is a prior revision.\n\n## Repro\n\n1. Take an issue through plan and review; at finalize answer `revise --note ...`.\n2. Kill the review run so the attempt fails with `review run gone` (a runner restart mid-run does it).\n3. Answer `rerun`.\n4. Diff `review/1/joined/plan.md` against `review/2/joined/plan.md`: the revision is gone.\n",
+  "url": "https://github.com/msull/switchboard/issues/187",
+  "labels": [
+    "bug",
+    "dispatch"
+  ],
+  "state": "active",
+  "reason": null,
+  "stages": [
+    "investigate",
+    "lanes",
+    "plan",
+    "review",
+    "implement",
+    "review-code",
+    "pr",
+    "ready",
+    "merge"
+  ],
+  "stage_checks": [
+    null,
+    null,
+    null,
+    "review-finalized",
+    null,
+    null,
+    null,
+    "pr-checks",
+    "pr-merged"
+  ],
+  "stage": 3,
+  "tree": "/Users/sbgragent/.dispatch/worktrees/bbd9fdb6",
+  "tree_removed": false,
+  "trees_kept": null,
+  "closable": false,
+  "trees_retryable": false,
+  "removes": [
+    "/Users/sbgragent/.dispatch/worktrees/bbd9fdb6"
+  ],
+  "lanes": [
+    {
+      "name": "repo",
+      "worktree": "/Users/sbgragent/.dispatch/worktrees/bbd9fdb6/.",
+      "branch": "dispatch/187-dispatch-a-review-rerun-after-a-failed-a",
+      "chosen": true,
+      "setup_done": true,
+      "removed": false,
+      "base_sha": "7fe8949f9d93965279bf8dc42c8e5a4b1bb443a7",
+      "head": null,
+      "pushed_head": null,
+      "rebase_conflicts": null,
+      "resolution": null,
+      "brought_up_by": null,
+      "brought_up_commits": false,
+      "clone": null,
+      "merge_after": [],
+      "merge_after_run": false,
+      "merge_after_step": null
+    }
+  ],
+  "attempts": [
+    {
+      "stage": "investigate",
+      "n": 1,
+      "context": "root",
+      "kind": "agent",
+      "state": "complete",
+      "reason": null,
+      "session": "8953c5b9-283c-4536-9de7-802860b2c413",
+      "run": null,
+      "artifacts": [
+        [
+          "notes",
+          "/Users/sbgragent/Library/Application Support/Dispatch/tickets/bbd9fdb6/investigate/1/root/notes.md"
+        ]
+      ],
+      "head": null,
+      "checks": null,
+      "pr": null,
+      "rounds": [],
+      "rewrite": null,
+      "nudges": [],
+      "secret": [],
+      "forgotten": [],
+      "waits": null,
+      "waits_since_ms": null,
+      "held": [],
+      "evidence": [],
+      "evidence_over_cap": [],
+      "evidence_swept_ms": null,
+      "started_ms": 1792629374080,
+      "ended_ms": 1792629579903
+    },
+    {
+      "stage": "lanes",
+      "n": 1,
+      "context": "root",
+      "kind": "gate-only",
+      "state": "complete",
+      "reason": null,
+      "session": null,
+      "run": null,
+      "artifacts": [],
+      "head": null,
+      "checks": null,
+      "pr": null,
+      "rounds": [],
+      "rewrite": null,
+      "nudges": [],
+      "secret": [],
+      "forgotten": [],
+      "waits": null,
+      "waits_since_ms": null,
+      "held": [],
+      "evidence": [],
+      "evidence_over_cap": [],
+      "evidence_swept_ms": null,
+      "started_ms": 1792629582258,
+      "ended_ms": 1792629582258
+    },
+    {
+      "stage": "plan",
+      "n": 1,
+      "context": "repo",
+      "kind": "agent",
+      "state": "complete",
+      "reason": null,
+      "session": "6be8e691-200f-4bf5-97bc-b539b8554656",
+      "run": null,
+      "artifacts": [
+        [
+          "plan",
+          "/Users/sbgragent/Library/Application Support/Dispatch/tickets/bbd9fdb6/plan/1/repo/plan.md"
+        ]
+      ],
+      "head": null,
+      "checks": null,
+      "pr": null,
+      "rounds": [],
+      "rewrite": null,
+      "nudges": [],
+      "secret": [],
+      "forgotten": [],
+      "waits": null,
+      "waits_since_ms": null,
+      "held": [],
+      "evidence": [],
+      "evidence_over_cap": [],
+      "evidence_swept_ms": null,
+      "started_ms": 1792629583439,
+      "ended_ms": 1792629678605
+    },
+    {
+      "stage": "review",
+      "n": 1,
+      "context": "repo",
+      "kind": "workflow",
+      "state": "running",
+      "reason": null,
+      "session": "5eeabf31-d2d2-45d2-adec-1c6d715d6d98",
+      "run": "4b2e3357-a891-4f1d-823b-cb4b3e81cb76",
+      "artifacts": [
+        [
+          "plan",
+          "/Users/sbgragent/Library/Application Support/Dispatch/tickets/bbd9fdb6/review/1/repo/plan.md"
+        ]
+      ],
+      "head": null,
+      "checks": null,
+      "pr": null,
+      "rounds": [],
+      "rewrite": null,
+      "nudges": [],
+      "secret": [],
+      "forgotten": [],
+      "waits": null,
+      "waits_since_ms": null,
+      "held": [],
+      "evidence": [],
+      "evidence_over_cap": [],
+      "evidence_swept_ms": null,
+      "started_ms": 1792629681004,
+      "ended_ms": null
+    }
+  ],
+  "decisions": [
+    {
+      "id": "d1",
+      "ticket": "bbd9fdb6",
+      "stage": "review",
+      "name": "finalize",
+      "question": "The review of plan converged after 3 round(s). The reviewed copy is /Users/sbgragent/Library/Application Support/Dispatch/tickets/bbd9fdb6/review/1/repo/plan.md. Finalize it, or revise with --note?",
+      "options": [
+        "finalize",
+        "revise",
+        "park"
+      ],
+      "recommendation": "finalize",
+      "multiple": false,
+      "state": "pending",
+      "answer": null,
+      "note": null,
+      "made_ms": 1792629982776,
+      "answered_by": null,
+      "answered_ms": null,
+      "needs_note": [
+        "revise"
+      ]
+    }
+  ],
+  "root_project": "927d7f36-abdc-40cc-ba14-8b88ae86124e",
+  "current_session": "5eeabf31-d2d2-45d2-adec-1c6d715d6d98",
+  "holds": [],
+  "waiting_for": null,
+  "services": [],
+  "created_ms": 1792629373616,
+  "updated_ms": 1792629982776,
+  "paths": {
+    "plan": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/bbd9fdb6/review/1/repo/plan.md",
+    "plan_stage": "review",
+    "plan_reviewed": true,
+    "plan_reviewing": true,
+    "plan_round": 3,
+    "round_file": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/bbd9fdb6/review/1/repo/plan.feedback-3.md",
+    "review_summary": null,
+    "notes": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/bbd9fdb6/investigate/1/root/notes.md",
+    "pr_url": null,
+    "pr_head": null,
+    "plan_rounds": [
+      {
+        "n": 1,
+        "feedback": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/bbd9fdb6/review/1/repo/plan.feedback-1.md",
+        "response": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/bbd9fdb6/review/1/repo/plan.response-1.md",
+        "by": null
+      },
+      {
+        "n": 2,
+        "feedback": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/bbd9fdb6/review/1/repo/plan.feedback-2.md",
+        "response": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/bbd9fdb6/review/1/repo/plan.response-2.md",
+        "by": null
+      },
+      {
+        "n": 3,
+        "feedback": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/bbd9fdb6/review/1/repo/plan.feedback-3.md",
+        "response": null,
+        "by": null
+      }
+    ],
+    "plan_files": [
+      {
+        "lane": "repo",
+        "stage": "review",
+        "path": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/bbd9fdb6/review/1/repo/plan.md",
+        "reviewing": true,
+        "round": 3
+      }
+    ],
+    "notes_files": [
+      {
+        "lane": null,
+        "stage": "investigate",
+        "path": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/bbd9fdb6/investigate/1/root/notes.md",
+        "reviewing": false,
+        "round": null
+      }
+    ]
+  },
+  "restarts": []
+}

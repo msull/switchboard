@@ -2,12 +2,13 @@
 # per arm with PROJECT and MODEL filled in; the live pipeline file it was
 # taken from is the one under Dispatch's data directory. Differences from
 # it: no supervisor, one slot, a cap of six review rounds, the model set
-# on the investigator, planner and reviewer, and trust_folders on.
+# on the investigator, planner and reviewer, and trust_folders on. The repo
+# URL is HTTPS: this Mac has no SSH key.
 version = 1
 
 [project]
 name = "PROJECT"
-repo = "git@github.com:msull/simplesingletable.git"
+repo = "https://github.com/msull/simplesingletable.git"
 base = "main"
 space = "Plan trial · simplesingletable"
 

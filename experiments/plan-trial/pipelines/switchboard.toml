@@ -2,12 +2,14 @@
 # per arm with PROJECT and MODEL filled in; the live pipeline file it was
 # taken from is the one under Dispatch's data directory. Differences from
 # it: no supervisor, one slot, a cap of six review rounds, the model set
-# on the investigator, planner and reviewer, and trust_folders on.
+# on the investigator, planner and reviewer, and trust_folders on. The repo
+# URL is HTTPS: this Mac has no SSH key. The lane setup runs in a login zsh so
+# cargo is on PATH (issue #154), as the live file does.
 version = 1
 
 [project]
 name = "PROJECT"
-repo = "git@github.com:msull/switchboard.git"
+repo = "https://github.com/msull/switchboard.git"
 base = "main"
 space = "Plan trial · Switchboard"
 
@@ -23,7 +25,7 @@ path = "."
 # one across every checkout, and cargo then reuses one worktree's build of
 # a workspace crate for another. The config file is excluded from status
 # through the clone's info/exclude, which every worktree of it shares.
-setup = ["sh", "-c", "mkdir -p .cargo && printf '[build]\\ntarget-dir = \"target\"\\n' > .cargo/config.toml && x=\"$(git rev-parse --git-common-dir)/info/exclude\" && (grep -qx .cargo/config.toml \"$x\" 2>/dev/null || echo .cargo/config.toml >> \"$x\") && cargo fetch --locked"]
+setup = ["zsh", "-lc", "mkdir -p .cargo && printf '[build]\\ntarget-dir = \"target\"\\n' > .cargo/config.toml && x=\"$(git rev-parse --git-common-dir)/info/exclude\" && (grep -qx .cargo/config.toml \"$x\" 2>/dev/null || echo .cargo/config.toml >> \"$x\") && cargo fetch --locked"]
 
 [operators.investigator]
 kind = "claude"

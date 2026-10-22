@@ -3,6 +3,7 @@
 # results/<short>-<issue>/pipeline/<model>-<rep>/: the investigation, the
 # first plan, the reviewed plan with its rounds, and the ticket's report.
 # Run it once every arm of the issue waits at finalize. Safe to run again.
+# A closed ticket for the arm (one retaken after main moved) is skipped.
 # usage: collect.sh <switchboard|simplesingletable> <issue>
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
@@ -15,7 +16,7 @@ last() { ls "$1" | sort -n | tail -1; }
 for model in opus sonnet haiku; do
   for rep in a b; do
     arm="$short-$model-$rep"
-    id=$(printf '%s\n' "$status" | awk -v p="$arm" -v n="#$issue" '$2==p && $3==n {print $1; exit}')
+    id=$(printf '%s\n' "$status" | awk -v p="$arm" -v n="#$issue" '$2==p && $3==n && $0 !~ /· closed/ {print $1; exit}')
     if [ -z "$id" ]; then echo "no ticket for $arm #$issue" >&2; continue; fi
     d="$out/$model-$rep"
     mkdir -p "$d"
