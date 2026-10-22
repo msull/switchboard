@@ -1,0 +1,47 @@
+{
+ "investigate-1": {
+  "session": "7907fdfe-c60e-493a-b8f5-0d478991a094",
+  "name": "investigator",
+  "cwd": "/Users/sbgragent/.dispatch/worktrees/192e7027",
+  "launch": {
+   "Argv": [
+    "--model",
+    "opus",
+    "--allowedTools",
+    "Edit(///Users/sbgragent/Library/Application Support/Dispatch/tickets/192e7027/investigate/1/root/**)"
+   ]
+  },
+  "transcript": "/Users/sbgragent/.claude/projects/-Users-sbgragent--dispatch-worktrees-192e7027/81bb4cc9-e254-4f0b-aca1-aa84327be7aa.jsonl",
+  "notes": "Dispatch ticket 192e7027 \u00b7 #230 A web control surface: the remote port serves a browser page, paired from a URL that carries the code \u00b7 stage investigate attempt 1"
+ },
+ "plan-1": {
+  "session": "f77c9d36-62e8-4f58-b0db-27815640288f",
+  "name": "planner",
+  "cwd": "/Users/sbgragent/.dispatch/worktrees/192e7027/.",
+  "launch": {
+   "Argv": [
+    "--model",
+    "opus",
+    "--allowedTools",
+    "Edit(///Users/sbgragent/Library/Application Support/Dispatch/tickets/192e7027/plan/1/repo/**)"
+   ]
+  },
+  "transcript": "/Users/sbgragent/.claude/projects/-Users-sbgragent--dispatch-worktrees-192e7027/3deae87b-d116-4bac-a679-3cd8fdb94b90.jsonl",
+  "notes": "Dispatch ticket 192e7027 \u00b7 #230 A web control surface: the remote port serves a browser page, paired from a URL that carries the code \u00b7 stage plan attempt 1"
+ },
+ "review-1": {
+  "session": "dbdc12c8-be2d-4ed3-bdc2-776b318c5b58",
+  "name": "planner planner",
+  "cwd": "/Users/sbgragent/.dispatch/worktrees/192e7027/.",
+  "launch": {
+   "Argv": [
+    "--model",
+    "opus",
+    "--allowedTools",
+    "Edit(///Users/sbgragent/Library/Application Support/Dispatch/tickets/192e7027/plan/1/repo/**)"
+   ]
+  },
+  "transcript": "/Users/sbgragent/.claude/projects/-Users-sbgragent--dispatch-worktrees-192e7027/60cbf7bd-07f9-4a00-b81e-a1001c5ecb68.jsonl",
+  "notes": "Dispatch ticket 192e7027 needs a decision (d1): The review of plan converged after 3 round(s). The reviewed copy is /Users/sbgragent/Library/Application Support/Dispatch/tickets/192e7027/review/1/repo/plan.md. Finalize it, or revise with --note?\nAnswer with: dispatch decide 192e7027 d1 <finalize|revise|park>"
+ }
+}

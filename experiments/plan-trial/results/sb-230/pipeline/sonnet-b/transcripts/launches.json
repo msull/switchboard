@@ -1,0 +1,47 @@
+{
+ "investigate-1": {
+  "session": "4c5cf267-290e-441a-80ae-5b026424e370",
+  "name": "investigator",
+  "cwd": "/Users/sbgragent/.dispatch/worktrees/f5eea5a6",
+  "launch": {
+   "Argv": [
+    "--model",
+    "sonnet",
+    "--allowedTools",
+    "Edit(///Users/sbgragent/Library/Application Support/Dispatch/tickets/f5eea5a6/investigate/1/root/**)"
+   ]
+  },
+  "transcript": "/Users/sbgragent/.claude/projects/-Users-sbgragent--dispatch-worktrees-f5eea5a6/1ed3df39-87dd-433c-952c-fd8511a5716e.jsonl",
+  "notes": "Dispatch ticket f5eea5a6 \u00b7 #230 A web control surface: the remote port serves a browser page, paired from a URL that carries the code \u00b7 stage investigate attempt 1"
+ },
+ "plan-1": {
+  "session": "38d62e74-11f3-45cf-b788-d3d5e0f57c3e",
+  "name": "planner",
+  "cwd": "/Users/sbgragent/.dispatch/worktrees/f5eea5a6/.",
+  "launch": {
+   "Argv": [
+    "--model",
+    "sonnet",
+    "--allowedTools",
+    "Edit(///Users/sbgragent/Library/Application Support/Dispatch/tickets/f5eea5a6/plan/1/repo/**)"
+   ]
+  },
+  "transcript": "/Users/sbgragent/.claude/projects/-Users-sbgragent--dispatch-worktrees-f5eea5a6/c3157c3b-8ea0-4f26-b466-85263419b0e2.jsonl",
+  "notes": "Dispatch ticket f5eea5a6 \u00b7 #230 A web control surface: the remote port serves a browser page, paired from a URL that carries the code \u00b7 stage plan attempt 1"
+ },
+ "review-1": {
+  "session": "6a0d7082-1283-403e-b3b3-f46e9fcb7711",
+  "name": "planner planner",
+  "cwd": "/Users/sbgragent/.dispatch/worktrees/f5eea5a6/.",
+  "launch": {
+   "Argv": [
+    "--model",
+    "sonnet",
+    "--allowedTools",
+    "Edit(///Users/sbgragent/Library/Application Support/Dispatch/tickets/f5eea5a6/plan/1/repo/**)"
+   ]
+  },
+  "transcript": "/Users/sbgragent/.claude/projects/-Users-sbgragent--dispatch-worktrees-f5eea5a6/2e34ea21-cc17-4911-886e-f78feeae8e78.jsonl",
+  "notes": "Dispatch ticket f5eea5a6 needs a decision (d1): The review of plan converged after 4 round(s). The reviewed copy is /Users/sbgragent/Library/Application Support/Dispatch/tickets/f5eea5a6/review/1/repo/plan.md. Finalize it, or revise with --note?\nAnswer with: dispatch decide f5eea5a6 d1 <finalize|revise|park>"
+ }
+}

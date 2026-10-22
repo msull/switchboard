@@ -53,8 +53,11 @@ records = {}
 for f in sb.glob("projects/*.json"):
     for s in json.loads(f.read_text()).get("sessions", []):
         cc = (s.get("resume") or {}).get("ClaudeCode") or {}
-        if cc.get("session_id") in wanted:
-            records[cc["session_id"]] = {"name": s.get("name"), "cwd": s.get("cwd"), "launch": s.get("launch"),
+        # Dispatch names the Switchboard session (the record's id); older
+        # records were matched by the Claude Code session id inside resume.
+        key = s.get("id") if s.get("id") in wanted else cc.get("session_id")
+        if key in wanted:
+            records[key] = {"name": s.get("name"), "cwd": s.get("cwd"), "launch": s.get("launch"),
                                         "transcript": cc.get("transcript"), "notes": s.get("notes")}
 out = d / "transcripts"; out.mkdir(exist_ok=True)
 launches = {}
