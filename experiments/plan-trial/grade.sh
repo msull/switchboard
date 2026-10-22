@@ -48,6 +48,16 @@ prompt="$grades/$letter.$grader.prompt.md"
   echo; echo "---"; echo; echo "# The rubric"; echo; cat "$here/rubric.md"
   echo; echo "---"; echo; echo "# The reference (owner-checked)"; echo; cat "$res/reference.md"
   echo; echo "---"; echo; echo "# The plan ($letter)"; echo; cat "$res/blind/$letter.md"
+  # A facts-arm plan cites the facts file its planner was given, which
+  # lives in Dispatch's data directory, not the tree. The packet carries
+  # it so a citation into it is checkable; the grader still sees one
+  # plan and no key. The script reads the key only to find the file.
+  arm=$(awk -v l="$letter" '$1==l {print $2}' "$res/blind/key.txt" 2>/dev/null || true)
+  if [ -n "$arm" ] && [ -s "$res/$arm/facts.md" ]; then
+    echo; echo "---"; echo; echo "# The facts file the planner was given"
+    echo; echo "The plan may cite this file as facts.md or facts:<line>; such a citation is checked against this text, not the tree. It was written by an earlier stage of the same process, not by the owner, so it is not the reference and may itself be wrong."
+    echo; cat -n "$res/$arm/facts.md"
+  fi
 } > "$prompt"
 start=$(date +%s)
 case $grader in

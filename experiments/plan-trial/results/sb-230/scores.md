@@ -9,6 +9,12 @@ grades/overrides.txt.
 
 | arm | plan | fable | codex | rounds | min | $ | words |
 |---|---|---|---|---|---|---|---|
+| facts/mixed-a | Q | 3 / 3 / 1 / 2 / note | 2 / 2 / 0 / 1 / no | 2 cap | 23 | 7.41 | 5182 |
+| facts/mixed-b | P | 3 / 3 / 1 / 2 / note | 3 / 2 / 0 / 1 / no | 2 cap spike | 22 | 6.66 | 4046 |
+| facts/opus-a | M | 3 / 3 / 2 / 2 / note | 3 / 2 / 1 / 1 / note | 2 cap | 26 | 9.18 | 3585 |
+| facts/opus-b | N | 3 / 3 / 0 / 1 / no | 3 / 2 / 0 / 0 / no | 2 cap | 25 | 10.25 | 4826 |
+| facts/sonnet-a | O | 3 / 2 / 0 / 2 / no | 3 / 1 / 0 / 1 / no | 2 cap | 16 | 4.22 | 3739 |
+| facts/sonnet-b | R | 3 / 2 / 1 / 2 / note | 3 / 1 / 0 / 1 / no | 2 cap | 13 | 3.25 | 3461 |
 | pipeline/haiku-a | H | 3 / 3 / 1 / 2 / note | 3 / 1 / 0 / 1 / no | 6 cap | 20 | 0.40 | 4713 |
 | pipeline/haiku-b | A | 3 / 2 / 1 / 2 / no | 3 / 1 / 0 / 1 / no | 5 | 19 | 0.33 | 3675 |
 | pipeline/opus-a | K | 3 / 2 / 1 / 2 / no | 2 / 1 / 0 / 0 / no | 3 | 20 | 7.61 | 5586 |
@@ -26,6 +32,9 @@ grades/overrides.txt.
 
 | arm | grounding | departures | overturn | overspec | hand-off yes/note/no | min | $ |
 |---|---|---|---|---|---|---|---|
+| facts/mixed | 2.8 | 2.5 | 0.5 | 1.5 | 0/2/2 | 22 | 7.03 |
+| facts/opus | 3.0 | 2.5 | 0.8 | 1.0 | 0/2/2 | 26 | 9.72 |
+| facts/sonnet | 3.0 | 1.5 | 0.2 | 1.5 | 0/1/3 | 15 | 3.74 |
 | pipeline/haiku | 3.0 | 1.8 | 0.5 | 1.5 | 0/1/3 | 19 | 0.37 |
 | pipeline/opus | 2.8 | 2.0 | 0.5 | 1.2 | 0/1/3 | 16 | 6.63 |
 | pipeline/sonnet | 3.0 | 1.8 | 0.8 | 1.0 | 0/2/2 | 11 | 3.46 |

@@ -242,7 +242,12 @@ git push
 Scoring is then `grade-all.sh` as before: it grades the new letters
 against the same reference and skips those whose grades exist, and
 `tally.py` puts the facts arms in the same table with their rounds
-(cap 2) and a `spike` mark where one was committed. The reference's errata section
+(cap 2) and a `spike` mark where one was committed. A facts arm's plan
+cites the facts file it was given, which lives in Dispatch's data
+directory, so `grade.sh` appends that file to the packet when the key
+maps the letter to a facts arm; the first pass over M to R ran without
+it and Codex marked every such citation wrong, so those grades are kept
+under `grades/v1-without-facts/` and the scored ones are the regrade. The reference's errata section
 stays as it is: the facts arms are graded by the same yardstick as the
 twelve, including its one known gap.
 
