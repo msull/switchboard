@@ -82,7 +82,8 @@ def worktree(res, name):
             run(["git", "-C", str(clone), "fetch", "-q", "origin", base])
         except subprocess.CalledProcessError:
             run(["git", "-C", str(clone), "fetch", "-q", "origin"])
-        run(["git", "-C", str(clone), "worktree", "add", "-q", "-b", f"stage/{name}", str(tree), base])
+        # The branch carries the issue too: two issues share one clone.
+        run(["git", "-C", str(clone), "worktree", "add", "-q", "-b", f"stage/{res.name}-{name}", str(tree), base])
         # The lane setup the pipeline runs: a target directory of its own,
         # excluded from status through the clone's info/exclude.
         (tree / ".cargo").mkdir(exist_ok=True)

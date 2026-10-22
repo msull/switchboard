@@ -141,3 +141,31 @@ the step ran. Costs are list price from the runs' own reports.
   WebSocket in a restored Safari tab.
 - Length: sonnet 1907 and 2072 words, over the 1500 asked; haiku 1325
   and 1469.
+
+## 2026-10-22: revision 2, eight runs and a transfer check
+
+- Four more isolated facts runs on #230 (sonnet c, d; haiku c, d). Over
+  all eight: seven found the WebKit bug, seven wrote a build line the
+  planner can use (six name polling), sonnet four of four on both at
+  $0.48 to $0.56, haiku three of four at $0.19 to $0.35 with one miss
+  (haiku-a) and one weak line (haiku-c). Two sonnet runs filed the
+  sources under Settled and the question under Unresolved. Sonnet runs
+  1907 to 2072 words, over the cap; haiku 1325 to 1671.
+- Transfer check on #187 with revision 2, from the same base commit:
+  the investigator wrote seventeen open questions, seven tree, two
+  mislabelled source (in-tree Switchboard code), three run, five owner
+  that were all design choices. The facts stage then ran no search,
+  said so in its first paragraph, settled the tree questions with line
+  references that match the reference (the Complete filter in
+  review_subject, nothing removes the failed copy, no carry for a
+  workflow stage), and cost $0.27 in 61 seconds. It restated the
+  issue's design decisions under For the owner, as every #230 run did.
+- stage.py named its branch by stage and label only, so the #187 run
+  collided with the #230 run's branch; the branch now carries the
+  issue.
+- Revision 3 (`pipelines/switchboard-facts-v3.toml`): the two phrases
+  naming a page and a browser are general; an owner question is one
+  only the owner can observe and a design choice is excluded, in the
+  investigator's tag and the facts file; an empty list is a fine
+  answer; a settled question is not listed under Unresolved as well.
+  Not yet run.
