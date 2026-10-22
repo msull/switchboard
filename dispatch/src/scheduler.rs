@@ -597,8 +597,12 @@ impl Runner {
         source: SourceSnapshot,
         now_ms: u64,
     ) -> Result<Ticket> {
+        // Once per project, not per data directory: another project on
+        // the same repository (a trial of the pipeline at another model,
+        // say) may hold the same issue at the same time.
         for existing in self.tickets()? {
-            if existing.source.identity == source.identity
+            if existing.project == project
+                && existing.source.identity == source.identity
                 && !matches!(existing.state, TicketState::Closed { .. })
             {
                 bail!(

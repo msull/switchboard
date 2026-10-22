@@ -106,7 +106,8 @@ confined; they run in Switchboard.
   number. For a task file, a hash of the task line's text with the
   marker removed and whitespace normalised; moving the line does not
   make a new ticket, editing its text does. A ticket is taken once per
-  identity. The text as it was when taken is
+  identity in a project; another project on the same repository may
+  take the same issue. The text as it was when taken is
   kept on the record, so what an operator was told is always known.
 - **Lane.** One repository the ticket touches: a worktree, a branch,
   and the Switchboard project made for it. A lane with no worktree
