@@ -1,0 +1,22 @@
+claude
+-p
+--model
+sonnet
+--output-format
+json
+--permission-mode
+acceptEdits
+--allowedTools
+WebSearch
+--allowedTools
+WebFetch
+--allowedTools
+Bash(cargo:*)
+--allowedTools
+Bash(git add:*)
+--allowedTools
+Bash(git commit:*)
+--allowedTools
+Edit(///private/tmp/claude-501/-Users-sully-code-repos-personal-switchboard/144a7def-c8e8-40f3-b0b2-5ef20bc546df/scratchpad/plan-trial/experiments/plan-trial/results/sb-230/stages/facts/v2-sonnet-b/**)
+cwd /Users/sully/code_repos/plan-trial/sb-230-stage-facts-v2-sonnet-b
+DISPATCH_INPUT_NOTES=/private/tmp/claude-501/-Users-sully-code-repos-personal-switchboard/144a7def-c8e8-40f3-b0b2-5ef20bc546df/scratchpad/plan-trial/experiments/plan-trial/results/sb-230/stages/facts/v2-sonnet-b/inputs/notes.md

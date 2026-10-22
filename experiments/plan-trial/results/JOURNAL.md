@@ -108,3 +108,36 @@ the step ran. Costs are list price from the runs' own reports.
   unresolved fact makes the robust path the default; the reviewer's
   instructions move into the review template, since its guidance field
   is never sent.
+
+## 2026-10-22: facts guidance revision 2, in isolation
+
+- `pipelines/switchboard-facts-v2.toml`: the facts operator must search
+  before fetching, record its queries, and treat a vendor's open bug
+  plus a project's documented workaround as settling; an Unresolved
+  line carries both branches and what the plan builds anyway; the
+  planner's default under an unresolved fact is the design that works
+  either way; the reviewer's instructions move into the review
+  templates, since its guidance field is never sent; the investigator
+  phrases outside questions in search terms.
+- First four runs of the facts stage alone, from opus-a's
+  investigation (`results/sb-230/stages/facts/v2-*`): sonnet a and b,
+  haiku a and b. Searches per run went from 0 to 1 under revision 1 to
+  10 to 16; every run lists its queries. Cost $0.19 to $0.56, two to
+  four minutes, no spikes, every worktree clean.
+- On the central fact: haiku-b filed "a click-through does not carry
+  wss" under Settled with the WebKit bug and the list thread, the
+  reference's position. sonnet-a put the two sources under Settled and
+  the question under Unresolved with the right build line (socket
+  optional, refetch on failure). sonnet-b filed it Unresolved with the
+  right build line. haiku-a did not find the bug and gave no build
+  line. So two of four reached the reference's design, one more
+  reached its sources, and one missed.
+- A wrong Settled line: sonnet-b says the Stop hook's last message is a
+  field on the session record, citing the hook binary and a core test;
+  the base tree has it only on the event. The kind of error a
+  correctness pass over the facts file is for.
+- New and true, not in the reference: haiku-b found WebKit bugs 200345
+  and 232666, that a SameSite=Strict cookie can be missing from a
+  WebSocket in a restored Safari tab.
+- Length: sonnet 1907 and 2072 words, over the 1500 asked; haiku 1325
+  and 1469.
