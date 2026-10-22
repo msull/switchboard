@@ -51,6 +51,17 @@ struct SwitchboardVisionApp: App {
         }
         .defaultSize(width: 900, height: 420)
         .restorationBehavior(.disabled)
+        // The keys panel, one per app: sized to its keys and placed
+        // where the system puts the virtual keyboard, low and close,
+        // so it is reached by touch like the keyboard it stands in for.
+        WindowGroup("Keys", id: KeysWindow.id, for: KeysWindow.Key.self) { _ in
+            KeysPanelView(model: model)
+        } defaultValue: {
+            KeysWindow.value
+        }
+        .windowResizability(.contentSize)
+        .defaultWindowPlacement { _, _ in WindowPlacement(.utilityPanel) }
+        .restorationBehavior(.disabled)
     }
 
     /// A dev aid: `SWITCHBOARD_INVITE` holds invites' JSON (the text of

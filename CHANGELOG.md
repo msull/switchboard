@@ -8,6 +8,10 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+
+- The headset has a keys panel: a small movable window placed where the virtual keyboard goes, with punctuation, line and paragraph breaks, delete and delete word, caret moves and the host's undo and redo, pressed by touch, that edits the prompt of the session being worked on after dictation.
+
 ## [0.4.1] - 2026-10-21
 
 - Dispatch takes an issue once per project rather than once across the data directory, so a second project on the same repository can take an issue the first already holds.

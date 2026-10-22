@@ -94,6 +94,17 @@ public struct CardWindowView: View {
             .accessibilityLabel("Prompt window")
             .help("The prompt window: the whole draft of the session being worked on")
             Button {
+                openWindow(id: KeysWindow.id, value: KeysWindow.value)
+            } label: {
+                Image(systemName: "keyboard")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.circle)
+            .controlSize(.mini)
+            .accessibilityLabel("Keys panel")
+            .help("The keys panel: punctuation, breaks and caret moves for the prompt, by touch")
+            Button {
                 LaunchLog.note("card \(request.id) sessions button opens main")
                 openWindow(id: MainWindow.id, value: MainWindow.value)
             } label: {
@@ -233,7 +244,6 @@ struct ControlBar: View {
     let session: SessionView
     let enabled: Bool
     let scope: Scope?
-    @State private var draft = ""
     @State private var busy = false
     @State private var note: String?
     @State private var confirmResume = false
@@ -241,21 +251,17 @@ struct ControlBar: View {
     /// The field's text when dictation started, on a host without a
     /// draft: what is heard goes after it, revised in place.
     @State private var typedBeforeDictation = ""
-    /// On a host with a draft: the text last taken from it, so a change
-    /// of the field that is not the host's is an edit to send; the
-    /// edits are numbered so the reply to an older one never overwrites
-    /// a newer one, and the host's text is applied only between edits.
-    @State private var hostText = ""
-    @State private var edit = 0
-    @State private var settled = 0
 
     private var canControl: Bool { enabled && scope == .control && !busy }
     private var hosted: Bool { model.hasDraft(ref) }
     private var hostDraft: DraftView? { hosted ? model.drafts[ref] : nil }
-    private var editing: Bool { edit != settled }
-    private var empty: Bool { draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    /// The field is the model's, so the keys panel edits the same text
+    /// and caret this bar shows.
+    private var field: EditField { model.field(ref) }
+    private var empty: Bool { field.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
+        @Bindable var field = field
         VStack(alignment: .leading, spacing: 6) {
             if scope != .control {
                 Text("This device reads only. Raise its scope on the host.")
@@ -288,7 +294,7 @@ struct ControlBar: View {
                 HStack(spacing: 8) {
                     HStack(alignment: .bottom, spacing: 6) {
                         Button {
-                            if !dictation.listening { typedBeforeDictation = draft }
+                            if !dictation.listening { typedBeforeDictation = field.text }
                             Task { await dictation.toggle() }
                         } label: {
                             Image(systemName: dictation.listening ? "waveform" : "mic.fill")
@@ -299,7 +305,7 @@ struct ControlBar: View {
                         .foregroundStyle(dictation.listening ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                         .disabled(!canControl)
                         .accessibilityLabel(dictation.listening ? "Stop dictation" : "Dictate")
-                        TextField("Message", text: $draft, axis: .vertical)
+                        TextField("Message", text: $field.text, selection: $field.selection, axis: .vertical)
                             .lineLimit(2...5)
                             .textFieldStyle(.plain)
                             .onSubmit(send)
@@ -310,15 +316,13 @@ struct ControlBar: View {
                     .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
                     .onChange(of: dictation.heard) { _, heard in
                         guard !hosted else { return }
-                        draft = Dictation.joined(typedBeforeDictation, heard)
+                        field.set(Dictation.joined(typedBeforeDictation, heard))
                     }
-                    .onChange(of: draft) { _, draft in
-                        if hosted { hostEdited(draft) } else { localEdited(draft) }
+                    .onChange(of: field.text) { _, text in
+                        if hosted { model.fieldEdited(ref) } else { localEdited(text) }
                     }
-                    .onChange(of: hostDraft) { _, host in
-                        guard let host, !editing, host.text != draft else { return }
-                        hostText = host.text
-                        draft = host.text
+                    .onChange(of: field.note) { _, trouble in
+                        if let trouble { note = trouble }
                     }
                     .onChange(of: dictation.problem) { _, problem in
                         if let problem { note = problem }
@@ -337,10 +341,6 @@ struct ControlBar: View {
         .task(id: hosted) {
             guard hosted else { return }
             await model.holdDraft(ref)
-            if let host = model.drafts[ref], !editing {
-                hostText = host.text
-                draft = host.text
-            }
         }
         .onAppear {
             dictation.onEvents = { recognizer, events in
@@ -371,29 +371,6 @@ struct ControlBar: View {
         }
     }
 
-    /// An edit by hand on a host with a draft: sent whole once the
-    /// typing pauses, as the editor's replace. The host's reply is the
-    /// text now; a newer edit outranks it.
-    private func hostEdited(_ text: String) {
-        guard text != hostText else { return }
-        edit += 1
-        let mine = edit
-        Task {
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            guard mine == edit else { return }
-            let outcome = await model.replaceDraft(ref, text: text)
-            guard mine == edit else { return }
-            settled = mine
-            switch outcome {
-            case .applied(let host):
-                hostText = host.text
-                if host.text != draft { draft = host.text }
-            default:
-                note = outcome.note
-            }
-        }
-    }
-
     private func tool(_ tool: DraftTool) {
         busy = true
         note = nil
@@ -413,26 +390,17 @@ struct ControlBar: View {
             note = nil
             Task {
                 await dictation.settle()
-                if draft != hostText {
-                    // The typing has not reached the host yet.
-                    edit += 1
-                    settled = edit
-                    _ = await model.replaceDraft(ref, text: draft)
-                }
+                await model.flushField(ref)
                 let outcome = await model.sendDraft(ref)
                 note = outcome.note
-                if case .applied(let host) = outcome {
-                    hostText = host.text
-                    draft = host.text
-                }
                 busy = false
             }
             return
         }
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = field.text.trimmingCharacters(in: .whitespacesAndNewlines)
         run {
             let outcome = await model.send(ref, text: text)
-            if outcome == .accepted { draft = "" }
+            if outcome == .accepted { field.set("") }
             return outcome
         }
     }

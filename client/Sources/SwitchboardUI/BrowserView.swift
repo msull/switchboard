@@ -45,6 +45,10 @@ public final class BrowserModel {
     public private(set) var drafts: [SessionRef: DraftView] = [:]
     private var draftHolders: [SessionRef: Int] = [:]
     public private(set) var draftHosts: Set<ServerID> = []
+    /// The device's own field per session, shared by the card's control
+    /// bar and the keys panel; made on first use and kept while the app
+    /// runs, so what a closed card held is there when it reopens.
+    public private(set) var fields: [SessionRef: EditField] = [:]
     /// Tickets read alone, by ref: the body, attempts and lanes the
     /// listing leaves out.
     public private(set) var ticketDetails: [TicketRef: TicketView] = [:]
@@ -169,6 +173,9 @@ public final class BrowserModel {
             drafts[ref] = await manager.draft(for: ref)
         }
         self.drafts = drafts
+        for (ref, draft) in drafts {
+            if let field = fields[ref], !field.editing { field.takeHost(draft.text) }
+        }
         var draftHosts: Set<ServerID> = []
         for host in store.hosts where await manager.hasDraft(host.id) {
             draftHosts.insert(host.id)
@@ -268,7 +275,54 @@ public final class BrowserModel {
     private func took(_ ref: SessionRef, _ outcome: DraftOutcome) {
         if case .applied(let draft) = outcome, draftHolders[ref] != nil {
             drafts[ref] = draft
+            if let field = fields[ref], !field.editing { field.takeHost(draft.text) }
         }
+    }
+
+    // MARK: The field
+
+    public func field(_ ref: SessionRef) -> EditField {
+        if let field = fields[ref] { return field }
+        let field = EditField()
+        fields[ref] = field
+        return field
+    }
+
+    /// The field's text changed by hand on a host with a draft: sent
+    /// whole once the typing pauses, as the editor's replace. The
+    /// host's reply is the text now; a newer edit outranks it.
+    public func fieldEdited(_ ref: SessionRef) {
+        let field = field(ref)
+        guard hasDraft(ref), field.text != field.hostText else { return }
+        field.edit += 1
+        let mine = field.edit
+        Task {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard mine == field.edit else { return }
+            let outcome = await replaceDraft(ref, text: field.text)
+            guard mine == field.edit else { return }
+            field.settled = mine
+            switch outcome {
+            case .applied(let host): field.takeHost(host.text)
+            default: field.note = outcome.note
+            }
+        }
+    }
+
+    /// Typing that has not reached the host yet, sent before a send.
+    public func flushField(_ ref: SessionRef) async {
+        let field = field(ref)
+        guard hasDraft(ref), field.text != field.hostText else { return }
+        field.edit += 1
+        field.settled = field.edit
+        _ = await replaceDraft(ref, text: field.text)
+    }
+
+    /// A key of the keys panel pressed on a session's field.
+    public func press(_ key: PanelKey, on ref: SessionRef) {
+        field(ref).press(key)
+        inputActivated(ref)
+        fieldEdited(ref)
     }
 
     public func draftAction(_ ref: SessionRef, _ tool: DraftTool) async -> DraftOutcome {

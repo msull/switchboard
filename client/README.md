@@ -8,7 +8,7 @@ targets visionOS 26.
 
 ```sh
 swift build                      # every target
-swift test                       # 81 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing
+swift test                       # 89 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing, the keys
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -135,7 +135,21 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   microphone, the tools and Send of its own, placed once and left
   where it is while the cards come and go, as the desktop preview is
   used with the Working Set; it is a view of the host's editor and
-  changes nothing else; "Trust
+  changes nothing else; the keys panel (`KeysPanelView`, one per app,
+  opened from a card's header, the prompt window or the Sessions
+  toolbar): three rows of keys the size of the system keyboard's
+  (punctuation, a line and a paragraph break, delete and delete word,
+  the caret by character and to the ends of the line and the text,
+  with the host's undo and redo), placed where the system puts the
+  virtual keyboard and moved like it, pressed by touch; a key is a
+  pure edit of the field's text and caret (`PanelKey`, `KeyEdit`), and
+  the field is one per session in the model (`EditField`: the text
+  and the selection as UTF-16 offsets, with the host sync of a hosted
+  draft), shared by the card's control bar, so a key pressed in the
+  panel is typing in the card and reaches the host the same way; a
+  mark goes against the word before it and spaces the word after, a
+  break takes the spaces beside it, and text from outside (the host's
+  echo, dictation) keeps a caret that was at the end at the end; "Trust
   this folder" when the host says the question is up, and Resume for a
   session that is not running, behind "Resume spends a turn"; a read
   device sees why the bar is off instead; the
@@ -191,7 +205,8 @@ SIMCTL_CHILD_SWITCHBOARD_INVITE="$INVITE" xcrun simctl launch --terminate-runnin
 hosts at once. A second dev aid, `SWITCHBOARD_OPEN`, lists card windows to open once
 their sessions are listed, as `<record id>[:<mode>]` entries separated
 by commas (`SIMCTL_CHILD_SWITCHBOARD_OPEN="$ID:screen"`); the entry
-`prompt` opens the prompt window, `prompt:<seconds>` after a wait. A
+`prompt` opens the prompt window, `prompt:<seconds>` after a wait, and
+`keys` opens the keys panel the same way. A
 third, `SWITCHBOARD_CLOSE_WINDOWS_AFTER=<seconds>`, closes every window
 that long after launch, once per process: the state the app is in when
 its last window is closed by hand, so that a `simctl launch` of the

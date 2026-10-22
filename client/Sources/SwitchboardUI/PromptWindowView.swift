@@ -143,6 +143,17 @@ public struct PromptWindowView: View {
             if let item {
                 SourceLabel(name: item.serverName, stale: item.stale, size: .small)
             }
+            Button {
+                openWindow(id: KeysWindow.id, value: KeysWindow.value)
+            } label: {
+                Image(systemName: "keyboard")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.circle)
+            .controlSize(.mini)
+            .accessibilityLabel("Keys panel")
+            .help("The keys panel: punctuation, breaks and caret moves for the prompt, by touch")
             ScaleControl(scale: $scale)
         }
     }
