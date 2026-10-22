@@ -169,3 +169,28 @@ the step ran. Costs are list price from the runs' own reports.
   investigator's tag and the facts file; an empty list is a fine
   answer; a settled question is not listed under Unresolved as well.
   Not yet run.
+
+## 2026-10-22: revision 3, first runs ($2.08 of the $50 budget so far)
+
+- The owner granted a $50 budget for stage-level iteration after
+  revision 2; `results/LEDGER.md` says what is counted and `spend.py`
+  sums it from the runs' own reports.
+- Four facts runs on #230 (sonnet a, b; haiku a, b; $0.19 to $0.41):
+  all four found the WebKit bug. sonnet-b and haiku-b filed it under
+  Settled cleanly; sonnet-a filed it Settled as "may not cover" and
+  again as unresolved for current iOS; haiku-a misread the bug as
+  about logging and filed it a lead. Build lines: polling fallback in
+  three, a SAN certificate "works either way" in haiku-a. Owner
+  sections fell to 150 to 310 words from 400 to 600; files 1126 to
+  1785 words, one still over the cap.
+- #187 under revision 3: the investigator wrote ten open questions,
+  six tree, one source, one run, two owner, both observations (is the
+  revised file still on disk; what text the owner saw). The facts stage
+  ran no search, settled the tree questions in 68 seconds for $0.30,
+  and its owner section holds those two questions with both branches.
+  The design-choice drift is gone on this issue.
+- Considered, not taken yet: a second facts finder on another model
+  with a resolver folding the two files. Held until the single sonnet
+  run's consistency is known over four repetitions; the trap test
+  (revision 2 sonnet-b's false claim against haiku-b's true one) is
+  the thing that would decide it.
