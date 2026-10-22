@@ -16,3 +16,7 @@ O facts/sonnet-a
 P facts/mixed-b
 Q facts/mixed-a
 R facts/sonnet-b
+S facts/haiku-a
+T facts/haiku-b
+U facts/cheap-a
+V facts/cheap-b
