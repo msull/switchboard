@@ -9,6 +9,10 @@ grades/overrides.txt.
 
 | arm | plan | fable | codex | rounds | min | $ | words |
 |---|---|---|---|---|---|---|---|
+| facts/cheap-a | U | 3 / 3 / 1 / 2 / note | 3 / 2 / 0 / 1 / no | 2 cap | 17 | 1.14 | 3637 |
+| facts/cheap-b | V | 3 / 2 / 1 / 2 / note | 3 / 1 / 0 / 1 / no | 2 cap | 16 | 1.09 | 3801 |
+| facts/haiku-a | S | 3 / 2 / 0 / 2 / note | 3 / 2 / 0 / 1 / no | 2 cap | 32 | 0.52 | 3443 |
+| facts/haiku-b | T | 3 / 2 / 0 / 2 / note | 3 / 1 / 0 / 0 / no | 2 cap | 27 | 0.44 | 3908 |
 | facts/mixed-a | Q | 3 / 3 / 1 / 2 / note | 2 / 2 / 0 / 1 / no | 2 cap | 23 | 7.41 | 5182 |
 | facts/mixed-b | P | 3 / 3 / 1 / 2 / note | 3 / 2 / 0 / 1 / no | 2 cap spike | 22 | 6.66 | 4046 |
 | facts/opus-a | M | 3 / 3 / 2 / 2 / note | 3 / 2 / 1 / 1 / note | 2 cap | 26 | 9.18 | 3585 |
@@ -32,6 +36,8 @@ grades/overrides.txt.
 
 | arm | grounding | departures | overturn | overspec | hand-off yes/note/no | min | $ |
 |---|---|---|---|---|---|---|---|
+| facts/cheap | 3.0 | 2.0 | 0.5 | 1.5 | 0/2/2 | 16 | 1.12 |
+| facts/haiku | 3.0 | 1.8 | 0.0 | 1.2 | 0/2/2 | 29 | 0.48 |
 | facts/mixed | 2.8 | 2.5 | 0.5 | 1.5 | 0/2/2 | 22 | 7.03 |
 | facts/opus | 3.0 | 2.5 | 0.8 | 1.0 | 0/2/2 | 26 | 9.72 |
 | facts/sonnet | 3.0 | 1.5 | 0.2 | 1.5 | 0/1/3 | 15 | 3.74 |
@@ -44,6 +50,7 @@ grades/overrides.txt.
 
 ## Where the graders disagree (two or more points, or yes against no)
 
+- facts/haiku-b (T): overspec 2 vs 0
 - pipeline/haiku-a (H): departures 3 vs 1
 - pipeline/opus-a (K): overspec 2 vs 0
 - pipeline/sonnet-a (J): overturn 2 vs 0

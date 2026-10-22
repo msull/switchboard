@@ -78,3 +78,33 @@ the step ran. Costs are list price from the runs' own reports.
   prompt, argv, artifacts, transcript and cost.
 - Noted while building it: the reviewer operator's `guidance` is never
   sent to the reviewer; only the review templates are.
+
+## 2026-10-22: facts batch two, transcripts, and what they show
+
+- The haiku and cheap arms planned on the trial Mac (a3abdcd), blinded
+  as S to V, graded here: `results/sb-230/scores.md` has all
+  twenty-two plans. haiku throughout: departures 1.8, overturn 0.0,
+  $0.48, 29 minutes. cheap (haiku writing, sonnet checking):
+  departures 2.0, $1.12, 16 minutes. Neither found the WebKit bug;
+  all four built socket-first pages.
+- Every session's transcript and launch record collected (5ecb607),
+  after the trial Mac fixed collect.sh to match sessions by the
+  Switchboard record id Dispatch names rather than the Claude Code id
+  inside it. 79 MB, no file over 15 MB.
+- Fidelity of `stage.sh` checked against opus-a's real facts session:
+  the first message is identical after path normalization, and the
+  launch argv matches rule for rule.
+- From the transcripts: no reviewer in any of the ten facts arms made a
+  WebSearch call (three WebFetch calls in total), so the reviewer's
+  tools went unused. Facts-stage searches per arm: sonnet 0 and 1,
+  cheap 0 and 0, opus 8 and 2, mixed 4 and 5, haiku 10 and 11. Sonnet
+  fetches pages it already knows and does not search; haiku searches
+  most and still did not find the bug.
+- The next guidance revision, to be tried with `stage.sh` before any
+  pipeline run: a [source] question requires a search with its own
+  terms and the facts file lists the queries tried; the evidence
+  standard names what settles an engineering decision (a vendor's open
+  bug plus a project's documented workaround counts); an unfavourable
+  unresolved fact makes the robust path the default; the reviewer's
+  instructions move into the review template, since its guidance field
+  is never sent.
