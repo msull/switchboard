@@ -1,7 +1,8 @@
 # Scores: sb-230
 
 Per grader: grounding / departures caught / decisions to overturn / over-specification / hand-off.
-Rounds and cap are the plan review's; minutes are investigate+plan+review for a pipeline arm and
+Rounds and cap are the plan review's (cap six in the first trial, two in the facts pipeline; spike marks
+a facts arm that committed one); minutes are investigate+(facts)+plan+review for a pipeline arm and
 the session's duration for a single one; cost is tokens at list price for a pipeline arm and
 Claude Code's own figure for a single session. A starred value is an adjudication from
 grades/overrides.txt.

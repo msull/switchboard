@@ -19,3 +19,16 @@ repo_vars() {
     *) echo "unknown repository $1 (switchboard or simplesingletable)" >&2; exit 2 ;;
   esac
 }
+# The facts pipeline's scenarios: a name and the model of each of its
+# four planning stages, in the order investigate facts plan review.
+# `mixed` spends on the two stages that gather and check information
+# and keeps the two that write on sonnet.
+FACTS_SCENARIOS="sonnet opus mixed"
+facts_models() {
+  case $1 in
+    sonnet) echo "sonnet sonnet sonnet sonnet" ;;
+    opus)   echo "opus opus opus opus" ;;
+    mixed)  echo "sonnet opus sonnet opus" ;;
+    *) echo "unknown scenario $1 ($FACTS_SCENARIOS)" >&2; exit 2 ;;
+  esac
+}

@@ -4,8 +4,8 @@
 usage: tally.py results/<short>-<issue>
 
 Reads blind/key.txt, grades/<letter>.<grader>.md (the score table each
-grader wrote), the pipeline arms' report.json and the single arms'
-run.json, and writes scores.md: one row per arm with both graders'
+grader wrote), the pipeline and facts arms' report.json and the single
+arms' run.json, and writes scores.md: one row per arm with both graders'
 columns and the run's measurements, the per-arm means over a and b, and
 where the graders disagree. Pipeline cost is tokens at list price; a
 single session's cost is what Claude Code reported.
@@ -30,7 +30,7 @@ def grade(letter, grader):
     if not f.exists():
         return None
     for line in f.read_text().splitlines():
-        m = re.match(r"\|\s*([A-L])\s*\|(.*)\|\s*$", line)
+        m = re.match(r"\|\s*([A-Z])\s*\|(.*)\|\s*$", line)
         if m and m.group(1) == letter:
             cells = [c.strip() for c in m.group(2).split("|")]
             if len(cells) >= 5:
@@ -47,22 +47,26 @@ def cost(tokens):
 
 def measure(arm):
     d = res / arm
-    if arm.startswith("pipeline/"):
+    if arm.startswith(("pipeline/", "facts/")):
         r = json.loads((d / "report.json").read_text())
         show = json.loads((d / "show.json").read_text())
         # The review stage is still open (finalize is never answered in
         # the trial), so the report clocks it to collection time; its
         # real end is when finalize was asked.
-        ms = sum(s["ms"] for s in r["stages"] if s["stage"] in ("investigate", "plan"))
+        ms = sum(s["ms"] for s in r["stages"] if s["stage"] in ("investigate", "facts", "plan"))
         reviews = [a for a in show["attempts"] if a["stage"] == "review"]
         asked = [dc["made_ms"] for dc in show["decisions"] if dc["name"] == "finalize"]
         if reviews and asked:
             ms += max(asked) - reviews[-1]["started_ms"]
         failed = sum(a["state"] == "failed" for a in reviews)
         rounds = r["plan_rounds"]
-        cap = "cap" if rounds >= 6 else ""
+        # The first trial's review cap is six rounds; the facts pipeline's is two.
+        cap = "cap" if rounds >= (2 if arm.startswith("facts/") else 6) else ""
         if failed:
             cap = (cap + f" {failed} rerun").strip()
+        spike = (d / "spikes.txt").exists() and (d / "spikes.txt").read_text().strip() != ""
+        if spike:
+            cap = (cap + " spike").strip()
         return {"rounds": rounds, "cap": cap, "min": ms / 60000,
                 "usd": cost(r["tokens"]), "words": len((d / "plan.md").read_text().split())}
     r = json.loads((d / "run.json").read_text())
@@ -96,7 +100,8 @@ def num(x):
 
 out = ["# Scores: " + res.name, "",
        "Per grader: grounding / departures caught / decisions to overturn / over-specification / hand-off.",
-       "Rounds and cap are the plan review's; minutes are investigate+plan+review for a pipeline arm and",
+       "Rounds and cap are the plan review's (cap six in the first trial, two in the facts pipeline; spike marks",
+       "a facts arm that committed one); minutes are investigate+(facts)+plan+review for a pipeline arm and",
        "the session's duration for a single one; cost is tokens at list price for a pipeline arm and",
        "Claude Code's own figure for a single session. A starred value is an adjudication from",
        "grades/overrides.txt.", "",

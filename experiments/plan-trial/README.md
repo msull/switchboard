@@ -14,10 +14,12 @@ Two public repositories, one issue each, twelve plans per issue:
 |---|---|---|
 | pipeline | investigate, plan, review rounds (cap 6), stops at `finalize` | opus, sonnet, haiku |
 | single | one headless Claude Code session, the issue plus the planner's guidance, no review | opus, sonnet, fable |
+| facts | investigate, facts (web search, fetch, a spike when needed), plan, review rounds (cap 2), stops at `finalize` | three scenarios, below |
 
 Every arm runs twice (`a` and `b`), so the two repetitions of one arm
 measure consistency. That is 12 Dispatch tickets and 12 single sessions
-in all. Implementation is a later phase and continues from these
+for the first two arms, and 6 more tickets for the facts arm, which was
+added after #230 was scored (see "The facts pipeline" below). Implementation is a later phase and continues from these
 tickets, so nothing here is closed when planning is done.
 
 What stays fixed across the twelve plans of an issue: the base commit
@@ -165,6 +167,79 @@ and the same collect, blind, commit when its arms are done, under
 review rounds than #187 took; the cap of six still applies. Leave the
 simplesingletable arms alone.
 
+## The facts pipeline
+
+What the first two issues showed: review rounds added words but never
+a fact, no stage had web access, and the plans that scored best on
+#230 were the ones that hedged the one external question (whether a
+browser keeps a WebSocket to a click-through certificate) with a
+fallback. The owner's reference settled that question with two
+searches. So `pipelines/switchboard-facts.toml` is the live pipeline
+with one stage added and the review changed, as its header comment
+says: the investigator ends with tagged open questions; a `facts`
+stage between `lanes` and `plan` settles them and the issue's claims
+about the world outside the tree, with `WebSearch` and `WebFetch` in
+its `args`, a closer read, or a spike under `spikes/` in the shape of
+the ones there, committed on the branch; the planner treats the facts
+file as the yardstick and writes a fallback beside any decision that
+rests on an unresolved line; and the review has a cap of two rounds
+with web tools, premises in round one and cuts in round two.
+
+Three scenarios, each run twice, so six more plans of the same issue
+against the same base commit:
+
+| scenario | investigate | facts | plan | review | compares with |
+|---|---|---|---|---|---|
+| `sonnet` | sonnet | sonnet | sonnet | sonnet | pipeline sonnet, single sonnet |
+| `opus` | opus | opus | opus | opus | pipeline opus |
+| `mixed` | sonnet | opus | sonnet | opus | both: the money goes to the two stages that gather and check information |
+
+The projects are `sbf-<scenario>-<a|b>` in their own space,
+`Plan trial · Switchboard facts`. Running them, on the trial Mac with
+the branch pulled:
+
+```sh
+./make-arms.sh                      # writes the six sbf-* files beside the twelve
+./take.sh switchboard 230 facts     # refuses if main has moved off results/sb-230/base.txt
+```
+
+The same decisions rules apply: never answer `finalize`, one `rerun`
+per ticket. Two things are new to watch:
+
+- **The facts stage may spike.** It runs in the lane and may build a
+  throwaway crate under `spikes/`; its gate is a clean tree, so an
+  uncommitted spike gets the dirty-tree nudge and then a question.
+  `dispatch tail` shows what it is doing. A facts stage that writes a
+  one-paragraph facts file because nothing was open is a valid result,
+  not a failure.
+- **Permission prompts.** The facts operator's `args` allow `WebSearch`,
+  `WebFetch`, `cargo` and `git add`/`commit`; the reviewer's allow the
+  two web tools. Anything else an agent reaches for asks in its pane,
+  as in the first trial. If a facts session sits at a prompt, answer it
+  and note which tool in the results commit message.
+
+When all six wait at `finalize`:
+
+```sh
+./collect.sh switchboard 230 facts   # results/sb-230/facts/<scenario>-<rep>/, with facts.md and spikes.txt
+./blind.sh switchboard 230 facts     # adds the six as M..R to blind/, appending the key
+git add experiments/plan-trial/results
+git commit -m "Plan trial: switchboard #230 planned in the facts arms"
+git push
+```
+
+Scoring is then `grade-all.sh` as before: it grades M to R against the
+same reference and skips A to L, whose grades exist, and `tally.py`
+puts the facts arms in the same table with their rounds (cap 2) and a
+`spike` mark where one was committed. The reference's errata section
+stays as it is: the facts arms are graded by the same yardstick as the
+twelve, including its one known gap.
+
+Not in this cut: a human gate after `facts` for the questions only the
+owner can answer. The trial runs unattended, so the facts file's "For
+the owner" section is read by the planner as unresolved, with the
+fallback it names. The live pipeline can add the gate afterwards.
+
 ## Scoring
 
 First the owner writes `results/<short>-<issue>/reference.md` from the code at base, before reading any plan: departures from the issue's framing, the decisions a plan must get right, and the anchors it should cite. Then `grade-all.sh` scores every blind plan with two graders and `tally.py` writes `scores.md`; the owner adjudicates where the graders disagree, recording any correction in `grades/overrides.txt`.
@@ -193,16 +268,17 @@ and remove `~/code_repos/plan-trial`.
 | file | what it is |
 |---|---|
 | `pipelines/switchboard.toml`, `pipelines/simplesingletable.toml` | the live pipelines as trial bases, with `PROJECT` and `MODEL` to fill in |
+| `pipelines/switchboard-facts.toml` | the Switchboard pipeline with the facts stage and the two-round review, with `PROJECT` and a model per planning stage to fill in |
 | `prompts/<repo>.md` | the planner's guidance, verbatim from the base file, for the single arm |
-| `make-arms.sh` | writes the twelve arm projects into Dispatch's `pipelines/` |
-| `take.sh` | records the base commit and takes an issue in a repository's six arms |
+| `make-arms.sh` | writes the twelve arm projects and the six facts arms into Dispatch's `pipelines/` |
+| `take.sh` | records the base commit and takes an issue in a repository's six arms, or with `facts` in the six facts arms |
 | `single.sh` | one headless Claude Code plan at the base commit |
-| `collect.sh` | copies an issue's pipeline arms out of Dispatch's data directory |
-| `blind.sh` | shuffles the twelve plans into A to L with a key and a score sheet |
+| `collect.sh` | copies an issue's pipeline arms, or with `facts` its facts arms, out of Dispatch's data directory |
+| `blind.sh` | shuffles the twelve plans into A to L with a key and a score sheet; with `facts`, adds the six facts plans as M to R |
 | `rubric.md` | how to score a plan, and what to put beside the scores |
 | `base-tree.sh` | a worktree at an issue's base commit under `~/code_repos/plan-trial`, made on first use |
 | `grade.sh` | scores one blind plan with one grader (`fable` or `codex`) from one packet: issue, rubric, reference, plan, base worktree; writes `grades/<letter>.<grader>.md` |
 | `grade-all.sh` | every plan of an issue through both graders, four at a time, skipping grades already written |
 | `tally.py` | joins grades to the key and the runs' measurements into `scores.md`; applies `grades/overrides.txt` |
-| `lib.sh` | shared by the scripts: the `dispatch` binary, the data directory, the repositories |
+| `lib.sh` | shared by the scripts: the `dispatch` binary, the data directory, the repositories, the facts scenarios |
 | `results/` | one directory per issue, committed to this branch |

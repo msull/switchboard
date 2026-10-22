@@ -3,7 +3,7 @@
 # the issue, rubric.md, the owner-checked reference, the plan, and a
 # worktree at the issue's base commit. The grader never sees the key or
 # another plan. Writes results/<short>-<issue>/grades/<letter>.<grader>.md.
-# usage: grade.sh <switchboard|simplesingletable> <issue> <A..L> <fable|codex>
+# usage: grade.sh <switchboard|simplesingletable> <issue> <A..R> <fable|codex>
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"

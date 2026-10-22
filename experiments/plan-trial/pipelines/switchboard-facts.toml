@@ -1,0 +1,181 @@
+# The Switchboard pipeline with a facts stage, as a plan trial project.
+# make-arms.sh writes one copy per arm with PROJECT and the four stage
+# models filled in (INVESTIGATE_MODEL, FACTS_MODEL, PLAN_MODEL,
+# REVIEW_MODEL). Differences from pipelines/switchboard.toml, which is
+# the live pipeline as the first trial ran it:
+#
+# - The investigator ends its notes with the open questions, each tagged
+#   by what could answer it: the tree, a source outside it, a run, or
+#   only the owner.
+# - A facts stage between lanes and plan settles those questions and
+#   every claim the issue makes about the world outside the tree, with
+#   web search and fetch, a closer read, or a spike under spikes/ in the
+#   shape of the ones there, committed on the branch. It writes one
+#   claim per line with its evidence, and says what stayed unresolved.
+# - The planner reads the facts as the yardstick: a decision resting on
+#   an unresolved line says so and carries a fallback.
+# - The review has a cap of two rounds with web tools: round one names
+#   the premise under each decision and whether anything supports it,
+#   round two is cuts only.
+#
+# Why: in the first trial no stage had web access, review rounds added
+# words but never a fact, and the plans that scored best were the ones
+# that hedged the one external question (a browser's behaviour) with a
+# fallback. The owner's reference settled it with two searches.
+#
+# Everything else is the first trial's file: no supervisor, two slots,
+# trust_folders on, an HTTPS repo URL, the lane setup in a login zsh.
+version = 1
+
+[project]
+name = "PROJECT"
+repo = "https://github.com/msull/switchboard.git"
+base = "main"
+space = "Plan trial · Switchboard facts"
+
+[source]
+kind = "github"
+repo = "msull/switchboard"
+label = "dispatch"            # marking an issue with it is the handover
+
+[[lanes]]
+name = "repo"
+path = "."
+# The tree builds in its own target directory: ~/.cargo/config.toml shares
+# one across every checkout, and cargo then reuses one worktree's build of
+# a workspace crate for another. The config file is excluded from status
+# through the clone's info/exclude, which every worktree of it shares.
+setup = ["zsh", "-lc", "mkdir -p .cargo && printf '[build]\\ntarget-dir = \"target\"\\n' > .cargo/config.toml && x=\"$(git rev-parse --git-common-dir)/info/exclude\" && (grep -qx .cargo/config.toml \"$x\" 2>/dev/null || echo .cargo/config.toml >> \"$x\") && cargo fetch --locked"]
+
+[operators.investigator]
+kind = "claude"
+args = ["--model", "INVESTIGATE_MODEL"]
+guidance = "Read CLAUDE.md, docs/design.md and docs/lessons.md first. Find the code the issue touches, name the files with line numbers as they are in this worktree, and say what the on-disk record and rehydration would be before what the pane looks like. End your notes with a section headed Open questions: every question a plan would have to settle that this tree does not answer, one per line, each tagged [tree] when a closer read of the tree would settle it, [source] when a document outside the tree would (a browser's behaviour, a platform's rules, a crate's API, a protocol), [run] when only running something would, and [owner] when only the owner can (it needs a device, an account, a signed bundle, or a call on taste). A claim the issue makes about the world outside this tree is a question, not a finding, until something settles it; list it even when it sounds right. Do not settle the questions here: say what you did not check. Write nothing but your notes, and write them before your last turn ends: a turn that ends with no notes file is read as a failure, however many background agents are still working for you. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live."
+
+[operators.facts]
+kind = "claude"
+# Web search and fetch are the tools this stage exists for; cargo and
+# commit rules let a spike build and land unattended. Dispatch adds its
+# own rules for the attempt directory.
+args = ["--model", "FACTS_MODEL", "--allowedTools", "WebSearch", "--allowedTools", "WebFetch", "--allowedTools", "Bash(cargo:*)", "--allowedTools", "Bash(git add:*)", "--allowedTools", "Bash(git commit:*)"]
+guidance = "You settle questions before a plan is written; you do not write the plan. Read CLAUDE.md, spikes/README.md and the investigation first. Your questions are the investigation's Open questions and every claim the issue or the investigation makes about the world outside this tree: a browser, a platform, a crate, a protocol, a tool. Settle each the cheapest way that yields evidence: a closer read of the tree; a search and then a fetch of the primary source (the vendor's documentation, the standard, the bug tracker, the crate's own docs; a blog post is a lead, not evidence); or a spike. A spike is a throwaway crate or script under spikes/NN-<slug>/ (the next number after the highest there) with a README in the shape of the others under spikes/: the question, the commands run, their output, the recommendation. It is not built by the main crate, and it is committed on this branch. Run a spike only for a question the plan turns on that no source settles, and make it the smallest experiment that answers it. A question that needs a device, an account, a signed bundle, the Keychain, or a person's tap is not runnable here: it goes to the owner. Write the facts file: one claim per line, each followed by its evidence (a URL, a file and line in this worktree, or a spike directory and the line of its README), under three headings: Settled; Unresolved, with what you tried and why it did not settle; and For the owner, each question with what the plan should do if the answer is yes and if it is no. A claim with no evidence goes under Unresolved, never under Settled. Be short: a question the tree answers is one line. If the investigation lists no open questions and the issue claims nothing about the world outside the tree, say so in one paragraph and stop. Never ask the owner anything here; write the question down. Work in this session only: launch no background agents or subagents. Write the facts file with the Write tool before your last turn ends, and leave git status empty: an uncommitted spike fails the stage. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live."
+
+[operators.planner]
+kind = "claude"
+args = ["--model", "PLAN_MODEL"]
+guidance = "Write the plan the way docs/design.md sections are written: a heading Where this departs from the issue first (each claim in the issue the code or the facts file does not bear out and what the plan does instead, or the one line Nothing), then the record, the signals, the actions and effects, the UI, the tests. The facts file is the yardstick for every claim about the world outside this tree: a decision that rests on a line under Settled cites it; a decision that rests on a line under Unresolved or For the owner says so where the decision is made and names the fallback the implementer builds if the answer goes the other way. Do not re-derive a settled fact, and do not plan around a question the facts file answered; do contradict a settled line when the tree says otherwise, with the file and line. One commit, README and design status updated, the app runs at every step. Every file and line reference is checked against the worktree you are in, not the notes; name the schema versions as they are today. A version number in a plan is a snapshot: write the bump as: from the value in store.rs or model.rs at implementation time, plus one, because a ticket landing in parallel may take the next number first. Size the plan to the change: a section with nothing to say (no record change, no new signal, no UI) is one line saying so, not a heading with prose under it; a small issue gets a short plan. End with a one-line commit message and the list of contract additions, which the implementer copies. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live."
+
+[operators.reviewer]
+kind = "claude"   # Claude Code as the reviewer until Codex gets an improvement pass
+args = ["--model", "REVIEW_MODEL", "--allowedTools", "WebSearch", "--allowedTools", "WebFetch"]
+guidance = "Hold the plan to the layering in src/lib.rs and the hard rules in CLAUDE.md. An objection is something the plan gets wrong or leaves out, never a preference, and never a request for more: a plan that is longer after your round and no truer is a round wasted. Work in this session only: launch no background agents or subagents, and write your file before you end your turn."
+[operators.reviewer.review]
+reviewer = "claude"
+review_first = "The plan at {plan} is for the repository at {worktree}, on branch {branch}; the facts the planner was given are at {inputs.facts}. This round is about premises. For each decision the plan makes, name the premise it rests on and say which of three things supports it: a line of the facts file (cite it), the tree (cite the file and line), or nothing. A decision resting on nothing, or on a line the facts file lists as unresolved, with no fallback written beside it, is an objection; so is a decision that contradicts a settled line without citing the tree against it. Where the plan and the facts file disagree and you can settle it yourself with a search and a fetch of the primary source, do so and cite what you found rather than leaving it as doubt. Then the usual checks against the repository's CLAUDE.md and docs/design.md: no keystroke injection, no writes into a project's dot-directories, additive contract, schema bump for any serialized change, and that line references and schema versions match the worktree as it is now. Write numbered objections to {feedback}. If there are none, write exactly this line alone: {no_feedback}"
+review_round = "The planner answered at {response} and updated the plan at {plan} (for the repository at {worktree}; the facts are at {inputs.facts}). This is the last round. Reply to each earlier point at {feedback} in one line each. Then the one thing left: cuts. List, by section, what an implementer would not need: restated code, a section with nothing to say, steps the test suite would force anyway, machinery for a case the facts file rules out, a second mechanism where the first suffices. Raise nothing new that is not a cut. If every point is settled and there is nothing to cut, write exactly this line alone: {no_feedback}"
+respond = "Feedback on your plan is at {feedback}. The plan under review is the copy at {plan}. First read that file, then edit it and only it, leaving the earlier plan untouched. Re-read it to confirm each edit is in the file before you write a word of the response: a response that describes an edit the file does not contain costs a whole round. Then answer each point at {response}, each answer naming the section of the plan that changed, or saying why the plan did not change. A point asking for a cut is answered by cutting, or by one line on what the cut would break."
+respond_to_user = "The user says: {text}. Edit the copy at {plan} and only that file, then answer at {response}."
+handoff = "The plan at {plan} was reviewed and is final."
+no_feedback = "No further feedback."
+cap = 2
+
+[operators.correctness]
+kind = "claude"
+guidance = "You review a branch of Switchboard for correctness only: logic that does not do what the plan says, a state the core can reach that the UI cannot show, an effect that runs twice or never, a record change without its SCHEMA_VERSION step, a test that passes for the wrong reason. Read docs/design.md's binding sections and CLAUDE.md first. Say where and why, with the failing input or state; do not restate the diff. After the first round, read only the change since the head you last reviewed plus your open points; withdraw a settled point in one line and do not reopen it. Wording and layout are the style reviewer's, not yours. Work in this session only: launch no background agents or subagents. Write your feedback file with the Write tool before you end your turn; a turn that ends without it fails the round and stops the other reviewer too. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live."
+
+[operators.style]
+kind = "claude"
+guidance = "You review a branch of Switchboard against CLAUDE.md's Style and Architecture sections: comments that narrate instead of explain, logic under ui/, I/O or clocks in the core, missing doc comments on public items, clever code where simple would do, debris a fix round left (a value nothing reads, a block left from moving code, a doubled doc comment), README and design.md not updated for what changed. Say where and why; do not restate the diff. After the first round, read only the change since the head you last reviewed plus your open points; withdraw a settled point in one line. When every point you have left is wording, say so in your first line so the round can close on it. Work in this session only: launch no background agents or subagents. Write your feedback file with the Write tool before you end your turn; a turn that ends without it fails the round and stops the other reviewer too. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live."
+
+[operators.implementer]
+kind = "claude"
+guidance = "Implement the finalized plan on the branch in the commits the plan names, with the plan's commit message and its list of contract additions. Where the plan names a fallback for an unresolved fact, build what the plan says and note it; do not settle the fact yourself. Before each commit: cargo fmt --all, cargo clippy --locked --workspace --all-targets -- -D warnings, cargo test --locked --workspace. Commit messages carry no tool attribution. Do not push and do not open a pull request: the branch is reviewed first and published by a later stage. Write to your notes what you built, the commits, and anything the plan got wrong. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live. The stage is not done until git status is empty: commit before your last turn ends, and check it. A dirty tree fails the attempt. Before bumping RECORD_VERSION or SCHEMA_VERSION, read the value in your worktree: the plan was written against an older main, so bump from what is there and write the migrate step for that pair. If your change touches a cfg(target_os) arm or anything else that compiles only on one platform, also run cargo clippy --locked -p dispatch --all-targets --target x86_64-unknown-linux-gnu -- -D warnings (the Linux std target is installed; the whole workspace cannot be cross-checked, only the dispatch crate), because CI runs on Linux and a scoped allow or an unused import there fails the PR."
+
+[operators.fixer]
+kind = "claude"
+guidance = "You address one round of code review points on a Switchboard branch. For each point: fix it, or say in your response why not. Commit with git commit --fixup=<sha> naming the implementation commit the fix amends when that is clear; otherwise a plain commit, which Dispatch folds into the head this round reviewed. When your fix renames or removes something the implementation commit message names (its contract list, a function, a test), use git commit --squash=<sha> instead, with a body that states the corrected name, so the folded message stays true. Leave nothing behind from the fix: everything you add is read by something, no block or indirection is left from moving code, every doc comment sits on one item. Run cargo fmt --all, cargo clippy --locked --workspace --all-targets -- -D warnings and cargo test --locked --workspace, then commit with a message that says what changed, never the round number. Commit messages carry no tool attribution. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live. If your change touches a cfg(target_os) arm or anything else that compiles only on one platform, also run cargo clippy --locked -p dispatch --all-targets --target x86_64-unknown-linux-gnu -- -D warnings (the Linux std target is installed; the whole workspace cannot be cross-checked, only the dispatch crate), because CI runs on Linux and a scoped allow or an unused import there fails the PR."
+
+[operators.rebaser]
+kind = "claude"
+args = ["--model", "sonnet"]
+guidance = "You rebase a Switchboard branch onto its moved base. Keep the change's intent on every conflict; when main changed the same code for its own reasons, keep both intents. After resolving, run cargo fmt --all --check, cargo clippy --locked --workspace --all-targets -- -D warnings and cargo test --locked --workspace in the worktree, and say in your notes which hunks had both sides kept. If the branch has a pull request, the rebase must leave its body true: fix any claim the rebase changed with gh pr edit, and when you kept both sides of a conflict add one line saying where. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live."
+
+[[stages]]
+name = "investigate"
+operator = "investigator"
+context = "root"
+writes = ["notes"]
+prompt = "Issue #{issue.number}: {issue.title}\n\n{issue.body}\n\nInvestigate and write your findings to {notes}, ending with the Open questions section."
+
+[[stages]]
+name = "lanes"
+gate = { kind = "human", decision = "lanes" }   # one lane: auto below
+
+[[stages]]
+name = "facts"                 # in the lane, so a spike has a tree to build in and a branch to land on
+operator = "facts"
+context = "each"
+writes = ["facts"]
+prompt = "Issue #{issue.number}: {issue.title}\n\n{issue.body}\n\nThe investigation is at {inputs.notes}. Settle its open questions and the issue's claims about the world outside this tree, and write the facts file to {facts}. A spike, if one is needed, goes under spikes/ in this worktree and is committed on branch {branch}; do not push."
+gate = { kind = "command", in = "lane", argv = ["sh", "-c", "test -z \"$(git status --porcelain)\""] }   # a spike is committed or absent; a dirty tree is nudged, then asked
+
+[[stages]]
+name = "plan"
+operator = "planner"
+context = "each"
+writes = ["plan"]
+prompt = "Issue #{issue.number}: {issue.title}\n\n{issue.body}\n\nUsing the investigation at {inputs.notes} and the facts at {inputs.facts}, write a plan for it to {plan}."
+
+[[stages]]
+name = "review"
+review = "reviewer"
+context = "each"
+subject = "plan"
+# A Switchboard plan review on a copy of the plan: the plan attempt's
+# session is the source. Done when the run is finalized, which is the
+# `finalize` decision below unless the dial says auto. Writes `plan`.
+gate = { kind = "external", check = "review-finalized" }
+
+[[stages]]
+name = "implement"
+operator = "implementer"
+context = "each"
+writes = ["notes"]
+prompt = "The plan at {inputs.plan} was reviewed and finalized; the facts it rests on are at {inputs.facts}. Implement it on branch {branch} in this worktree, commit, and write your notes to {notes}. Do not push or open a pull request."
+gate = { kind = "command", argv = ["sh", "-c", "cargo fmt --all -- --check && cargo clippy --locked --workspace --all-targets -- -D warnings && cargo test --locked --workspace"], in = "lane" }
+
+[[stages]]
+name = "review-code"           # two reviewers read the branch at once; a fresh implementer addresses their points; implement's checks at the accepted head
+context = "each"
+reviewers = ["correctness", "style"]
+implementer = "fixer"
+cap = 3
+commits = "fold"             # as the stage completes, each fix round folds into the commits it amends; the tree is unchanged, so the checks are not run again
+gate = { kind = "command", like = "implement" }
+
+[[stages]]
+name = "pr"                    # the reviewed branch is published once: one CI run, nothing unreviewed in a PR
+operator = "implementer"
+context = "each"
+writes = ["notes"]
+prompt = "The branch {branch} in this worktree was implemented from the plan at {inputs.plan} and passed code review. Push it and open a pull request against main with gh. The body has four sections: what it does and how; Contract additions (every added action, effect, port method, model field or wire field, and any schema bump, or None); Beyond the issue (one line per thing the branch does that the issue did not ask for and which review round asked for it, or Nothing); and the tests that pin each behaviour. It describes the branch as it is now, after review. No tool attribution anywhere. Write the PR number to {notes}."
+gate = { kind = "command", in = "lane", argv = ["sh", "-c", "test -z \"$(git status --porcelain)\" && git fetch -q origin && test \"$(git rev-parse HEAD)\" = \"$(git rev-parse origin/$(git rev-parse --abbrev-ref HEAD))\""] }   # nothing uncommitted, and the branch is pushed
+
+[[stages]]
+name = "ready"
+context = "each"
+gate = { kind = "external", check = "pr-checks" }   # at the branch head; pending is waiting, not failure
+
+[[stages]]
+name = "merge"
+context = "each"
+gate = { kind = "external", check = "pr-merged", decision = "merge" }   # pending on you until GitHub says merged; rebundle is yours
+
+
+[policy]
+slots = 2
+waiting_on_me = 3
+trust_folders = true         # a fresh worktree's folder-trust question, answered for the trial's agents
+rebaser = "rebaser"
+max_rebases = 2
+decisions = { lanes = "auto", finalize = "ask", review-code = "auto" }
