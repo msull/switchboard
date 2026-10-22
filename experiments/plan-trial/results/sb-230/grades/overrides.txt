@@ -1,0 +1,1 @@
+B codex grounding 3 — Codex marked `model.rs`, `action.rs` and `ports/` wrong as root-relative paths while calling them recognizable shorthand for src/core/model.rs, src/core/action.rs and src/ports/; the two line references it opened were right.
