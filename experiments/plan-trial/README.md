@@ -256,6 +256,51 @@ owner can answer. The trial runs unattended, so the facts file's "For
 the owner" section is read by the planner as unresolved, with the
 fallback it names. The live pipeline can add the gate afterwards.
 
+## Testing one stage in isolation
+
+Rerunning the pipeline to try a guidance change costs an hour and six
+tickets. `stage.sh` runs one stage as the pipeline would run it, from
+the inputs of a finished run, so a change to one operator's guidance
+can be tried several times in minutes:
+
+```sh
+./stage.sh facts v2 sonnet a results/sb-230/facts/opus-a            # the facts stage from opus-a's investigation
+FACTS=results/sb-230/stages/facts/v2-sonnet-a/facts.md \
+  ./stage.sh plan v2 sonnet a results/sb-230/facts/opus-a           # a plan from that facts file
+PLAN=results/sb-230/stages/plan/v2-sonnet-a/plan.md \
+  ./stage.sh review v2 opus a results/sb-230/facts/opus-a           # round one of the review on it
+./stage.sh respond v2 sonnet a results/sb-230/facts/opus-a          # the planner's answer (a fresh session; see stage.py)
+```
+
+The label (`v2`) names the guidance revision, so runs group by it; the
+pipeline file defaults to `pipelines/switchboard-facts.toml` and a
+sixth argument names another. `stage.py`'s doc comment says exactly
+what is reproduced and the two things that differ (`claude -p` rather
+than a pane; `acceptEdits` rather than the trial Mac's own settings).
+`STAGE_DRY=1` writes the prompt and argv without launching, to diff
+against a captured session. Each run keeps its prompt, argv, inputs,
+artifacts, transcript, cost and the pipeline file it used, under
+`results/<issue>/stages/<stage>/<label>-<model>-<rep>/`.
+
+Score a stage's output the same way as a plan where it is one
+(`grade.sh` takes any blind letter whose file exists), and by reading
+where it is not: a facts file is judged on whether it settled what the
+reference settled, with evidence, and on what it filed as unresolved.
+
+## Preserving everything
+
+The write-up at the end is assembled from this branch, so every run
+leaves its record here: `results/JOURNAL.md` is the dated log of what
+ran and what was decided; each issue directory holds the issue text,
+the base commit, the reference and its errata, every arm's notes,
+facts, first plan, review rounds, final plan, Dispatch report and
+show JSON, the session transcripts `collect.sh` copies, the blind
+copies, every grade with its prompt and cost, the first-pass grades
+where a packet changed, overrides and the tally. The pipeline file
+each batch ran is the one committed with that batch's results, and a
+stage run keeps its own copy. Nothing is deleted or rewritten: a
+mistake is kept and the correction added beside it.
+
 ## Scoring
 
 First the owner writes `results/<short>-<issue>/reference.md` from the code at base, before reading any plan: departures from the issue's framing, the decisions a plan must get right, and the anchors it should cite. Then `grade-all.sh` scores every blind plan with two graders and `tally.py` writes `scores.md`; the owner adjudicates where the graders disagree, recording any correction in `grades/overrides.txt`.
@@ -297,4 +342,6 @@ and remove `~/code_repos/plan-trial`.
 | `grade-all.sh` | every plan of an issue through both graders, four at a time, skipping grades already written |
 | `tally.py` | joins grades to the key and the runs' measurements into `scores.md`; applies `grades/overrides.txt` |
 | `lib.sh` | shared by the scripts: the `dispatch` binary, the data directory, the repositories, the facts scenarios |
+| `stage.sh`, `stage.py` | one stage in isolation, as the pipeline would run it, from a finished run's inputs |
+| `results/JOURNAL.md` | the dated log of every run and decision, for the write-up |
 | `results/` | one directory per issue, committed to this branch |

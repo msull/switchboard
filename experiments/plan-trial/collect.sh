@@ -39,6 +39,38 @@ echo "$arms" | while read -r arm name; do
     fi
     "$DISPATCH" report "$id" --json > "$d/report.json" 2>/dev/null || true
     "$DISPATCH" show "$id" --json > "$d/show.json" 2>/dev/null || true
+    # Every session of the ticket, for the write-up: its transcript (what
+    # it searched, read and wrote, turn by turn) and the launch Switchboard
+    # recorded for it (argv and cwd). Switchboard's project records name
+    # each session's transcript file; the planner's session also holds
+    # its review-round answers, since Dispatch resumes it.
+    python3 -I - "$d" "${SWITCHBOARD_DATA_DIR:-$HOME/Library/Application Support/Switchboard}" <<'PYIN'
+import json, pathlib, shutil, sys
+d, sb = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+show = json.loads((d / "show.json").read_text())
+wanted = {a["session"]: f"{a['stage']}-{a['n']}" for a in show["attempts"] if a.get("session")}
+records = {}
+for f in sb.glob("projects/*.json"):
+    for s in json.loads(f.read_text()).get("sessions", []):
+        cc = (s.get("resume") or {}).get("ClaudeCode") or {}
+        if cc.get("session_id") in wanted:
+            records[cc["session_id"]] = {"name": s.get("name"), "cwd": s.get("cwd"), "launch": s.get("launch"),
+                                        "transcript": cc.get("transcript"), "notes": s.get("notes")}
+out = d / "transcripts"; out.mkdir(exist_ok=True)
+launches = {}
+for sid, label in wanted.items():
+    r = records.get(sid)
+    launches[label] = {"session": sid, **(r or {"missing": "no Switchboard record for this session"})}
+    t = pathlib.Path(r["transcript"]) if r and r.get("transcript") else None
+    if t and t.exists():
+        shutil.copy(t, out / f"{label}.jsonl")
+    else:
+        for c in pathlib.Path.home().glob(f".claude/projects/*/{sid}.jsonl"):
+            shutil.copy(c, out / f"{label}.jsonl")
+(out / "launches.json").write_text(json.dumps(launches, indent=1) + "\n")
+have = sorted(p.name for p in out.glob("*.jsonl"))
+print(f"  transcripts: {', '.join(have) if have else 'none found'}")
+PYIN
     if [ "$set_" = facts ]; then
       # What the facts stage committed: every file on the branch beyond
       # the base commit. The facts stage is the only one that commits
