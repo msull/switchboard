@@ -8,6 +8,8 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-21
+
 - Dispatch takes an issue once per project rather than once across the data directory, so a second project on the same repository can take an issue the first already holds.
 
 ## [0.4.0] - 2026-10-21
