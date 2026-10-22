@@ -54,16 +54,10 @@ On the Mac that runs the trial:
    cd ~/code_repos/personal/switchboard/experiments/plan-trial
    ```
 
-4. Build the `dispatch` CLI from this branch, which takes an issue once
-   per project; the 0.4.0 release refuses an issue any project already
-   holds. `take` runs in the CLI process, so the app's bundled runner
-   drives the tickets unchanged:
-
-   ```sh
-   (cd ../.. && cargo build --locked --release -p dispatch)
-   ```
-
-   The scripts use `target/release/dispatch` when it exists.
+4. Switchboard on this Mac is 0.4.1 or newer (the Settings menu shows
+   the version; the app updates itself from GitHub releases). That
+   release's `dispatch` takes an issue once per project; 0.4.0 refused
+   an issue any project already held.
 
 5. Write the twelve trial projects into Dispatch's data directory:
 
