@@ -16,3 +16,9 @@ See rubric.md. 0 to 3 per column; hand-off is yes, note or no.
 | J | | | | | | |
 | K | | | | | | |
 | L | | | | | | |
+| M | | | | | | |
+| N | | | | | | |
+| O | | | | | | |
+| P | | | | | | |
+| Q | | | | | | |
+| R | | | | | | |

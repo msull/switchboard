@@ -1,0 +1,71 @@
+# Facts for issue #230 (web control surface on the remote port)
+
+Worktree HEAD after this stage: spike 23 committed on `dispatch/230-a-web-control-surface-the-remote-port-se` (not pushed). Line numbers are this worktree's.
+
+## Settled
+
+### The tree
+- The Swift side decodes the invite only through `PairingInvite.parse` (JSON); its callers are the CLI's `pair`, the headset's paste field and a per-line scan in the browser view, plus one fixture test. Evidence: `client/Sources/switchboard-remote/main.swift:111`, `client/Sources/SwitchboardUI/BrowserView.swift:106` and `:883`, `client/Tests/SwitchboardProtocolTests/FixturesTests.swift:161`. Every other `PairingInvite(` in `client/Tests/` builds the struct directly and does not parse text.
+- A UI test asserts that the "Copy invite" clipboard text is JSON with `code`, `spki_sha256` and an `addresses` array, so a URL payload breaks it. Evidence: `tests/ui.rs:7474`–`7492`.
+- No log line prints a request's query or token. The only lines that name a request are `refuse` (method and path) and the pairing line (device name and scope). Evidence: `src/app.rs:3666`–`3670`, `:3762`–`3766`; `src/adapters/remote.rs:714` logs only the connection error.
+- A read-scope device gets 403 with code `scope` on `send`. Evidence: `src/app.rs:3166`–`3171`.
+- No authenticated endpoint returns a device's own scope or name. Only the `/pair` reply carries `scope`. Evidence: the route table `src/app.rs:3044`–`3105`, and `src/app.rs:3660`–`3665`.
+- `GET waiting` returns `{sessions: [SessionView]}` across all projects. `SessionView` carries `project` (an id), `kind`, `card`, `waiting` and `waiting_reason`, but no excerpt. Project names come from `GET projects` (`ProjectView{id,name,…}`), which is one request, not one per project. Evidence: `control/src/lib.rs:832`–`834`, `:637`–`688`, `:691`–`697`.
+- `screen` refuses a session that is not running. An exited command is read through `runs/{n}/output`, and an agent with no conversation falls back to `screen`. Evidence: `docs/remote-client.md:206`, `:208`.
+- The watch set holds at most 128 keys, and a key idles out after 60 s. Evidence: `src/content.rs:40`, `:42`; eviction is at `src/app.rs:1787`–`1789`.
+- The version is available at compile time as `env!("CARGO_PKG_VERSION")`. There is no `build.rs`. Evidence: `src/adapters/updates.rs:25`; no `build.rs` at the root.
+- `docs/design.md` after the Remote client section holds "Versioning and updates", "Token and time accounting" and "Open questions". None of them was found to bear on a web surface. Evidence: `docs/design.md:3585`, `:3604`, `:3672`; a grep for remote, web or browser in 3585–3678 finds nothing.
+- CI runs fmt, clippy, `scripts/ci-test.sh` and the egui_term tests on Linux. It has no step that checks embedded files or their sizes. Evidence: `.github/workflows/ci.yml`.
+- The rustls config sets no ALPN, so a browser speaks HTTP/1.1 to the port. HTTP/2 over TLS needs ALPN "h2". Evidence: `grep -i alpn src/adapters/remote.rs` finds nothing; https://www.rfc-editor.org/rfc/rfc9113#section-3.2 ("HTTP/2 connections over TLS MUST use protocol negotiation in TLS").
+- The certificate has no SAN, CN `Switchboard <id>`, and a validity from 1975-01-01 to 4096-01-01 (rcgen's defaults). Evidence: `src/adapters/remote.rs:102`–`107`; `~/.cargo/registry/src/*/rcgen-0.14.10/src/certificate.rs:84`–`85`.
+- `qrcode::QrCode::new` uses EC level M. Evidence: `qrcode-0.14.1/src/lib.rs:75`–`76`.
+- The accept loop closes a fifth unauthenticated connection before reading it. Evidence: `src/adapters/remote.rs:567`, `:702`.
+
+### Certificates (spike 23)
+- Apple's TLS evaluation refuses today's certificate even when it is the only trusted anchor: "certificate name does not match input". Installing and trusting it on the device therefore cannot work as the certificate stands. Evidence: `spikes/23-browser-cert/README.md:46`; https://support.apple.com/en-us/103769 ("must present the DNS name … in the Subject Alternative Name"; "DNS names in the CommonName … are no longer trusted").
+- With an IP SAN and the serverAuth EKU, the same evaluation trusts it, for that IP only. Evidence: `spikes/23-browser-cert/README.md:47`, `:50`.
+- A certificate issued now and valid to 4096 is refused as "not standards compliant". The 825-day and EKU rules bind certificates issued after 2019-07-01, which is why rcgen's 1975 `not_before` passes. Evidence: `spikes/23-browser-cert/README.md:49`; https://support.apple.com/en-us/103769.
+- The 398-day limit does not apply to certificates from user-added roots. Evidence: https://support.apple.com/en-us/102028.
+- On iOS a user-installed root is trusted by hand in Settings › General › About › Certificate Trust Settings. Evidence: https://support.apple.com/en-us/102390.
+- The pairing URL encodes to a smaller QR than the JSON invite (version 8, 49 modules, against version 9, 53 modules). Evidence: `spikes/23-browser-cert/README.md:61`.
+
+### WebSocket, cookies, CSP
+- A browser WebSocket handshake goes out with credentials mode "include", so it carries the origin's cookies. Evidence: https://websockets.spec.whatwg.org/ §2.2 step 2.
+- If the page offers subprotocols and the 101 carries none, or one it did not offer, the browser fails the connection. Today's `respond_upgrade` sends no `Sec-WebSocket-Protocol`. Evidence: https://websockets.spec.whatwg.org/ §2.2 step 11.2; RFC 6455 §4.1 https://www.rfc-editor.org/rfc/rfc6455#section-4.1; `src/adapters/remote.rs:519`.
+- Subprotocol values must be RFC 2616 tokens (U+0021–U+007E, no separators), so base64url fits and `=` does not. Evidence: RFC 6455 §4.1 item 10.
+- Browsers send `Origin` on the WebSocket handshake. RFC 6455 says a server that is not meant for every page SHOULD check it and answer 403. Evidence: RFC 6455 §4.1 item 8 and §10.2.
+- Cookies are not isolated by port. Two Switchboard hosts on one IP share a cookie jar, and `__Host-` does not separate ports either. Evidence: https://www.rfc-editor.org/rfc/rfc6265#section-8.5; draft-ietf-httpbis-rfc6265bis §4.1.3.2 ("Ports are the only piece of the origin model that `__Host-` cookies continue to ignore").
+- `__Host-` requires `Secure`, `Path=/` and no `Domain`, all of which a host-only cookie on an IP can meet. A cookie's lifetime is capped at 400 days. Evidence: rfc6265bis §4.1.3.2, §5.5 (https://httpwg.org/http-extensions/draft-ietf-httpbis-rfc6265bis.html).
+- For an IP host, "site" is (scheme, IP) and ignores the port. So `SameSite=Strict` does not stop a request from another port on the same IP, and only an `Origin` check does. Evidence: https://html.spec.whatwg.org/multipage/browsers.html#obtain-a-site.
+- CSP `'self'` on `https://ip:port` matches `wss://ip:port`, so `connect-src 'self'` covers both the API and the events socket. Evidence: https://www.w3.org/TR/CSP3/ §6.7.2.8 step 4.2.2.
+- Without `'unsafe-inline'`, a nonce or a hash, inline script is blocked. `frame-ancestors` is ignored in a `<meta>` CSP, so it has to go in a header. Evidence: CSP3 §6.1.10, §6.4.2.
+- By the spec's text an `https` origin is a secure context whatever the certificate's state. Evidence: https://w3c.github.io/webappsec-secure-contexts/ §3.1 step 3.
+- Chromium refuses to register a service worker on a page whose certificate is invalid. This does not matter to the first cut, which needs none. Evidence: https://codereview.chromium.org/643773004.
+
+### Platform
+- Traffic from Safari, `SFSafariViewController` and a `WKWebView` needs no Local Network permission on iOS. Another browser app (Chrome, Firefox on iOS) is an app and triggers its own Local Network prompt. Evidence: https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy ("Local network operations", the exceptions list).
+- Safari's script-writable storage (localStorage, IndexedDB, sessionStorage, service workers) is deleted after seven days of Safari use without interaction on the site. The article names no cap for server-set cookies. Evidence: https://webkit.org/blog/10218/full-third-party-cookie-blocking-and-more/.
+- Safari on iPad (all but iPad mini, per the 2019 post) sends the macOS user agent, so "Safari on iPad" cannot be told from "Safari on Mac" by the UA alone. Evidence: https://webkit.org/blog/9674/new-webkit-features-in-safari-13/.
+- `history.replaceState` replaces the current session-history entry and its URL (same origin only), so Back does not return to the coded URL. Evidence: https://developer.mozilla.org/en-US/docs/Web/API/History/replaceState (a lead pointing at the HTML spec anchor `dom-history-replacestate-dev`, which I did not read in full).
+- A page script cannot read the peer certificate, and none of the specs read above define an API that exposes it. The `key` comparison in the URL is therefore against `/info`'s own claim (`src/app.rs:3568`). This is negative evidence: no source was found that states it outright.
+
+## Unresolved
+- Whether Safari's click-through covers the `wss://` socket on the same host:port. WebKit bug 41419 (open, last modified 2026-01-12) says wss worked only after "always trust", not after a page exception; websockify's wiki and third-party posts report that iOS Safari accepted the page and not WSS. These are bug-tracker comments and reports, not a test. It needs a device and a tap: see For the owner. Evidence tried: https://bugs.webkit.org/show_bug.cgi?id=41419, https://github.com/novnc/websockify/wiki/encrypted-connections.
+- Whether Safari (macOS, iOS) offers a click-through at all for a CN-only certificate on an IP. Apple forum reports conflict ("clicking does nothing" against "Show Details › visit"), and no vendor source settles it. Tried: https://discussions.apple.com/thread/255774513, https://developer.apple.com/forums/thread/764665.
+- Whether a click-through exception survives a reload, a host restart (same certificate), a reissued certificate, and Safari's private mode. No source was found.
+- Whether a `Secure` cookie set on a click-through origin is stored and sent on later visits. rfc6265bis §5.7 leaves "secure" to the user agent, and no browser source was found.
+- Whether the browser's global history, iCloud tab sync or the camera's scan list keeps the coded URL that `replaceState` replaced. The specs read say nothing about global history.
+- Whether an iOS camera banner or a link preview fetches the URL before the tap. No source was found. A `GET /?code=…` that the host ignores is harmless to the host, but it touches the 4-connection pool.
+- How many parallel HTTP/1.1 connections Safari opens to one host on first load (page, CSS, JS, `/info`, favicon, socket), against `MAX_UNAUTHENTICATED = 4`. No WebKit source was found. It needs a browser run, and no Chrome or Firefox is installed here (only Safari, which cannot click through by script under the no-keystroke rule).
+- Whether `crypto.randomUUID()` is available on a page with an overridden certificate in Safari and Chrome. By the spec yes (secure context by scheme), but Chromium's treatment of certificate-error pages was not confirmed. The plan can fall back to `crypto.getRandomValues`.
+- How a Swift parser should take `https://ip:port/?code=&key=&id=` (`URLComponents.queryItems`, IPv6 brackets). It was not checked against Apple's docs; it is a code question for the plan.
+
+## For the owner
+- **Does Safari on your iPhone (and an iPad, another Mac) let you click through the warning for today's CN-only certificate on `https://<LAN ip>:<port>/`, and does the events socket then connect?** Yes: the click-through can be the trust step, as long as the certificate gains an IP SAN anyway so that a later trusted install works. No (no bypass, or the socket fails after the page loads, which WebKit 41419 suggests): the plan must reissue the certificate with an IP SAN per advertised address, the serverAuth EKU and a validity at most 825 days, or keep the 1975 `not_before`, with the same key so the SPKI pin holds (spike 23). It must also offer the certificate for download (a profile) and say in the dialog to trust it in Certificate Trust Settings. It should also consider a fallback for live changes that does not need `wss://`, polling `/api/v1/...` on a timer.
+- **Are you willing to install a profile and toggle full trust on each phone?** Yes: the download path. The plan serves the certificate (or a `.mobileconfig`) from a pre-pairing path, adds it to the §5 allowlist, and reissues the certificate when the LAN IP changes, which a SAN-bound certificate requires (spike 23, README:50). No: the click-through only. The page must then tolerate a lost exception, and the dialog says the warning is the trust step.
+- **Cookie or `Sec-WebSocket-Protocol` for the token?** Cookie (`__Host-` name, `HttpOnly; Secure; SameSite=Strict`): the host must check `Origin` on every cookie-authenticated request and on the handshake, because `SameSite` does not cover another port on the same IP and two hosts on one IP share the cookie (RFC 6265 §8.5). The cookie name should then carry the server id. Subprotocol: the page keeps the token in JS-readable storage (localStorage is wiped after 7 days of no use, per the WebKit blog), and the 101 must echo the offered value.
+- **One QR (URL) or keep the JSON?** URL only: `PairingInvite.parse` and its three callers learn the URL form, `tests/ui.rs:7486` changes, and the Swift tests (not in CI) cover the parser. Keep JSON: "Copy invite" stays JSON for the CLI and the headset, and the QR alone becomes the URL.
+- **Should a browser get control scope (the reply box) in the first cut, given that an impostor on the LAN can serve a page that asks for the code?** Yes: the scope picker as today. No: browser pairings are read-only until raised in the dialog.
+- **The card's excerpt: a new masked `SessionView` field, or one `last-response` fetch per session?** Field: an additive wire change that moves the fingerprints. Fetch: N requests per list view against the 128-key watch set.
+- **The name for a browser device: from the user agent (iPad reads as Mac) or typed on the page before pairing?** UA: a small host-side table, with iPad reported as "Safari on Mac". Typed: a field on the page, defaulted from the UA.
+- **Which devices and OS versions must the acceptance run on?** The plan names them, and the owner runs: scan, warning, sessions, live reorder, reply, revoke.

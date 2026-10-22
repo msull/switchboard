@@ -1,0 +1,355 @@
+{
+  "id": "3b5e14b3",
+  "project": "sbf-opus-b",
+  "title": "A web control surface: the remote port serves a browser page, paired from a URL that carries the code",
+  "state": "active",
+  "stages": [
+    {
+      "stage": "investigate",
+      "attempts": 1,
+      "ms": 302888,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 50,
+          "output": 19209,
+          "cache_write": 112393,
+          "cache_write_1h": 112393,
+          "cache_read": 2306531,
+          "messages": 25
+        }
+      }
+    },
+    {
+      "stage": "lanes",
+      "attempts": 1,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "facts",
+      "attempts": 1,
+      "ms": 217934,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 34,
+          "output": 13818,
+          "cache_write": 61398,
+          "cache_write_1h": 61398,
+          "cache_read": 1208770,
+          "messages": 17
+        }
+      }
+    },
+    {
+      "stage": "plan",
+      "attempts": 1,
+      "ms": 382387,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 64,
+          "output": 32471,
+          "cache_write": 124149,
+          "cache_write_1h": 124149,
+          "cache_read": 3363542,
+          "messages": 32
+        }
+      }
+    },
+    {
+      "stage": "review",
+      "attempts": 1,
+      "ms": 667269,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 122,
+          "output": 58195,
+          "cache_write": 303862,
+          "cache_write_1h": 303862,
+          "cache_read": 7944660,
+          "messages": 61
+        }
+      }
+    },
+    {
+      "stage": "implement",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "review-code",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "pr",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "ready",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "merge",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    }
+  ],
+  "plan_lines": 399,
+  "plan_bytes": 22691,
+  "plans": [
+    {
+      "lane": "repo",
+      "lines": 399,
+      "bytes": 22691
+    }
+  ],
+  "plan_reviews": [
+    {
+      "stage": "review",
+      "attempt": 1,
+      "rounds": [
+        {
+          "n": 1,
+          "new": 13,
+          "open": 13
+        },
+        {
+          "n": 2,
+          "new": 18,
+          "open": 18
+        }
+      ]
+    }
+  ],
+  "plan_rounds": 2,
+  "plan_points": 31,
+  "code_reviews": [],
+  "code_rounds": 0,
+  "code_points": 0,
+  "code_points_by_reviewer": {},
+  "code_incomplete": false,
+  "fix_passes": 0,
+  "rebases": 0,
+  "pr_url": null,
+  "commits": null,
+  "range": null,
+  "tickets": 1,
+  "answered_by": {},
+  "evidence_files": 0,
+  "evidence_bytes": 0,
+  "usage": [
+    {
+      "stage": "investigate",
+      "n": 1,
+      "context": "root",
+      "models": {
+        "claude-opus-5-5": {
+          "input": 50,
+          "output": 19209,
+          "cache_write": 112393,
+          "cache_write_1h": 112393,
+          "cache_read": 2306531,
+          "messages": 25
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "de54c695-a3fe-44a3-a73e-5ef34bebc5a4",
+          "source": "transcript",
+          "models": {
+            "claude-opus-5-5": {
+              "input": 50,
+              "output": 19209,
+              "cache_write": 112393,
+              "cache_write_1h": 112393,
+              "cache_read": 2306531,
+              "messages": 25
+            }
+          },
+          "span_ms": 233420,
+          "active_ms": 233420,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "facts",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-opus-5-5": {
+          "input": 34,
+          "output": 13818,
+          "cache_write": 61398,
+          "cache_write_1h": 61398,
+          "cache_read": 1208770,
+          "messages": 17
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "dc2ed624-d09e-4231-b5f7-7e92e4523f9d",
+          "source": "transcript",
+          "models": {
+            "claude-opus-5-5": {
+              "input": 34,
+              "output": 13818,
+              "cache_write": 61398,
+              "cache_write_1h": 61398,
+              "cache_read": 1208770,
+              "messages": 17
+            }
+          },
+          "span_ms": 211189,
+          "active_ms": 211189,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "plan",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-opus-5-5": {
+          "input": 64,
+          "output": 32471,
+          "cache_write": 124149,
+          "cache_write_1h": 124149,
+          "cache_read": 3363542,
+          "messages": 32
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "6c3ad57c-1548-44a2-a696-059ac5e6c88c",
+          "source": "transcript",
+          "models": {
+            "claude-opus-5-5": {
+              "input": 64,
+              "output": 32471,
+              "cache_write": 124149,
+              "cache_write_1h": 124149,
+              "cache_read": 3363542,
+              "messages": 32
+            }
+          },
+          "span_ms": 376903,
+          "active_ms": 376903,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "review",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-opus-5-5": {
+          "input": 122,
+          "output": 58195,
+          "cache_write": 303862,
+          "cache_write_1h": 303862,
+          "cache_read": 7944660,
+          "messages": 61
+        }
+      },
+      "sessions": [
+        {
+          "role": "planner",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "bf84d1fe-b258-451b-8e37-b9cc5f3c9c19",
+          "source": "transcript",
+          "models": {
+            "claude-opus-5-5": {
+              "input": 54,
+              "output": 33659,
+              "cache_write": 192488,
+              "cache_write_1h": 192488,
+              "cache_read": 4712402,
+              "messages": 27
+            }
+          },
+          "span_ms": 385187,
+          "active_ms": 357802,
+          "asking_ms": 0,
+          "idle_ms": 27385
+        },
+        {
+          "role": "plan reviewer",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "481d7873-51dc-4ac9-8ed0-22f8e7d79494",
+          "source": "transcript",
+          "models": {
+            "claude-opus-5-5": {
+              "input": 68,
+              "output": 24536,
+              "cache_write": 111374,
+              "cache_write_1h": 111374,
+              "cache_read": 3232258,
+              "messages": 34
+            }
+          },
+          "span_ms": 554595,
+          "active_ms": 310878,
+          "asking_ms": 0,
+          "idle_ms": 243717
+        }
+      ]
+    }
+  ],
+  "tokens": {
+    "claude-opus-5-5": {
+      "input": 270,
+      "output": 123693,
+      "cache_write": 601802,
+      "cache_write_1h": 601802,
+      "cache_read": 14823503,
+      "messages": 135
+    }
+  },
+  "not_counted": 0,
+  "not_found": 0,
+  "kind_unknown": 0
+}

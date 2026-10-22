@@ -1,0 +1,19 @@
+# Response to plan.feedback-1.md
+
+All edits are in `plan.md` in this directory; I re-read it after editing and each one is there.
+
+1. **Fragment claim uncited.** Changed: "Where this departs", item 1. It now cites RFC 3986 §3.5, RFC 9110 §7.1 and §10.1.3, says I have not fetched them and that Facts has no line for the claim, and says the previewer/camera half stays Unresolved with nothing in the plan stopping it. It also notes that an old-form query URL does send the code in the request line.
+
+2. **No fallback for a hard-failing click-through.** Changed: "The record", a new bullet "If click-through hard-fails even with the SAN", and a note on the download fallback that it rests on the Unresolved iOS profile install. The plan's answer is that the page is unusable on that browser, documented in the dialog and design status. It rejects a plain `http:` listener (code and token in the clear, against §5) and says the ticket is then reported as not deliverable on that browser rather than weakened. Facts line 9 is now marked as an inference there.
+
+3. **Reissue only covered the existing-identity arm.** Changed: "The record", the "When it runs" bullet. `make_identity` gains `sans: &[IpAddr]`. All four call sites are listed (`src/app.rs:2866`, which both the key-lost arm `:2810` and the first-run arm `:2836` go through; `src/adapters/remote.rs:982` and `:1012`; `tests/remote.rs:1423`). The existing-identity arm calls `reissue_certificate`. A test line was added in "The tests". Contract additions list the signature change.
+
+4. **`IDENTITY_SCHEMA_VERSION` left symbolic.** Partly changed: "The record" and the contract list now say "1 today, so 2". I kept the "value at implementation time, plus one" wording because the task instructions for this plan require the bump to be written that way, and a parallel ticket could take 2 first. The unchecked claim is now checked and written down: nothing reads `identity.json`'s `schema_version`; `RemoteFiles::load` (`:55`) is plain serde with no `deny_unknown_fields`. A version-1 file loads with empty fields. A build still on 1 ignores a version-2 file's new fields and drops them on its next save, which only causes another reissue over the same key.
+
+5. **No spike.** Changed: new "The spike" section, adding `spikes/23-web-surface/` (22 is the last) and a README row. It holds three local checks: the SAN certificate against `rustls`'s verifier, the 101 echo against a `tungstenite` client, and six parallel connections against the pool of 4. It says the browser questions in Facts' Unresolved list cannot be settled by a spike.
+
+6. **Stale line references.** Changed: the `device_name` read is now `src/app.rs:3650` (with `remote_pair` at `:3606`), and the hover is `src/ui/remote.rs:113` in both places it appeared. I also corrected my own `RemoteFiles::load` reference to `:55`.
+
+7. **`subprotocol` plumbing.** Changed: "Signals", Decision 2. The echo is a constant, so the `Option<String>` is gone. One `Copy` field, `via_subprotocol: bool`, stays rather than none, because a native client using `Authorization` offered no subprotocol and a 101 naming one is a handshake error. The plan now says `connection` reads the bool into a local next to `upgrade_key` (`:797`) before the request moves, and `respond_upgrade` (called at `:853`) takes it. The frame never reads it. The contract list is updated.
+
+8. **QR JSON dropped silently.** Changed: "Where this departs", new item 8. It states the plan takes the "drop the JSON from the QR" branch of the open owner question, and names the cost: older headset and CLI builds cannot parse the new QR or the copied invite. Those builds still pair through the Bonjour record with a typed code, or the CLI's three-argument form. It gives a fallback for keeping the JSON: a second "Copy address" button while "Copy invite" stays JSON.

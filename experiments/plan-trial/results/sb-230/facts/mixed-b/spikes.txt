@@ -1,0 +1,7 @@
+spikes/23-browser-cert/Cargo.lock
+spikes/23-browser-cert/Cargo.toml
+spikes/23-browser-cert/README.md
+spikes/23-browser-cert/evaluate.swift
+spikes/23-browser-cert/src/bin/qr.rs
+spikes/23-browser-cert/src/main.rs
+spikes/README.md

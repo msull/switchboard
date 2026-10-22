@@ -10,3 +10,9 @@ I pipeline/sonnet-b
 J pipeline/sonnet-a
 K pipeline/opus-a
 L single/opus-b
+M facts/opus-a
+N facts/opus-b
+O facts/sonnet-a
+P facts/mixed-b
+Q facts/mixed-a
+R facts/sonnet-b

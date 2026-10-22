@@ -1,0 +1,355 @@
+{
+  "id": "e0624335",
+  "project": "sbf-sonnet-b",
+  "title": "A web control surface: the remote port serves a browser page, paired from a URL that carries the code",
+  "state": "active",
+  "stages": [
+    {
+      "stage": "investigate",
+      "attempts": 1,
+      "ms": 271156,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 28,
+          "output": 15577,
+          "cache_write": 93542,
+          "cache_write_1h": 93542,
+          "cache_read": 1116249,
+          "messages": 14
+        }
+      }
+    },
+    {
+      "stage": "lanes",
+      "attempts": 1,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "facts",
+      "attempts": 1,
+      "ms": 104245,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 20,
+          "output": 7208,
+          "cache_write": 43971,
+          "cache_write_1h": 43971,
+          "cache_read": 580202,
+          "messages": 10
+        }
+      }
+    },
+    {
+      "stage": "plan",
+      "attempts": 1,
+      "ms": 220352,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 20,
+          "output": 27575,
+          "cache_write": 94624,
+          "cache_write_1h": 94624,
+          "cache_read": 767809,
+          "messages": 10
+        }
+      }
+    },
+    {
+      "stage": "review",
+      "attempts": 1,
+      "ms": 1023173,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 44,
+          "output": 21691,
+          "cache_write": 171392,
+          "cache_write_1h": 171392,
+          "cache_read": 2108430,
+          "messages": 22
+        }
+      }
+    },
+    {
+      "stage": "implement",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "review-code",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "pr",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "ready",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "merge",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    }
+  ],
+  "plan_lines": 113,
+  "plan_bytes": 24752,
+  "plans": [
+    {
+      "lane": "repo",
+      "lines": 113,
+      "bytes": 24752
+    }
+  ],
+  "plan_reviews": [
+    {
+      "stage": "review",
+      "attempt": 1,
+      "rounds": [
+        {
+          "n": 1,
+          "new": 8,
+          "open": 8
+        },
+        {
+          "n": 2,
+          "new": 34,
+          "open": 34
+        }
+      ]
+    }
+  ],
+  "plan_rounds": 2,
+  "plan_points": 42,
+  "code_reviews": [],
+  "code_rounds": 0,
+  "code_points": 0,
+  "code_points_by_reviewer": {},
+  "code_incomplete": false,
+  "fix_passes": 0,
+  "rebases": 0,
+  "pr_url": null,
+  "commits": null,
+  "range": null,
+  "tickets": 1,
+  "answered_by": {},
+  "evidence_files": 0,
+  "evidence_bytes": 0,
+  "usage": [
+    {
+      "stage": "investigate",
+      "n": 1,
+      "context": "root",
+      "models": {
+        "claude-sonnet-5-5": {
+          "input": 28,
+          "output": 15577,
+          "cache_write": 93542,
+          "cache_write_1h": 93542,
+          "cache_read": 1116249,
+          "messages": 14
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "97be169b-1795-4d64-bd9c-2b104514a111",
+          "source": "transcript",
+          "models": {
+            "claude-sonnet-5-5": {
+              "input": 28,
+              "output": 15577,
+              "cache_write": 93542,
+              "cache_write_1h": 93542,
+              "cache_read": 1116249,
+              "messages": 14
+            }
+          },
+          "span_ms": 156093,
+          "active_ms": 156093,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "facts",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-sonnet-5-5": {
+          "input": 20,
+          "output": 7208,
+          "cache_write": 43971,
+          "cache_write_1h": 43971,
+          "cache_read": 580202,
+          "messages": 10
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "e6d8afb0-480b-4036-a572-679100b93ed1",
+          "source": "transcript",
+          "models": {
+            "claude-sonnet-5-5": {
+              "input": 20,
+              "output": 7208,
+              "cache_write": 43971,
+              "cache_write_1h": 43971,
+              "cache_read": 580202,
+              "messages": 10
+            }
+          },
+          "span_ms": 97267,
+          "active_ms": 97267,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "plan",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-sonnet-5-5": {
+          "input": 20,
+          "output": 27575,
+          "cache_write": 94624,
+          "cache_write_1h": 94624,
+          "cache_read": 767809,
+          "messages": 10
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "793ab4a4-c1f3-4f84-82a9-019515891046",
+          "source": "transcript",
+          "models": {
+            "claude-sonnet-5-5": {
+              "input": 20,
+              "output": 27575,
+              "cache_write": 94624,
+              "cache_write_1h": 94624,
+              "cache_read": 767809,
+              "messages": 10
+            }
+          },
+          "span_ms": 215634,
+          "active_ms": 215634,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "review",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-sonnet-5-5": {
+          "input": 44,
+          "output": 21691,
+          "cache_write": 171392,
+          "cache_write_1h": 171392,
+          "cache_read": 2108430,
+          "messages": 22
+        }
+      },
+      "sessions": [
+        {
+          "role": "planner",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "f2ebad8d-a382-4d50-9ecd-0a0e38c46e18",
+          "source": "transcript",
+          "models": {
+            "claude-sonnet-5-5": {
+              "input": 24,
+              "output": 11963,
+              "cache_write": 111882,
+              "cache_write_1h": 111882,
+              "cache_read": 1463851,
+              "messages": 12
+            }
+          },
+          "span_ms": 131755,
+          "active_ms": 115584,
+          "asking_ms": 0,
+          "idle_ms": 16171
+        },
+        {
+          "role": "plan reviewer",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "2b59e1c1-92c3-4565-9216-f73e1efce8b8",
+          "source": "transcript",
+          "models": {
+            "claude-sonnet-5-5": {
+              "input": 20,
+              "output": 9728,
+              "cache_write": 59510,
+              "cache_write_1h": 59510,
+              "cache_read": 644579,
+              "messages": 10
+            }
+          },
+          "span_ms": 209849,
+          "active_ms": 153789,
+          "asking_ms": 0,
+          "idle_ms": 56060
+        }
+      ]
+    }
+  ],
+  "tokens": {
+    "claude-sonnet-5-5": {
+      "input": 112,
+      "output": 72051,
+      "cache_write": 403529,
+      "cache_write_1h": 403529,
+      "cache_read": 4572690,
+      "messages": 56
+    }
+  },
+  "not_counted": 0,
+  "not_found": 0,
+  "kind_unknown": 0
+}
