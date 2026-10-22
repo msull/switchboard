@@ -363,3 +363,12 @@ the step ran. Costs are list price from the runs' own reports.
 - The respond step (the planner answering a review) run once as a
   mechanics check, on the revision 4 sonnet-b plan with opus-a's
   objections.
+- The respond step works as a mechanism: $0.27 and 52 seconds on
+  sonnet; the planner accepted all four of opus-a's objections after
+  checking each in the tree, edited the plan copy (54 changed lines,
+  4560 to 4750 words) and answered each point naming the section
+  changed. In the pipeline the planner's own session is resumed
+  instead, so this is a lower bound on how well it answers.
+- Spend at the end of the stage-level phase: $35.94 of $50. The
+  remainder is held for grading the reassembled pipeline's six plans
+  when the trial Mac returns them.
