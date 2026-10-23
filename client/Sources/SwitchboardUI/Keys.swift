@@ -386,13 +386,17 @@ public enum KeysWindow {
 }
 
 /// The keys panel: three rows of keys the size of the system
-/// keyboard's, with undo and redo where the host keeps the draft, over
-/// a line naming the session they act on.
+/// keyboard's, with undo and redo where the host keeps the draft, under
+/// a strip with the caret's line and a row with the session's name, a
+/// microphone of the panel's own, a peek at the whole prompt and the
+/// AI pass.
 public struct KeysPanelView: View {
     @Bindable var model: BrowserModel
     @State private var held: SessionRef?
     @State private var busy = false
     @State private var note: String?
+    @State private var dictation = Dictation()
+    @State private var peeking = false
 
     public init(model: BrowserModel) {
         self.model = model
@@ -414,15 +418,29 @@ public struct KeysPanelView: View {
         return standing.controlsEnabled && model.scope(for: ref) == .control && !busy && item.session.kind == .claude
     }
 
+    /// The host's editor is listening, through this panel's microphone
+    /// or another window's.
+    private var listening: Bool { dictation.listening || (draft?.listening ?? false) }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // The caption is as wide as a row and no wider, so the
-            // window, sized to its content, is the keys' width.
-            Text(note ?? caption)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .frame(width: Self.rowWidth, alignment: .leading)
+            // The top row is as wide as a row of keys and no wider, so
+            // the window, sized to its content, is the keys' width.
+            HStack(spacing: Self.gap) {
+                Text(note ?? caption)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                micButton
+                peekButton
+                if draft?.busy == true {
+                    ProgressView().controlSize(.small).frame(width: Self.smallWidth, height: Self.smallHeight)
+                } else {
+                    smallTool(.cleanUp, "sparkles", "Clean up with AI", on: draft?.ai ?? false)
+                }
+            }
+            .frame(width: Self.rowWidth)
             // The caret's line, as the system keyboard shows the text
             // it is typing into, so several changes can be made in a
             // row without looking back at the card.
@@ -457,23 +475,90 @@ public struct KeysPanelView: View {
                 held = ref
             }
         }
-        .onAppear { LaunchLog.note("keys appeared") }
+        .onChange(of: dictation.problem) { _, problem in
+            if let problem { note = problem }
+        }
+        .onAppear {
+            LaunchLog.note("keys appeared")
+            dictation.onEvents = { recognizer, events in
+                guard let ref = await model.activeInput, await model.hasDraft(ref) else { return }
+                _ = await model.dictate(ref, recognizer: recognizer, events: events)
+            }
+        }
         .onDisappear {
             LaunchLog.note("keys disappeared")
+            dictation.stop()
             if let held {
                 Task { await model.releaseDraft(held) }
             }
         }
     }
 
+    /// The microphone: red while the host's editor listens, from here
+    /// or from a card; a tap starts or stops this panel's own, so a
+    /// listen begun in a card is stopped there.
+    private var micButton: some View {
+        Button {
+            note = nil
+            Task { await dictation.toggle() }
+        } label: {
+            Image(systemName: listening ? "waveform" : "mic.fill")
+                .symbolEffect(.variableColor.iterative, isActive: listening)
+                .frame(width: Self.smallWidth, height: Self.smallHeight)
+        }
+        .buttonStyle(.bordered)
+        .foregroundStyle(listening ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
+        .disabled(!enabled || !hosted || (listening && !dictation.listening))
+        .accessibilityLabel(dictation.listening ? "Stop dictation" : "Dictate")
+        .help(dictation.listening ? "Stop dictation" : "Dictate into the prompt")
+    }
+
+    /// A peek at the whole prompt, opened over the panel and closed by
+    /// a tap outside it; the panel itself does not move.
+    private var peekButton: some View {
+        Button {
+            peeking.toggle()
+        } label: {
+            Image(systemName: "text.viewfinder")
+                .frame(width: Self.smallWidth, height: Self.smallHeight)
+        }
+        .buttonStyle(.bordered)
+        .disabled(ref == nil)
+        .accessibilityLabel("Peek at the prompt")
+        .help("The whole prompt, over the keys")
+        .popover(isPresented: $peeking, arrowEdge: .bottom) {
+            ScrollView {
+                Text(whole)
+                    .font(.body)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding()
+            }
+            .frame(width: Self.rowWidth + 48)
+            .frame(minHeight: 80, maxHeight: 420)
+        }
+    }
+
+    /// The whole prompt for the peek: the host's draft with the live
+    /// utterance marked, or the device's field on a host without one.
+    private var whole: AttributedString {
+        if let draft {
+            return draft.text.isEmpty ? Self.empty : PromptWindowView.marked(draft)
+        }
+        guard let ref, let field = model.fields[ref], !field.text.isEmpty else { return Self.empty }
+        return AttributedString(field.text)
+    }
+
+    private static var empty: AttributedString {
+        var empty = AttributedString("(empty)")
+        empty.foregroundColor = .secondary
+        return empty
+    }
+
     /// The caret's line with the caret drawn in, or the selection
     /// marked, in the panel's text strip.
     private var line: AttributedString {
-        guard let ref, let field = model.fields[ref], !field.text.isEmpty else {
-            var empty = AttributedString("(empty)")
-            empty.foregroundColor = .secondary
-            return empty
-        }
+        guard let ref, let field = model.fields[ref], !field.text.isEmpty else { return Self.empty }
         let preview = KeyEdit.preview(field.state)
         var text = AttributedString(preview.before)
         if preview.selected.isEmpty {
@@ -490,7 +575,7 @@ public struct KeysPanelView: View {
     }
 
     private var caption: String {
-        guard let item else { return "Type or dictate in a card first." }
+        guard let item else { return "No session bound" }
         guard enabled || busy else { return "\(item.session.name): not editable now" }
         return item.session.name
     }
@@ -498,6 +583,9 @@ public struct KeysPanelView: View {
     static let gap = 6.0
     static let keyWidth = 56.0
     static let keyHeight = 48.0
+    /// The buttons of the top row, beside the session's name.
+    static let smallWidth = 22.0
+    static let smallHeight = 22.0
     /// Every row is six keys wide (the second with undo and redo).
     static let rowWidth = 6 * keyWidth + 5 * gap
 
@@ -524,9 +612,10 @@ public struct KeysPanelView: View {
         case .paragraph: Image(systemName: "paragraphsign")
         case .deleteBackward: Image(systemName: "delete.left")
         case .deleteWord:
+            // The word never wraps, so this key is the size of the rest.
             VStack(spacing: 2) {
                 Image(systemName: "delete.left")
-                Text("word").font(.caption2)
+                Text("word").font(.caption2).lineLimit(1).fixedSize()
             }
         case .lineStart: Image(systemName: "arrow.left.to.line")
         case .left: Image(systemName: "arrow.left")
@@ -538,21 +627,36 @@ public struct KeysPanelView: View {
     }
 
     private func toolButton(_ tool: DraftTool, _ symbol: String, _ label: String, on: Bool) -> some View {
-        Button {
-            guard let ref else { return }
-            busy = true
-            note = nil
-            Task {
-                let outcome = await model.draftAction(ref, tool)
-                note = outcome.note
-                busy = false
-            }
-        } label: {
+        Button { apply(tool) } label: {
             Image(systemName: symbol).frame(width: Self.keyWidth, height: Self.keyHeight)
         }
         .buttonStyle(.bordered)
         .disabled(!enabled || !hosted || !on)
         .accessibilityLabel(label)
         .help(label)
+    }
+
+    private func smallTool(_ tool: DraftTool, _ symbol: String, _ label: String, on: Bool) -> some View {
+        Button { apply(tool) } label: {
+            Image(systemName: symbol).frame(width: Self.smallWidth, height: Self.smallHeight)
+        }
+        .buttonStyle(.bordered)
+        .disabled(!enabled || !hosted || !on)
+        .accessibilityLabel(label)
+        .help(label)
+    }
+
+    /// One of the host editor's tools, after what is being heard has
+    /// reached the host.
+    private func apply(_ tool: DraftTool) {
+        guard let ref else { return }
+        busy = true
+        note = nil
+        Task {
+            await dictation.settle()
+            let outcome = await model.draftAction(ref, tool)
+            note = outcome.note
+            busy = false
+        }
     }
 }

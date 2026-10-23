@@ -137,7 +137,11 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   used with the Working Set; it is a view of the host's editor and
   changes nothing else; the keys panel (`KeysPanelView`, one per app,
   opened from a card's header, the prompt window or the Sessions
-  toolbar): the caret's line of the prompt in a strip over the keys,
+  toolbar): a top row with the session's name, a microphone of the
+  panel's own (red while the host's editor listens from any window;
+  a tap starts or stops the panel's), a peek that opens the whole
+  prompt in a popover over the panel without moving it, and the AI
+  pass; the caret's line of the prompt in a strip over the keys,
   the caret drawn in or the selection marked, cut around the caret
   (`LinePreview`, `KeyEdit.preview`), as the system keyboard shows the
   text it types into, and three rows of keys the size of the system
