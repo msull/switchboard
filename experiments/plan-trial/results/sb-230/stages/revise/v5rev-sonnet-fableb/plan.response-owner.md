@@ -1,0 +1,8 @@
+The cookie is now named `switchboard_token_<server_id>`, taken from the server id the pair reply already carries. I changed only `plan.md`. Nothing was compiled or run; I read the worktree to check the code references.
+
+- **Why the id works as a name.** `server_id` is a UUID, so it is hex and hyphens, which a cookie name allows. It survives a key rotation (`src/app.rs:2811` passes `Some(identity.server_id)`), so the name stays the same for the life of a host. `remote_pair` already has the identity in scope.
+- **Lookup.** `read_request` doesn't know the host's id, and the browser may send several hosts' cookies in one header. So the plan replaces the single `cookie` field with `RemoteRequest::cookies: Vec<(String, String)>`, which holds every `switchboard_token_*` pair. `authenticate` takes the bearer first, then the cookie named for its own identity. Another host's cookie is ignored, not an error.
+- **Clearing.** The clearing `Set-Cookie` on a 401 uses the same per-host name. A request with no cookie of this host's name clears nothing and never touches another host's cookie.
+- **New pure function.** `core::remote::token_cookie_name(&Identity) -> String` builds the name for both the set and the lookup. It is added to the contract list.
+- **Tests.** The core test checks the name differs for two identities. The browser-pairing test now asserts the exact name. It also checks that another host's cookie name carrying this host's valid token gets a 401 with no `Set-Cookie`, and that a request with both names gets a 200 through the right one.
+- **Unchanged.** The certificate stays as it is, and the reissue stays a follow-up.

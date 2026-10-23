@@ -1,0 +1,23 @@
+investigate v5lean-haiku-b: prompt 643 words, cwd /Users/sully/code_repos/plan-trial/sb-187-stage-investigate-v5lean-haiku-b
+cost_usd=0.23505453999999995 turns=51 ms=230430
+/private/tmp/claude-501/-Users-sully-code-repos-personal-switchboard/144a7def-c8e8-40f3-b0b2-5ef20bc546df/scratchpad/plan-trial/experiments/plan-trial/results/sb-187/stages/investigate/v5lean-haiku-b/notes.md: written, 2186 words
+facts v5lean-sonnet-b: prompt 1075 words, cwd /Users/sully/code_repos/plan-trial/sb-187-stage-facts-v5lean-sonnet-b
+cost_usd=0.2909581 turns=14 ms=59253
+/private/tmp/claude-501/-Users-sully-code-repos-personal-switchboard/144a7def-c8e8-40f3-b0b2-5ef20bc546df/scratchpad/plan-trial/experiments/plan-trial/results/sb-187/stages/facts/v5lean-sonnet-b/facts.md: written, 1052 words
+plan v5lean-sonnet-b: prompt 836 words, cwd /Users/sully/code_repos/plan-trial/sb-187-stage-plan-v5lean-sonnet-b
+cost_usd=0.44925020000000004 turns=12 ms=113236
+/private/tmp/claude-501/-Users-sully-code-repos-personal-switchboard/144a7def-c8e8-40f3-b0b2-5ef20bc546df/scratchpad/plan-trial/experiments/plan-trial/results/sb-187/stages/plan/v5lean-sonnet-b/plan.md: written, 1705 words
+review v5lean-sonnet-b: prompt 383 words, cwd /Users/sully/code_repos/plan-trial/sb-187-stage-review-v5lean-sonnet-b
+cost_usd=0.2589102 turns=11 ms=57220
+/private/tmp/claude-501/-Users-sully-code-repos-personal-switchboard/144a7def-c8e8-40f3-b0b2-5ef20bc546df/scratchpad/plan-trial/experiments/plan-trial/results/sb-187/stages/review/v5lean-sonnet-b/plan.feedback-1.md: written, 423 words
+respond v5lean-sonnet-b: prompt 605 words, cwd /Users/sully/code_repos/plan-trial/sb-187-stage-respond-v5lean-sonnet-b
+cost_usd=0.41070929999999994 turns=28 ms=101477
+/private/tmp/claude-501/-Users-sully-code-repos-personal-switchboard/144a7def-c8e8-40f3-b0b2-5ef20bc546df/scratchpad/plan-trial/experiments/plan-trial/results/sb-187/stages/respond/v5lean-sonnet-b/plan.md: written, 2311 words
+/private/tmp/claude-501/-Users-sully-code-repos-personal-switchboard/144a7def-c8e8-40f3-b0b2-5ef20bc546df/scratchpad/plan-trial/experiments/plan-trial/results/sb-187/stages/respond/v5lean-sonnet-b/plan.response-1.md: written, 353 words
+review2 v5lean-sonnet-b: prompt 151 words, cwd /Users/sully/code_repos/plan-trial/sb-187-stage-review2-v5lean-sonnet-b
+cost_usd=0.1697417 turns=7 ms=32583
+/private/tmp/claude-501/-Users-sully-code-repos-personal-switchboard/144a7def-c8e8-40f3-b0b2-5ef20bc546df/scratchpad/plan-trial/experiments/plan-trial/results/sb-187/stages/review2/v5lean-sonnet-b/plan.feedback-2.md: written, 700 words
+respond2 v5lean-sonnet-b: prompt 605 words, cwd /Users/sully/code_repos/plan-trial/sb-187-stage-respond2-v5lean-sonnet-b
+cost_usd=0.2298853 turns=9 ms=47701
+/private/tmp/claude-501/-Users-sully-code-repos-personal-switchboard/144a7def-c8e8-40f3-b0b2-5ef20bc546df/scratchpad/plan-trial/experiments/plan-trial/results/sb-187/stages/respond2/v5lean-sonnet-b/plan.md: written, 1172 words
+/private/tmp/claude-501/-Users-sully-code-repos-personal-switchboard/144a7def-c8e8-40f3-b0b2-5ef20bc546df/scratchpad/plan-trial/experiments/plan-trial/results/sb-187/stages/respond2/v5lean-sonnet-b/plan.response-2.md: written, 486 words

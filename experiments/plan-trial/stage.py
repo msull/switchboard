@@ -2,13 +2,20 @@
 
 usage: uv run --with tomli stage.py <stage> <label> <model> <rep> <from> [pipeline.toml]
 
-<stage>   investigate | facts | plan | review | respond
+<stage>   investigate | facts | plan | review | respond | review2 | respond2 | revise | implement
 <label>   a word for this guidance revision, so runs group: v1, v2-evidence
 <from>    a results directory of a finished run (results/sb-230/facts/opus-a)
           whose files are the stage's inputs: notes.md for facts, notes.md
           and facts.md for plan, plan.first.md and facts.md for review,
-          plan.first.md and plan.feedback-1.md for respond. An environment
-          variable NOTES, FACTS, PLAN or FEEDBACK naming a file overrides
+          plan.first.md and plan.feedback-1.md for respond; review2 takes
+          the respond stage's plan.md and plan.response-1.md (PLAN and
+          RESPONSE) and writes plan.feedback-2.md, respond2 answers it;
+          revise is the owner's edit (TEXT holds the words, PLAN the plan);
+          implement takes a final plan (PLAN) and facts and builds on the
+          worktree, then records the commits, the diff and the gate's
+          result (gate.txt). An
+          environment variable NOTES, FACTS, PLAN, FEEDBACK or RESPONSE
+          naming a file overrides
           the one from there, so a stage can be fed the previous stage's
           harness output.
 pipeline  the file whose guidance and templates to use; default
@@ -68,6 +75,16 @@ def render(text, vars):
         text = text.replace("{" + k + "}", str(v))
     return text
 
+
+IMPLEMENT_ALLOW = [
+    "Bash(cargo:*)", "Bash(rustfmt:*)", "Bash(swift:*)",
+    "Bash(git add:*)", "Bash(git commit:*)", "Bash(git status:*)", "Bash(git diff:*)",
+    "Bash(git log:*)", "Bash(git show:*)", "Bash(git rm:*)", "Bash(git mv:*)",
+    "Bash(git restore:*)", "Bash(git rev-parse:*)", "Bash(git grep:*)", "Bash(git ls-files:*)",
+    "Bash(git stash:*)", "Bash(git blame:*)",
+    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(grep:*)",
+    "Bash(rg:*)", "Bash(find:*)", "Bash(sed -n:*)", "Bash(mkdir:*)", "Bash(diff:*)",
+]
 
 def worktree(res, name):
     """A writable worktree at the issue's base commit, on its own branch."""
@@ -169,21 +186,83 @@ def main():
         if "{worktree}" not in template and "{project.root}" not in template:
             prompt = f"The repository this is about is at {tree}; paths like CLAUDE.md are relative to it. {prompt}"
         args = list(op.get("args", []))
-    elif stage == "respond":
+    elif stage == "review2":
+        # The second round: the reviewer gets the planner's answer and
+        # the revised plan, and writes feedback 2. PLAN names the plan
+        # the respond stage wrote, RESPONSE its answer.
+        st = stages["review"]
+        op = p["operators"][st["review"]]
+        rv = op["review"]
+        plan = take("plan", "plan.md", "PLAN")
+        response = take("response", "plan.response-1.md", "RESPONSE")
+        facts = take("facts", "facts.md", "FACTS")
+        vars["inputs.facts"] = facts
+        vars["plan"] = plan
+        vars["response"] = response
+        vars["feedback"] = out / "plan.feedback-2.md"
+        artifacts.append(out / "plan.feedback-2.md")
+        template = rv["review_round"]
+        prompt = render(template, vars)
+        if "{worktree}" not in template and "{project.root}" not in template:
+            prompt = f"The repository this is about is at {tree}; paths like CLAUDE.md are relative to it. {prompt}"
+        args = list(op.get("args", []))
+    elif stage in ("respond", "respond2"):
+        n = "2" if stage == "respond2" else "1"
         st = stages["review"]
         rv = p["operators"][st["review"]]["review"]
         op = p["operators"][stages["plan"]["operator"]]
-        plan_in = take("plan", "plan.first.md", "PLAN")
-        feedback = take("feedback", "plan.feedback-1.md", "FEEDBACK")
+        plan_in = take("plan", "plan.first.md" if n == "1" else "plan.md", "PLAN")
+        feedback = take("feedback", f"plan.feedback-{n}.md", "FEEDBACK")
         plan = out / "plan.md"
         shutil.copy(plan_in, plan)
         vars["plan"] = plan
         vars["feedback"] = feedback
-        vars["response"] = out / "plan.response-1.md"
-        artifacts += [plan, out / "plan.response-1.md"]
+        vars["response"] = out / f"plan.response-{n}.md"
+        artifacts += [plan, out / f"plan.response-{n}.md"]
         guidance = render(op.get("guidance", "").strip(), vars)
         prompt = (guidance + "\n\n" if guidance else "") + render(rv["respond"], vars)
         args = list(op.get("args", []))
+    elif stage == "revise":
+        # The owner's edit between rounds: the planner gets its guidance
+        # and the respond_to_user template with TEXT as the owner's words.
+        st = stages["review"]
+        rv = p["operators"][st["review"]]["review"]
+        op = p["operators"][stages["plan"]["operator"]]
+        text = os.environ.get("TEXT") or die("revise needs TEXT, the owner's words")
+        plan_in = take("plan", "plan.md", "PLAN")
+        plan = out / "plan.md"
+        shutil.copy(plan_in, plan)
+        (out / "text.md").write_text(text + "\n")
+        vars["plan"] = plan
+        vars["text"] = text
+        vars["response"] = out / "plan.response-owner.md"
+        artifacts += [plan, out / "plan.response-owner.md"]
+        guidance = render(op.get("guidance", "").strip(), vars)
+        prompt = (guidance + "\n\n" if guidance else "") + render(rv["respond_to_user"], vars)
+        args = list(op.get("args", []))
+    elif stage == "implement":
+        # The implement stage on a finalized plan. On the trial Mac the
+        # implementer's shell commands go through that Mac's own
+        # permission settings and a pane someone can answer; here they
+        # are allowed by rule for the build, the tests and the local git
+        # commands the guidance asks for, and nothing that reaches a
+        # remote. A command outside the list is refused silently in
+        # claude -p and the transcript shows it.
+        st = stages["implement"]
+        op = p["operators"][st["operator"]]
+        plan = take("plan", "plan.md", "PLAN")
+        facts = take("facts", "facts.md", "FACTS")
+        vars["inputs.plan"] = plan
+        vars["inputs.facts"] = facts
+        env["DISPATCH_INPUT_PLAN"] = str(plan)
+        env["DISPATCH_INPUT_FACTS"] = str(facts)
+        vars["notes"] = out / "notes.md"
+        artifacts.append(out / "notes.md")
+        guidance = render(op.get("guidance", "").strip(), vars)
+        prompt = (guidance + "\n\n" if guidance else "") + render(st["prompt"], vars)
+        args = list(op.get("args", []))
+        for rule in IMPLEMENT_ALLOW:
+            args += ["--allowedTools", rule]
     else:
         die(f"unknown stage {stage}")
 
@@ -228,6 +307,20 @@ def main():
         print("run.json unreadable", file=sys.stderr)
     for a in artifacts:
         print(f"{a}: {'written, ' + str(len(a.read_text().split())) + ' words' if a.exists() else 'MISSING'}")
+    if stage == "implement":
+        g = lambda *a: subprocess.run(["git", "-C", str(tree), *a], text=True, capture_output=True).stdout
+        (out / "commits.txt").write_text(g("log", "--format=%h %s", f"{base}..HEAD"))
+        (out / "diffstat.txt").write_text(g("diff", "--stat", base, "HEAD"))
+        (out / "branch.diff").write_text(g("diff", base, "HEAD"))
+        dirty = g("status", "--porcelain")
+        (out / "dirty.txt").write_text(dirty)
+        print(f"commits:\n{(out / 'commits.txt').read_text()}dirty: {'yes' if dirty.strip() else 'no'}")
+        # The stage's gate, as the pipeline would run it in the lane.
+        gate = stages["implement"]["gate"]["argv"]
+        t0 = time.time()
+        res_g = subprocess.run(gate, cwd=tree, text=True, capture_output=True)
+        (out / "gate.txt").write_text(f"exit {res_g.returncode} in {int(time.time() - t0)} s\n\n" + res_g.stdout[-20000:] + res_g.stderr[-20000:])
+        print(f"gate: exit {res_g.returncode} in {int(time.time() - t0)} s")
     if stage == "facts":
         changed = run(["git", "-C", str(tree), "diff", "--name-only", base, "HEAD"])
         dirty = run(["git", "-C", str(tree), "status", "--porcelain"])

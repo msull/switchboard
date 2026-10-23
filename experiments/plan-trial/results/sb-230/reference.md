@@ -52,3 +52,16 @@ script can read is a standing exposure with no fallback. A plan that
 answers the bug with `SameSite=Lax` plus the `Origin` check on
 state-changing requests and the upgrade is acceptable; a plan that
 answers it with `localStorage` is still the call to reverse.
+
+**Resolved 2026-10-22, before implementation.** The owner left two
+calls to me. Decision 1 stands: no certificate reissue and no download.
+A SAN-less certificate still gets a click-through in every browser the
+plans name, the click-through is the trust step the dialog already
+states, and a certificate that names an address binds the identity to
+one address, which §5's identity model never did; a trusted-certificate
+path is a follow-up with its own issue. Decision 2's cookie name stands:
+it carries the server id, since cookies ignore ports and two instances
+on one Mac would otherwise overwrite each other's token. A plan chosen
+for implementation that differs on either point is revised first with
+the pipeline's own owner-edit step, and the revised plan is what the
+implementer gets.

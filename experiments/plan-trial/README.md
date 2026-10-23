@@ -331,6 +331,32 @@ Score a stage's output the same way as a plan where it is one
 where it is not: a facts file is judged on whether it settled what the
 reference settled, with evidence, and on what it filed as unresolved.
 
+Three more stages reproduce the rest of a ticket's life. `review2` is
+the second review round (the reviewer reads the planner's answer and
+the revised plan) and `respond2` the planner's answer to it; `revise`
+is the owner's edit between rounds, the pipeline's `respond_to_user`
+template with `TEXT` as the owner's words; `implement` builds a final
+plan on the worktree with the implementer's guidance and the implement
+prompt, allows the build, test and local git commands by rule (on the
+trial Mac they go through that Mac's permission settings and a pane),
+then records the commits, the diff and the stage gate's result in
+`gate.txt`. `chain.sh <label> <investigate model> <model> <rep>
+results/<issue>` runs the whole plan pipeline stage by stage, so an
+issue can be planned under a revision without the trial Mac:
+
+```sh
+./chain.sh v5 sonnet sonnet a results/sb-187                           # investigate to the second answer
+./chain.sh v5lean haiku sonnet a results/sb-187                        # the lean mix
+TEXT="Drop the reissue..." PLAN=results/sb-230/facts5/lean-b/plan.md \
+  ./stage.sh revise v5rev sonnet leanb results/sb-230/facts5/lean-b pipelines/switchboard-facts-v5.toml
+PLAN=results/sb-230/stages/revise/v5rev-sonnet-leanb/plan.md \
+  ./stage.sh implement v5rev sonnet leanb results/sb-230/facts5/lean-b pipelines/switchboard-facts-v5.toml
+```
+
+A chained plan is graded from its last stage's directory once the
+chain's facts file is copied beside it as `inputs/facts.md`, which is
+the file its planner was given.
+
 ## Preserving everything
 
 The write-up at the end is assembled from this branch, so every run
@@ -389,5 +415,6 @@ and remove `~/code_repos/plan-trial`.
 | `tally.py` | joins grades to the key and the runs' measurements into `scores.md`; applies `grades/overrides.txt` |
 | `lib.sh` | shared by the scripts: the `dispatch` binary, the data directory, the repositories, the facts scenarios |
 | `stage.sh`, `stage.py` | one stage in isolation, as the pipeline would run it, from a finished run's inputs |
+| `chain.sh` | the whole plan pipeline on an issue, stage by stage through `stage.sh`, without the trial Mac |
 | `results/JOURNAL.md` | the dated log of every run and decision, for the write-up |
 | `results/` | one directory per issue, committed to this branch |

@@ -436,3 +436,55 @@ the step ran. Costs are list price from the runs' own reports.
   nothing on this issue over sonnet's; opus and fable throughout
   produce the same plan at three and ten times the price. The next
   test that would move this is a fresh issue, not another #230 run.
+
+## 2026-10-22, evening: a second $50; #187 through revision 5; the implementation test begins
+
+- The owner granted a second $50 (`results/LEDGER.md`, "Second
+  budget") for three things: #187 planned under revision 5 to compare
+  with its twelve first-trial plans, grading those, and implementing
+  #230 with more than one implementer. The owner also left the two
+  open calls to me; both are recorded in `reference.md` under
+  "Resolved": no certificate reissue, and the cookie named with the
+  server id.
+- The harness grew to run a whole ticket without the trial Mac:
+  `review2` and `respond2` (the second round and the answer),
+  `revise` (the owner's edit between rounds, the pipeline's own
+  `respond_to_user` template) and `implement` (the implement stage,
+  with the build, test and local git commands allowed by rule and
+  the stage gate run afterwards), and `chain.sh` strings investigate
+  to the second answer. One difference from the pipeline besides
+  those in stage.py's doc comment: a chain runs the respond step
+  even when round one said "No further feedback", where the pipeline
+  would finalize; the planner then changes nothing ($0.10).
+- #187 under revision 5, six chains in parallel: sonnet throughout
+  (a, b, c) and lean (haiku investigate, sonnet after; a, b, c).
+  $1.46 to $2.35 a plan, about twelve minutes each, no failures.
+  sonnet-b converged in one round; the other five used both. The
+  facts stage searched nothing on the three sonnet investigations
+  and three or four times on two lean ones, for source questions the
+  haiku investigator had raised about session resume behaviour; the
+  haiku notes are longer (1849 to 2409 words, 10 to 15 open
+  questions, against 1197 to 1539 and 8 or 9).
+- Graded in place (both graders, $0.91 a Fable grade). Fable:
+  sonnet 3/3/2/2, 3/3/3/2, 3/3/1/2; lean 3/3/1/3, 3/3/2/2, 3/3/2/3,
+  all hand-off note. Codex: sonnet 3/3/1/1 note, 3/3/0/2 no, 2/3/0/2
+  note; lean 3/2/0/2 note, 3/2/0/1 no, 3/2/0/2 no. The first trial's
+  twelve #187 plans were Fable 3/3/2/2/note almost throughout and
+  Codex 3/2-3/0-1/1. So: level on decisions, a point better on
+  over-specification in three of six, shorter (695 to 1621 words
+  against 1319 to 2055), at the first trial's sonnet-pipeline cost
+  and under its opus cost. The reversals are the same ones as in
+  October's first batch: `show` left alone, provenance not recorded,
+  one plan gating the copy on a response file, one adding a new
+  rerun answer word. None is a fact the facts stage could have found;
+  #187 has no outside fact, which is why the stage ran dry on it.
+- Answer to "is it better now": not on this issue, and it was not
+  expected to be. The pipeline's gain is information; #187 needs
+  none. Its cost is the same as the first trial's sonnet pipeline
+  for seven sessions instead of three, and its plans are tighter.
+- The implementation test: fable-b (the only #230 plan that keeps
+  today's certificate) and lean-b (the cheapest arm) revised with the
+  `revise` stage on sonnet ($0.24 and $0.38): fable-b's cookie is now
+  named by server id; lean-b lost the reissue, the export and their
+  tests and gained the name. Both revised plans then went to a sonnet
+  implementer, in parallel, on worktrees at 7fe8949.

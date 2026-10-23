@@ -1,0 +1,6 @@
+1. **`Failed` and `Cancelled` both qualify, with no support for `Cancelled`.** Accepted. The plan now qualifies `Failed` only.
+   - I re-checked the four `Cancelled` writes: `scheduler.rs:2872` (stop with a reason), `2914` (ticket closing), `4962` and `5585` (send-back, reason prefixed `SENT_BACK_FROM`, defined at l.8979). Each is an owner stop, close or send-back, so the tree does not show a cancelled copy as wanted.
+   - Changed "The actions and effects", step 1, **Path** bullet: the filter is now state `Failed`, with the four cited lines as the reason `Cancelled` is excluded. It also names the send-back case with no new `plan` attempt, where the position test alone would have let the cancelled copy win.
+   - Widening to cancel reasons that don't start with `SENT_BACK_FROM` is recorded there as a follow-up that needs a tree line showing such a copy is wanted.
+   - Changed "Where this departs from the issue": "every failed or cancelled review attempt" is now "every failed review attempt". A sentence explains why cancelled ones are out.
+   - Changed "The tests": the `Cancelled` one counts case is now a `Cancelled` one does not count, including a `SENT_BACK_FROM` cancelled attempt that is newest after `plan/1`, where the result is `plan/1`.

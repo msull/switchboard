@@ -1,0 +1,1 @@
+Name the cookie with the server id from the pair reply, not a fixed name: cookies ignore ports, so two Switchboard instances on one Mac (the README's dev-aid setup) would overwrite each other's token. Everything else in the plan stands, including keeping today's certificate and leaving the reissue as a follow-up.
