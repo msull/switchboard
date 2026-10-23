@@ -1,0 +1,13 @@
+ M client/Sources/SwitchboardProtocol/Info.swift
+ M client/Tests/SwitchboardProtocolTests/FixturesTests.swift
+ M src/adapters/mod.rs
+ M src/adapters/remote.rs
+ M src/app.rs
+ M src/core/mod.rs
+ M src/core/remote.rs
+ M src/core/tests.rs
+ M src/ui/remote.rs
+ M tests/remote.rs
+ M tests/ui.rs
+?? src/adapters/web.rs
+?? web/

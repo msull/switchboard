@@ -1,0 +1,55 @@
+claude
+-p
+--model
+sonnet
+--output-format
+json
+--permission-mode
+acceptEdits
+--allowedTools
+Bash(cargo:*)
+--allowedTools
+Bash(rustfmt:*)
+--allowedTools
+Bash(swift:*)
+--allowedTools
+Bash(git status:*)
+--allowedTools
+Bash(git diff:*)
+--allowedTools
+Bash(git log:*)
+--allowedTools
+Bash(git show:*)
+--allowedTools
+Bash(git rev-parse:*)
+--allowedTools
+Bash(git grep:*)
+--allowedTools
+Bash(git ls-files:*)
+--allowedTools
+Bash(git blame:*)
+--allowedTools
+Bash(ls:*)
+--allowedTools
+Bash(cat:*)
+--allowedTools
+Bash(head:*)
+--allowedTools
+Bash(tail:*)
+--allowedTools
+Bash(wc:*)
+--allowedTools
+Bash(grep:*)
+--allowedTools
+Bash(rg:*)
+--allowedTools
+Bash(find:*)
+--allowedTools
+Bash(sed -n:*)
+--allowedTools
+Bash(mkdir:*)
+--allowedTools
+Bash(diff:*)
+--allowedTools
+Edit(///private/tmp/claude-501/-Users-sully-code-repos-personal-switchboard/144a7def-c8e8-40f3-b0b2-5ef20bc546df/scratchpad/plan-trial/experiments/plan-trial/results/sb-230/stages/review-code/v5rev-sonnet-hleanb-c/**)
+cwd /Users/sully/code_repos/plan-trial/sb-230-stage-implement-v5rev-haiku-leanb

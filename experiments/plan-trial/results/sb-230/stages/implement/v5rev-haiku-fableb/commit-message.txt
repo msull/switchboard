@@ -1,0 +1,32 @@
+Remote port serves a browser page paired from the invite URL
+
+The remote port serves three static files before pairing (`/`,
+`/app.css`, `/app.js`, from `web/`, embedded by `src/web.rs`) under a
+policy that allows only the host's own origin. The QR code now carries
+an invite URL: the code, key and server id ride in the fragment, which
+a browser never sends to the host. A browser posts `/pair` with
+`transport: "cookie"` and receives its token as an HttpOnly cookie
+named for the host; the frame reads that cookie beside a bearer. The
+page lists sessions, the waiting ones first, reads a session's last
+response or screen, and replies under control scope. It polls the
+collections and upgrades to the events socket when the socket opens.
+
+Contract additions:
+- `RemoteRequest::cookies: Vec<(String, String)>` (name and value of
+  each `switchboard_token_*` cookie), `src/adapters/remote.rs`.
+- `core::remote::token_cookie_name(&Identity) -> String`
+  (`switchboard_token_<server_id>`), `src/core/remote.rs`.
+- `RemoteReply::headers: Vec<(String, String)>`, `src/adapters/remote.rs`.
+- `core::remote::pairing_invite(&Identity, &str, &str) -> String`,
+  `src/core/remote.rs`.
+- `web::{INDEX_HTML, APP_CSS, APP_JS}`, new module `src/web.rs`
+  embedding `web/index.html`, `web/app.css`, `web/app.js`.
+- `POST /api/v1/pair` body field `transport: "cookie"` (the cookie is
+  named `switchboard_token_<server_id>`); `GET /`, `GET /app.css`,
+  `GET /app.js` on the remote port.
+- `PairingInvite.parse` accepts the URL form,
+  `client/Sources/SwitchboardProtocol/Info.swift`.
+
+Beyond the list: `core::remote` is `pub mod` so the integration tests
+and the dialog reach the two functions, and `web` is a `pub mod` of the
+library. No serialized type changes, so no schema bump.

@@ -1,0 +1,2176 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 7d0e3d1..c35fee8 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -8,6 +8,8 @@ and the versions follow [Semantic Versioning](https://semver.org).
+ 
+ ## [Unreleased]
+ 
++- The remote port serves a browser page: scan the pairing QR with a phone to see the sessions, the waiting ones first, read a session's last response or screen and reply.
++
+ ## [0.4.1] - 2026-10-21
+ 
+ - Dispatch takes an issue once per project rather than once across the data directory, so a second project on the same repository can take an issue the first already holds.
+diff --git a/README.md b/README.md
+index 52bcf42..6acbad0 100644
+--- a/README.md
++++ b/README.md
+@@ -273,10 +273,12 @@ Dev aids, all environment variables:
+   pins the key hash the dialog shows):
+   `curl -sk -H "Authorization: Bearer <token>" https://127.0.0.1:43187/api/v1/waiting`.
+   The Swift client's command-line browser does the pinned version:
+-  `client/README.md`; the dialog's "Copy invite" puts the QR code's
+-  text on the clipboard, so `switchboard-remote pair "$(pbpaste)"`
+-  pairs it. Script lines `remote-listen lan <port>` and
+-  `pairing <code>` put an instance on the network with a window open.
++  `client/README.md`. The dialog's QR code is an invite URL: a phone's
++  browser opens it to the host's page, and accepting the certificate
++  warning there is the trust step. "Copy invite" puts the URL on the
++  clipboard, and `switchboard-remote pair "$(pbpaste)"` still takes it.
++  Script lines `remote-listen lan <port>` and `pairing <code>` put an
++  instance on the network with a window open.
+ - `DISPATCH_DATA_DIR=<dir>`: where the Dispatch page looks for
+   `dispatch.sock` and where its console opens (the `dispatch` binary
+   reads the same variable). Tickets' trees go under
+@@ -380,7 +382,7 @@ src/adapters/
+   tmux.rs                tmux process host on the private socket
+   hooks.rs               append-first event log + socket wake-up + hook settings JSON
+   control.rs             the control port: operations.log (append-only, synced) and control.sock (one thread per connection, requests handed to the frame)
+-  remote.rs              the remote port: identity.json and devices.json, the certificate and key (`rcgen`), the pinned client a device uses, and the TLS listener (`rustls`, one thread per connection, pools of 4 unauthenticated and 12 paired, 5 s handshake, `/pair` and `/info` rate limits, requests handed to the frame 8 per pass); a connection the frame accepts an upgrade on becomes a WebSocket subscriber (`tungstenite`, non-blocking, fed from a queue of 256, `resync_required` then the close on overflow); a subscriber's own text frames (`watch`, `unwatch`) and its end go to the frame as `SubscriberFrame`s
++  remote.rs              the remote port: identity.json and devices.json, the certificate and key (`rcgen`), the pinned client a device uses, and the TLS listener (`rustls`, one thread per connection, pools of 4 unauthenticated and 12 paired, 5 s handshake, `/pair` and `/info` rate limits and the page's 120 a minute, the `switchboard_token_*` cookies a request carries, reply headers, requests handed to the frame 8 per pass); a connection the frame accepts an upgrade on becomes a WebSocket subscriber (`tungstenite`, non-blocking, fed from a queue of 256, `resync_required` then the close on overflow); a subscriber's own text frames (`watch`, `unwatch`) and its end go to the frame as `SubscriberFrame`s
+   bonjour.rs             `_switchboard._tcp` over `mdns-sd` while the remote port is on the local network (macOS; a stub elsewhere): the display name with a short id suffix, TXT `v`, `name`, `id`
+   dispatch.rs            the Dispatch port's client over <Dispatch data dir>/dispatch.sock, reconnecting after an error; the `dispatch` beside the app's binary
+   dock.rs                Dock badge with the waiting-session count (macOS)
+@@ -398,9 +400,10 @@ src/adapters/
+   transcript.rs          Claude Code transcript (JSONL) -> Conversation turns and token totals per model, one per `message.id`, `<synthetic>` skipped; `read_masked` runs the mask over every text before the parser's caps
+   ghostty.rs             open, reveal, Ghostty window launch and raise
+   fakes.rs               test doubles for every port
+-src/app.rs               SwitchboardApp: owns core + adapters; runs effects; polls host and events; answers control-port queries (`session.screen` with the project's secret values redacted); serves the remote port (the views on the frame, a screen through the content worker with the policy resolved on the frame, the watch set, the revision per content key, and the control scope's `send`, `resume` and `trust` through the control socket's `serve` so the op is the idempotency key)
++src/app.rs               SwitchboardApp: owns core + adapters; runs effects; polls host and events; answers control-port queries (`session.screen` with the project's secret values redacted); serves the remote port (the page's files, the `transport: cookie` pairing and its `Set-Cookie`, a browser's cookie beside a bearer, the views on the frame, a screen through the content worker with the policy resolved on the frame, the watch set, the revision per content key, and the control scope's `send`, `resume` and `trust` through the control socket's `serve` so the op is the idempotency key)
+ src/content.rs           the app's content caches and the port's content worker: parsed transcripts with the handle and file time each was read at (`ConversationCache`), read by the views through `DrawCtx`; `ContentWorker`, the one thread that reads content for a device (a pane's full window hashed as the source version; a Claude Code transcript parsed masked and kept on the worker by handle, file version and policy, served as a page of turns by number with the head of each tool call's text, as one turn whole, or as the last response, the three sharing one key; a run's log tail with the overlap that masks a value on the window's edge; a pinned file whole, cached by its version) and polls the watched keys every two seconds; the policy resolved on the worker from what the frame hands it (`PolicySpec`, `resolve_policy`), cached per spec; `redact`, the content keys, the policy with its fingerprint, the page, turn, tail and file caps, the versions and the watch set's bounds (128 keys, a minute idle)
+ src/script.rs            SWITCHBOARD_SCRIPT dev aid
++src/web.rs               the browser page the remote port serves before pairing: `INDEX_HTML`, `APP_CSS` and `APP_JS`, the three files of `web/` compiled in
+ src/ui/
+   mod.rs                 UiState, draw loop (collect actions, then dispatch), keyboard, side panel tabs
+   prompt_box.rs          the Prompt Box editor per agent session, one voice runtime bound to one of them; the draft a device reads, its tools and its dictation
+@@ -420,7 +423,7 @@ src/ui/
+   popout.rs              a session in a window of its own: the page and side panel in a viewport, frame saved on settle; the Dispatch window the same way
+   zoom.rs                Cmd+= and Cmd+- per window, remembered per display; a pop-out's pass runs at its display's zoom
+   env.rs                 Environment dialog: variables, secrets, .env opt-in, masked preview
+-  remote.rs              Remote devices dialog: the host's name, id, key and address, the pairing window with its QR code, the paired devices with scope and Revoke
++  remote.rs              Remote devices dialog: the host's name, id, key and address, the pairing window with its QR code (the invite URL; with no network address, the code and the key for the command-line form), the paired devices with scope and Revoke
+   config.rs              project config editor: .switchboard/project.json as text, options listed, parse shown
+   workflow.rs            plan review: the Review plan dialog, the run's page (rounds, plan with diff, feedback beside response, controls), the feedback block pinned under the header
+   dispatch.rs            the Dispatch page: tickets with what waits on you (filtered by project), each project's supervisor chip (Open, Resume, Trust, Fresh behind a confirmation), and the console; Pop out
+@@ -434,7 +437,7 @@ src/ui/
+ assets/fonts/            Source Serif 4 (Regular, Semibold, Italic; OFL), embedded by theme.rs
+ tests/ui.rs              headless flows via egui_kittest with fakes
+ tests/control.rs         the control port over a real socket with fakes: ops on records, logged replies, interrupted launches, a non-replayable command logged before it runs and answered `interrupted` on a retry, a pane's screen with secrets named
+-tests/remote.rs          the remote port over a real TLS listener with fakes (the control scope: a read device refused by name, a send typed once per op and a repeat answered from the log, a resume launching once, trust answering the folder question once, the bad bodies; a conversation paged by turn, from `last` or `before` a held turn, a page carrying the head of a tool result and the turn alone carrying it whole, its last response at the conversation's revision, a shell refused, a watched conversation moving as the transcript grows; a command's runs, a run's output masked, a missing run refused, a watched run output moving as the log grows): /info to anyone, pairing with the host's key and code, a token that reads every view, revocation, scope, the allowlist, bounded strings, a redacted screen, a missing key remaking the identity, Bonjour following the listen preference, the events socket (`hello`, `changed` and `removed` from the diff, a rename and a trust question with no save, ten quiet passes emitting nothing, the event and the snapshot at one revision, overflow and revocation closing the socket), watched screens (`watch` answered `watching`, the poll emitting `changed` when a pane or its policy moves and nothing while it holds still, two reads of one text at one revision, the cap evicting the least recently read, `unwatch`, a closed socket and a revocation dropping their watches), stalled strangers filling only their pool, `/ops/{op}`, the fingerprint pass timed, and the client fixtures (`client/Fixtures`, rewritten with `SWITCHBOARD_WRITE_FIXTURES=1`)
++tests/remote.rs          the remote port over a real TLS listener with fakes (the control scope: a read device refused by name, a send typed once per op and a repeat answered from the log, a resume launching once, trust answering the folder question once, the bad bodies; a conversation paged by turn, from `last` or `before` a held turn, a page carrying the head of a tool result and the turn alone carrying it whole, its last response at the conversation's revision, a shell refused, a watched conversation moving as the transcript grows; a command's runs, a run's output masked, a missing run refused, a watched run output moving as the log grows): /info to anyone, pairing with the host's key and code, a token that reads every view, revocation, scope, the allowlist, bounded strings, a redacted screen, a missing key remaking the identity, Bonjour following the listen preference, the events socket (`hello`, `changed` and `removed` from the diff, a rename and a trust question with no save, ten quiet passes emitting nothing, the event and the snapshot at one revision, overflow and revocation closing the socket), watched screens (`watch` answered `watching`, the poll emitting `changed` when a pane or its policy moves and nothing while it holds still, two reads of one text at one revision, the cap evicting the least recently read, `unwatch`, a closed socket and a revocation dropping their watches), stalled strangers filling only their pool, the page served unpaired with its headers and only its own references, a browser pairing from the invite URL and reading, subscribing and revoked through its cookie, a page load's connections fitting the pool, the page's rate window, `/ops/{op}`, the fingerprint pass timed, and the client fixtures (`client/Fixtures`, rewritten with `SWITCHBOARD_WRITE_FIXTURES=1`)
+ tests/fixtures/          a small real Claude Code transcript for the parser tests
+ tests/live.rs            ignored: real claude / codex / Ghostty runs
+ tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
+@@ -443,7 +446,8 @@ scripts/ci-test.sh       CI's test step: the workspace, then one retry of the fa
+ scripts/bump.sh          the next version into Cargo.toml and Cargo.lock, and the changelog's Unreleased section dated under it
+ scripts/release.sh       the signed bundle and its SHA-256 attached to a GitHub release tagged `v<version>`, with the changelog section as notes; what the app updates itself from
+ CHANGELOG.md             every user-visible change, under Unreleased until a bump
+-client/                  the Swift client (docs/remote-client.md §7): `SwitchboardProtocol` (the wire views as Codable, qualified refs, the envelope, the event frame and resource keys), `SwitchboardTransport` (HTTPS and the events WebSocket with the SPKI-pinning delegate, Bonjour browsing), `SwitchboardClientCore` (known servers, credentials, one connection actor per host that subscribes before it snapshots and reconciles events by revision, holds reference-counted screen watches that are resent after a reconnect, the unified store), `SwitchboardUI` (SwiftUI browser and server views), the `switchboard-remote` command-line browser, tests, `Fixtures/` shared with `tests/remote.rs`, and the apps: `project.yml` (xcodegen writes the git-ignored Xcode project from it), `Apps/SwitchboardVision/` (the visionOS entry, thin over `SwitchboardUI`: the main window with list, grid and focus layouts and the filters, and the card window group), `scripts/sim.sh` (build, run and screenshot on the simulator), `scripts/device.sh` (build, install and launch on a paired headset)
++client/                  the Swift client (docs/remote-client.md §7): `SwitchboardProtocol` (the wire views as Codable, qualified refs, the envelope, the event frame and resource keys, and `PairingInvite.parse` for the invite URL as well as the JSON), `SwitchboardTransport` (HTTPS and the events WebSocket with the SPKI-pinning delegate, Bonjour browsing), `SwitchboardClientCore` (known servers, credentials, one connection actor per host that subscribes before it snapshots and reconciles events by revision, holds reference-counted screen watches that are resent after a reconnect, the unified store), `SwitchboardUI` (SwiftUI browser and server views), the `switchboard-remote` command-line browser, tests, `Fixtures/` shared with `tests/remote.rs`, and the apps: `project.yml` (xcodegen writes the git-ignored Xcode project from it), `Apps/SwitchboardVision/` (the visionOS entry, thin over `SwitchboardUI`: the main window with list, grid and focus layouts and the filters, and the card window group), `scripts/sim.sh` (build, run and screenshot on the simulator), `scripts/device.sh` (build, install and launch on a paired headset)
++web/                     the browser page the remote port serves before pairing (docs/remote-client.md §4.3, §5): `index.html`, `app.css` and `app.js`, plain DOM with no framework and no build step; `src/web.rs` compiles them in, and the tests hold them to the page's policy (no inline script or style, no outside address, the token never in script)
+ control/                 switchboard-control: the control port's wire contract (requests, replies, views, a session's transcript path among them; `session.resume` resumes an agent without a terminal and never launches fresh; `session.prompt` types a prompt only into a Claude Code agent between turns, else fails naming why) and a blocking client; std + serde only
+ dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, a ticket's events after a cursor, decide, queue, take, resume, close, worktrees, a project's supervisor and `supervisor-fresh`, a ticket's `usage`: tokens by model and each session's time), how a bring-up reads, and a blocking client; std + serde only
+ dispatch/                the `dispatch` binary (docs/dispatch.md; docs/dispatch-agent-guide.md is the command-line guide for agents that take tickets; docs/dispatch-pipeline-guide.md builds a pipeline file up step by step, every TOML block in it checked by a test; docs/dispatch-pipeline-improvements.md is the open list of pipeline changes drawn from tickets run so far): a ticket scheduler that drives Switchboard over the control port and never links the app
+diff --git a/client/Fixtures/invite.txt b/client/Fixtures/invite.txt
+new file mode 100644
+index 0000000..841c61f
+--- /dev/null
++++ b/client/Fixtures/invite.txt
+@@ -0,0 +1 @@
++https://192.168.1.9:43187/#code=ABCD2345&key=4e17f5616298250f55cbdef7c7a054ec8e79299bf5599b021b4b69a265a36360&id=c1293981-13e8-4a4a-b9ac-40996d878650
+diff --git a/client/Sources/SwitchboardProtocol/Info.swift b/client/Sources/SwitchboardProtocol/Info.swift
+index d2f52d2..a432c56 100644
+--- a/client/Sources/SwitchboardProtocol/Info.swift
++++ b/client/Sources/SwitchboardProtocol/Info.swift
+@@ -110,8 +110,30 @@ public struct PairingInvite: Decodable, Sendable, Equatable {
+         self.addresses = addresses
+     }
+ 
+-    /// The invite from the scanned or pasted text.
++    /// The invite from the scanned or pasted text: the host's page URL,
++    /// with the code, the key and the id in its fragment, or the JSON an
++    /// older host wrote. The URL's authority is kept as text, brackets
++    /// and all, so an IPv6 address reaches the transport as written.
+     public static func parse(_ text: String) throws -> PairingInvite {
+-        try Wire.decode(PairingInvite.self, from: Data(text.utf8))
++        // Pasted text carries the newline or space around it.
++        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
++        let prefix = "https://"
++        guard text.hasPrefix(prefix) else {
++            return try Wire.decode(PairingInvite.self, from: Data(text.utf8))
++        }
++        let authority = String(text.dropFirst(prefix.count).prefix { $0 != "/" })
++        let fragment = text.split(separator: "#", maxSplits: 1).dropFirst().first.map(String.init) ?? ""
++        var fields: [String: String] = [:]
++        for pair in fragment.split(separator: "&") {
++            let parts = pair.split(separator: "=", maxSplits: 1).map(String.init)
++            if parts.count == 2 {
++                fields[parts[0]] = parts[1]
++            }
++        }
++        guard !authority.isEmpty, let code = fields["code"], let key = fields["key"], let id = fields["id"] else {
++            throw DecodingError.dataCorrupted(
++                DecodingError.Context(codingPath: [], debugDescription: "the invite URL lacks its host, code, key or id"))
++        }
++        return PairingInvite(serverID: ServerID(id), spkiSha256: key, code: code, addresses: [authority])
+     }
+ }
+diff --git a/client/Tests/SwitchboardProtocolTests/FixturesTests.swift b/client/Tests/SwitchboardProtocolTests/FixturesTests.swift
+index c2ba2a3..a7b2e32 100644
+--- a/client/Tests/SwitchboardProtocolTests/FixturesTests.swift
++++ b/client/Tests/SwitchboardProtocolTests/FixturesTests.swift
+@@ -163,6 +163,25 @@ final class FixturesTests: XCTestCase {
+         XCTAssertEqual(invite.serverID.short, "17a9b8")
+         XCTAssertEqual(invite.addresses, ["192.168.1.9:43187"])
+     }
++
++    func testInviteParsesTheURL() throws {
++        // The fixture is the host's own invite, written by the Rust
++        // fixture test, with the newline a file ends with.
++        let url = Fixtures.directory.appendingPathComponent("invite.txt")
++        let invite = try PairingInvite.parse(String(contentsOf: url, encoding: .utf8))
++        XCTAssertEqual(invite.code, "ABCD2345")
++        XCTAssertEqual(invite.addresses, ["192.168.1.9:43187"])
++        XCTAssertEqual(invite.spkiSha256.count, 64)
++        XCTAssertEqual(invite.serverID.raw.count, 36)
++    }
++
++    func testInviteKeepsTheBracketsOfAnIPv6URL() throws {
++        let text = "https://[fe80::1]:43187/#code=ABCD2345&key=ab&id=17A9B824-AC51-47DC-A96A-C2B9E69C85B4\n"
++        let invite = try PairingInvite.parse(text)
++        XCTAssertEqual(invite.addresses, ["[fe80::1]:43187"])
++        XCTAssertEqual(invite.spkiSha256, "ab")
++        XCTAssertEqual(invite.serverID.raw, "17a9b824-ac51-47dc-a96a-c2b9e69c85b4")
++    }
+ }
+ 
+ enum Fixtures {
+diff --git a/docs/design.md b/docs/design.md
+index c3f592c..787abd2 100644
+--- a/docs/design.md
++++ b/docs/design.md
+@@ -3156,8 +3156,9 @@ Built so far:
+   in `{epoch, revision, body}`; everything else is refused by name,
+   before translation. Pairing: the Remote devices dialog (settings
+   menu) opens a five-minute window with an eight-character Crockford
+-  code shown as a QR carrying the server id, key hash, code and
+-  address; `/pair` must carry the host's own key hash and the code,
++  code shown as a QR carrying the invite URL (the host's address, and
++  the code, key hash and server id in its fragment; see the web page
++  below); `/pair` must carry the host's own key hash and the code,
+   three failures from any connection close the window, the first
+   success spends it, and the device gets a 43-character bearer token
+   whose SHA-256 is what `devices.json` keeps. The dialog lists devices
+@@ -3570,6 +3571,19 @@ Built so far:
+   (`ConnectionManager.lookup` and `pair(_:code:)`; the resolver is
+   injectable for the tests). Pasting the invite's text stays as the
+   fallback.
++- **The web page (2026-10-22).** The remote port serves a browser page
++  (`web/`, embedded by `src/web.rs`). The QR code is an invite URL that
++  a phone's camera opens; the page pairs from the URL's fragment and
++  holds its token in an `HttpOnly` cookie, the browser's only
++  credential. It lists the sessions, the waiting ones first, and opens
++  a session's last response or screen, with a reply box under
++  `control`. It tries the events socket after its first `/waiting`
++  and polls the same collections while the socket is down. Unchecked on
++  a phone: the cookie over a bypassed certificate, the socket on iOS
++  Safari, the bypass across relaunches, and whether the iPhone Camera
++  opens the URL with its fragment intact. No test runs the page's
++  script; the Rust tests hold its files to the page's policy and the
++  wire to the page's calls (`docs/remote-client.md` §5, Browser trust).
+ - **Known gaps at the first merge.** Milestone D, the iPad shell, is
+   not started. The Codex transcript parser, so a Codex session's
+   conversation is empty on a device. The Dispatch ticket view
+@@ -3580,7 +3594,11 @@ Built so far:
+   frame (`prompt_box::ensure_editor` reads the voice key there), so an
+   unsigned host freezes on the Keychain prompt while a device asks for
+   a draft; the signed bundle never prompts. Remote access off the LAN
+-  is §9 of the spec, deferred.
++  is §9 of the spec, deferred. The card's excerpt is not on the wire:
++  no session view carries it yet, so the page shows the card's word and
++  the waiting reason. The socket on iOS is unverified; the page polls
++  when it fails. The invite names one address, the default route's, so
++  a VPN that takes the route is unreachable from a phone.
+ 
+ ## Versioning and updates (2026-10-15)
+ 
+diff --git a/docs/remote-client.md b/docs/remote-client.md
+index c96a65d..4503832 100644
+--- a/docs/remote-client.md
++++ b/docs/remote-client.md
+@@ -123,7 +123,7 @@ Each host is authoritative for its own resources. The client aggregates views wi
+ - **The frame does core state only.** A metadata request (a view, a command) is answered on the frame as the control port is. A content request (conversation, screen, run output, file) takes two steps: the frame answers with the **handle and the redaction policy** (the transcript path and resume handle, the pane's host id, the run's log path, the file's root and relative path, plus the secret values to mask and the policy fingerprint), and one **content worker thread** does the read, the parse, the mask, the version check and the serialization from a queue of such requests (one at a time, so one large parse is in memory at once; Spike 22 measured 575 MB peak for the largest transcript), then sends one small action back to the frame to record the version it observed (§4.4), and the connection thread writes the reply. The watch poll (§4.4) runs through the same worker. A multi-megabyte transcript, a 768 KiB file or a slow Keychain call therefore costs the worker its time and the asking connection its wait, never a frame. The handle is read under the frame's authority, so a record removed or rebound between the two steps makes the worker's version action a no-op and the reply carries the handle it read from.
+ - **Bounds.** The port is one user's few devices, and the limits say so:
+   - at most 16 connections in total and 4 unauthenticated ones; a further accept is closed at once. The 4 are a separate pool: an unauthenticated flood fills its own slots and never a paired client's;
+-  - `/pair` is answered at most six times a minute per listener and `/info` sixty; past that the connection thread answers 429 without reaching the frame;
++  - `/pair` is answered at most six times a minute per listener, `/info` sixty and the page's three files (`/`, `/app.css`, `/app.js`) 120, a reload being three requests; past that the connection thread answers 429 without reaching the frame;
+   - a TLS handshake and the first request line each within 5 s, a request body within 10 s, a write within 10 s; a connection that misses a deadline is closed;
+   - one request in flight per connection (HTTP/1.1, no pipelining);
+   - the frame drains at most 8 remote requests per pass, in arrival order, the rest waiting on the channel; the channel is bounded at 64 and a full channel answers 503 from the connection thread without reaching the frame; a frame-side request is a view or a handle lookup and takes microseconds, so the count is the bound;
+@@ -160,6 +160,9 @@ Each host is authoritative for its own resources. The client aggregates views wi
+ |---|---|---|---|
+ | GET | `/api/v1/info` | new: `info` | none (identity only, before pairing) |
+ | POST | `/api/v1/pair` | pairing handshake (§5) | none, only inside the pairing window |
++| GET | `/` | the page: `text/html`, `web/index.html` | none (before pairing; `GET` only) |
++| GET | `/app.css` | the page's stylesheet, `text/css` | none |
++| GET | `/app.js` | the page's script, `text/javascript` | none |
+ | GET | `/api/v1/projects` | `projects`; `?scope=all` includes Dispatch's worker records | read |
+ | GET | `/api/v1/spaces` | `spaces` | read |
+ | GET | `/api/v1/spaces/{id}/sets` | `sets` | read |
+@@ -191,7 +194,7 @@ Each host is authoritative for its own resources. The client aggregates views wi
+ | GET | `/api/v1/dispatch/tickets/{id}/events` | new: the Mac's `DispatchReadEvents` | read |
+ | GET | `/api/v1/events` | WebSocket upgrade | read |
+ 
+-Everything else on the wire is **refused before translation**, by an allowlist, not a denylist: `env.resolve` returns secret values; the `env.*` writes, `definition.install`, `project.add`, `project.root`, `set.sync`, `workflow.*`, `dispatch.runner`, `session.kill` and `session.remove` change what runs on the host or what it keeps. v1 remote is the table above and nothing more.
++Everything else on the wire is **refused before translation**, by an allowlist, not a denylist: `env.resolve` returns secret values; the `env.*` writes, `definition.install`, `project.add`, `project.root`, `set.sync`, `workflow.*`, `dispatch.runner`, `session.kill` and `session.remove` change what runs on the host or what it keeps. v1 remote is the table above and nothing more. The page's three files are in the table: with `/info` and `/pair` they are the only paths answered before pairing.
+ 
+ **Redaction, one policy for every text that leaves the port, applied before any cut.** `session.screen` today masks the values of the project's secret variables and of the session's granted environment sets, and it reads slack lines above the window first so a value wrapped across the window's first line is still found whole. The port generalizes both halves of that: one `redact` function in `app.rs`, and the rule that **masking runs over complete source text, and every cut comes after**, since a value split by a cut no longer matches. Per kind:
+   - **conversation**: the parser caps tool detail at `DETAIL_CAP` while parsing, so masking a parsed turn would miss a value crossing that cap. The transcript reader gains an additive `read_masked(handle, &dyn Fn(&str) -> String)` that applies the mask to every string field before `cap`; the port's conversation cache (§4.4) is populated through it, keyed by the secret set's fingerprint as well, and is separate from the UI's unmasked cache. The 256 KiB turn cut then runs on masked text.
+@@ -204,7 +207,7 @@ Everything else on the wire is **refused before translation**, by an allowlist,
+ New read models, added to the wire crate:
+ 
+ - `session.conversation`: the `Conversation` from `ports::transcript` as a wire shape: title, model, branch, usage, and turns paged by **turn number** (`n`, 1-based). The host parses the whole JSONL, as the session view does, from the app-level cache (§4.4); a transcript the app can show is one the port can serve, and the supported size is whatever the app handles, which the spike measures. What paging bounds is the **response**: a page anchored at its start (`from=turn`) stops at `limit` turns or at the body cap, whichever first, and says `next` for the turn to continue from; a page anchored at its end (`from=last`, or `before=turn` for the page ending before a turn the client holds) fills backward from the anchor, so it always reaches it and `from` is wherever it filled up. The client opens on the tail and walks back with `before`, so a transcript whose turns are large never shows a stale end or a gap; a change is followed from the last turn held page after page until `next` is empty, up to ten pages. A page carries only the first 512 bytes of each tool call's input and result and of each activity's text, marked `more`, which is what keeps a turn with a hundred tool calls to tens of kilobytes rather than hundreds; `session.turn` reads one turn whole, at the conversation's revision, and the client asks for it when a turn's activity is opened. A single turn larger than 256 KiB is cut (final text kept whole where possible, activity text trimmed) and marked `truncated`. The page carries the `resume_id` it was read from: `/clear` and a discard rebind the record to a new transcript, and a client holding turn numbers from another handle drops them and refetches from 1. The last turn is always in progress until a `Stop` event: on a `changed {conversation}` the client refetches from the last turn it holds and **replaces** that turn and everything after it. A handle rebind (`resume_id` moved on the session view) changes the conversation cache's key, which emits `changed {conversation}` of its own, so the client needs no rule linking the two. Only Claude Code sessions have a conversation; Codex, shell, command and service sessions answer with a "no conversation" reason and the client falls back to `screen` (and, for commands and services, `run_output`).
+-- `session.last_response`: the last turn's `final_text`, its `n` and `end`. It is a **projection of the `conversation` key**: it is read from the same cache, carries the conversation's content revision, is watched by watching `conversation`, and refreshes on `changed {conversation}`; a window showing only the last response registers that watch. The compact card's one-line excerpt is not part of it: that is `last_message` from the `Stop` hook on the record, a field of the session's metadata, and moves with `changed {session}`.
++- `session.last_response`: the last turn's `final_text`, its `n` and `end`. It is a **projection of the `conversation` key**: it is read from the same cache, carries the conversation's content revision, is watched by watching `conversation`, and refreshes on `changed {conversation}`; a window showing only the last response registers that watch. The compact card's one-line excerpt is not part of it: the excerpt is not yet on the wire; it will be a redacted field of the session view, masked as the redaction list above says.
+ - `session.runs`: a command's or service's runs as the record holds them (`Run`: `n`, started, ended, exit, artifacts' names, not their paths). `session.run_output`: the tail of one run's scrollback log (`scrollback::tail_text`, escapes stripped, `lines` clamped to 500), redacted; a run whose log was pruned or rotated answers with that reason. This is how an exited command whose pane is gone is still readable: `session.screen` refuses a session that is not running, by design.
+ - `file.read`: content of a file **only if some working set pins it** (`PinTarget::File` with that project and path). The read goes through a new `ports::files` method, `read_pinned(root, relative)`, not through the UI's preview loader. Confinement is by descriptors, not by path strings, so it stays valid while names change under it:
+   - the relative path is rejected if it is absolute, empty, or has a `..` or `.` component, before anything touches the disk (a persisted pin can hold anything);
+@@ -303,13 +306,15 @@ The files of each attempt (2026-10-18) ride on the single-ticket read: `TicketAt
+ 
+ A local network is not a trust boundary: these APIs can instruct coding agents and expose private transcripts. The repo's rules apply unchanged: secret values never reach a record, a log line, a command line, or any reply but `env.resolve` (which is not on this port) and, as redacted text, the read models of §4.3; the Keychain holds key material.
+ 
+-- Require pairing **before** anything but `/info` and `/pair`.
++- Require pairing **before** anything but `/info`, `/pair` and the page.
+ - **Host identity**: a self-signed certificate made once with `rcgen` on first listen. The certificate is in `identity.json` (§3.1); its private key is a Keychain item through the existing adapter (`adapters/keychain.rs`, service `com.sadburger.switchboard`) under the account `remote-key:<server_id>`, so two data directories under one macOS account never overwrite each other's keys. The bundle must be signed with the stable identity (`scripts/bundle.sh`) or the Keychain ACL is lost on every rebuild.
+ - **What the client pins** is the SPKI SHA-256 of the host's public key, not the certificate's bytes, so a certificate reissued from the same key (a new expiry) still verifies. Rotating the key is making a new identity: every pairing is invalid and the dialog says so.
+-- **Pairing verifies the key before the code is sent.** The code alone would let an intermediary terminate the first connection, forward the code to the real host, and take the token. So the pairing window shows a **QR code** carrying `{server_id, spki_sha256, code, addresses}`, and under it the same in text: a short form of the key hash and the code. The client scans or types both; it connects, compares the hash of the key it is actually talking to with the one it was given, and only when they match sends `/pair {code, device_name, spki_sha256}`. A client without a camera (visionOS gives an app none) pairs from the host's Bonjour record instead: it resolves the record, reads `/info` under no trust, shows the key the host presented in the dialog's short form for the owner to compare by eye, and pins that key for the pairing, so the typed code reaches only the host whose key the owner checked; a substituted certificate shows its own key on the device, where the owner sees it differ. The host refuses a pairing whose `spki_sha256` is not its own, so a relayed request through a substituted certificate fails even if the code reached it. Before pairing, `/info` is served to any client and nothing in it is trusted; after pairing, every connection verifies the pin before the token is presented.
++- **Pairing verifies the key before the code is sent.** The code alone would let an intermediary terminate the first connection, forward the code to the real host, and take the token. So the pairing window shows a **QR code** carrying the invite URL `https://<address>/#code=<code>&key=<spki_sha256>&id=<server_id>`, which a phone's camera opens to the host's page, and under it the same in text: a short form of the key hash and the code. The host no longer writes the JSON form; a native client still parses it. The client scans or types both; it connects, compares the hash of the key it is actually talking to with the one it was given, and only when they match sends `/pair {code, device_name, spki_sha256}`. A client without a camera (visionOS gives an app none) pairs from the host's Bonjour record instead: it resolves the record, reads `/info` under no trust, shows the key the host presented in the dialog's short form for the owner to compare by eye, and pins that key for the pairing, so the typed code reaches only the host whose key the owner checked; a substituted certificate shows its own key on the device, where the owner sees it differ. The host refuses a pairing whose `spki_sha256` is not its own, so a relayed request through a substituted certificate fails even if the code reached it. Before pairing, `/info` is served to any client and nothing in it is trusted; after pairing, every connection verifies the pin before the token is presented.
+ - The pairing window is opened from the settings menu as "Allow pairing for 5 minutes", the same shape as the environment setup window (`ENV_SETUP_WINDOW`, never saved). The dialog that opens it chooses the scope the pairing grants, `read` by default.
+ - **The code**: eight characters from the 32-character Crockford alphabet (no `I`, `L`, `O`, `U`), 40 bits, drawn from the OS random source (`getrandom`), made when the window opens and shown as the QR's `code` and in text. It is single-use: the first successful `/pair` consumes it and closes the window. **Failures count globally**: one counter in the app's state, bumped on the frame for every failed `/pair` from any connection, and the window closes at three. Concurrent attempts cannot each get three, because the frame answers them in arrival order against the one counter.
+-- **The token**: 32 bytes from the OS random source, base64url, 43 characters. It does not expire; the owner revokes. It is sent only as a bearer header over the pinned connection, never in a URL.
++- **The token**: 32 bytes from the OS random source, base64url, 43 characters. It does not expire; the owner revokes. It is sent only as a bearer header over the pinned connection, or as the cookie `/pair` sets for a browser, never in a URL.
++- **Browser trust.** The warning a browser shows for the host's certificate is the trust step: on the owner's own network, accepting it is the owner's check that the page is the host's, and it stands in for the key pin a native client makes. The invite's `key` still does its part: the page compares it with `/info` and does not post the code to a host whose key differs. A page served by an impostor is not a genuine page; the pairing window says only that the warning is the trust step. Whether the browser keeps the acceptance across tabs and relaunches is not known; the page loses nothing when the warning returns, since its cookie and stored ids survive a reload. The fragment of the invite URL is never sent to the host, so the code is not in a request log by any change to `refuse`, which logs the path without its query. A copy of the URL in the browser's history after pairing is a spent single-use code: the window closes on the first pairing.
++- **The browser's token** is an `HttpOnly`, `Secure`, `SameSite=Strict` cookie named `switchboard_token_<server_id>`, scoped to `/api/v1/`, that script never reads. `SameSite=Strict` keeps a page on another origin from making the browser send it. A `401` over this host's own cookie clears it; another host's cookie is never touched.
+ - `/pair` answers with the token and the granted scope. The host stores the device name, scope, created time, last-seen time and the token's SHA-256 in `<data dir>/devices.json` (atomic write, owner-readable); never the token. The client stores the token and the pinned key hash in its Keychain.
+ - **Scope changes** happen in the host's dialog: a device's scope can be raised to `control` or lowered to `read` there, taking effect on the device's next request. There is no scope request over the port.
+ - **Key rotation** (a missing key at listen, §3.1) **deletes every record in `devices.json`** when the new identity is made, so an old token stops working on the first request, and the dialog says the pairings are gone. A client seeing a new key for a known `server_id` shows "identity changed, pair again" and sends nothing, token included.
+@@ -542,7 +547,7 @@ Host, in `tests/remote.rs` and the adapter's own tests unless said otherwise:
+ | Masked caches | Versioned by source and by the project's redaction policy fingerprint; a resolution failure refuses, never serves a cached success |
+ | Watch set | Global cap of 128, least recently read evicted, never refused; a read always versions correctly |
+ | File reads | Descriptor-anchored `openat` walk, no symlink followed, nonblocking open, 768 KiB, on the connection thread |
+-| Authentication | Pairing window with QR, key verified before the code is sent, 40-bit single-use code with one global attempt counter, 256-bit bearer token without expiry, scope set in the host dialog; Keychain on both ends; key rotation clears every pairing |
++| Authentication | Pairing window with QR, key verified before the code is sent, 40-bit single-use code with one global attempt counter, 256-bit bearer token without expiry, scope set in the host dialog; a browser pairs from the invite URL and holds its token in an HttpOnly cookie; Keychain on both ends; key rotation clears every pairing |
+ | Client storage | Server list and presentation state on disk, token and pin in the Keychain, every host body in memory only |
+ | Milestone A | Five commits: cache move, authenticated read-only host, two-host client, synchronization, watched content |
+ | Session execution | Always on the owning host |
+diff --git a/src/adapters/remote.rs b/src/adapters/remote.rs
+index c33fac8..1d40b6b 100644
+--- a/src/adapters/remote.rs
++++ b/src/adapters/remote.rs
+@@ -366,6 +366,10 @@ pub struct RemoteRequest {
+     pub body: Vec<u8>,
+     /// The `Authorization: Bearer` value, if any.
+     pub bearer: Option<String>,
++    /// The name and value of each `switchboard_token_*` cookie the
++    /// request carried. A browser may send several hosts' cookies in one
++    /// header, so the frame picks this host's by name.
++    pub cookies: Vec<(String, String)>,
+     /// The `Sec-WebSocket-Key` of a request that asks to upgrade to a
+     /// WebSocket; the frame answers [`SUBSCRIBED`] to accept it.
+     pub upgrade: Option<String>,
+@@ -382,14 +386,18 @@ impl RemoteRequest {
+     }
+ }
+ 
+-/// What the frame answers: a status and a JSON body, and whether the
+-/// request was made by a paired device, which moves the connection
+-/// from the unauthenticated pool to the paired one.
++/// What the frame answers: a status and a body, and whether the request
++/// was made by a paired device, which moves the connection from the
++/// unauthenticated pool to the paired one. `headers` go out after
++/// `Content-Length`; a `Content-Type` among them replaces the JSON
++/// default.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct RemoteReply {
+     pub status: u16,
+     pub body: Vec<u8>,
+     pub authenticated: bool,
++    /// Extra response headers, such as a pairing's `Set-Cookie`.
++    pub headers: Vec<(String, String)>,
+ }
+ 
+ /// One request off a connection, with the channel its reply goes back
+@@ -488,6 +496,15 @@ fn read_request<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<RemoteR
+         .and_then(|v| v.strip_prefix("Bearer "))
+         .map(|t| t.trim().to_owned())
+         .filter(|t| !t.is_empty());
++    let cookies = header("cookie")
++        .map(|v| {
++            v.split(';')
++                .filter_map(|pair| pair.trim().split_once('='))
++                .filter(|(n, _)| n.starts_with(crate::core::remote::TOKEN_COOKIE_PREFIX))
++                .map(|(n, v)| (n.to_owned(), v.to_owned()))
++                .collect()
++        })
++        .unwrap_or_default();
+     let upgrade = header("upgrade")
+         .filter(|u| u.eq_ignore_ascii_case("websocket"))
+         .and_then(|_| header("sec-websocket-key"))
+@@ -509,6 +526,7 @@ fn read_request<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<RemoteR
+         query,
+         body,
+         bearer,
++        cookies,
+         upgrade,
+     }))
+ }
+@@ -527,8 +545,8 @@ fn respond_upgrade<W: Write>(w: &mut W, key: &str) -> io::Result<()> {
+ 
+ /// Write one response. Head and body in one write, so a reply is one
+ /// TLS record and one segment.
+-fn respond<W: Write>(w: &mut W, status: u16, body: &[u8]) -> io::Result<()> {
+-    let reason = match status {
++fn respond<W: Write>(w: &mut W, reply: &RemoteReply) -> io::Result<()> {
++    let reason = match reply.status {
+         200 => "OK",
+         400 => "Bad Request",
+         401 => "Unauthorized",
+@@ -541,12 +559,21 @@ fn respond<W: Write>(w: &mut W, status: u16, body: &[u8]) -> io::Result<()> {
+         504 => "Gateway Timeout",
+         _ => "Error",
+     };
+-    let mut out = format!(
+-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+-        body.len()
+-    )
+-    .into_bytes();
+-    out.extend_from_slice(body);
++    let mut out = Vec::with_capacity(reply.body.len() + 256);
++    write!(out, "HTTP/1.1 {} {reason}\r\n", reply.status)?;
++    if !reply
++        .headers
++        .iter()
++        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
++    {
++        out.extend_from_slice(b"Content-Type: application/json\r\n");
++    }
++    write!(out, "Content-Length: {}\r\n", reply.body.len())?;
++    for (name, value) in &reply.headers {
++        write!(out, "{name}: {value}\r\n")?;
++    }
++    out.extend_from_slice(b"Connection: keep-alive\r\n\r\n");
++    out.extend_from_slice(&reply.body);
+     w.write_all(&out)?;
+     w.flush()
+ }
+@@ -559,6 +586,17 @@ fn error_body(code: &str, message: &str) -> Vec<u8> {
+         .into_bytes()
+ }
+ 
++/// The reply the connection thread writes itself, with no frame behind
++/// it.
++fn error_reply(status: u16, code: &str, message: &str) -> RemoteReply {
++    RemoteReply {
++        status,
++        body: error_body(code, message),
++        authenticated: false,
++        headers: Vec::new(),
++    }
++}
++
+ // --- the listener
+ 
+ /// At most 16 connections, 4 of them unauthenticated. The 4 are a pool
+@@ -582,6 +620,9 @@ const INBOX: usize = 64;
+ /// `/pair` and `/info` per minute per listener, answered 429 past it.
+ const PAIR_PER_MINUTE: usize = 6;
+ const INFO_PER_MINUTE: usize = 60;
++/// The page's three files per minute per listener: a reload is three
++/// requests, so this allows forty reloads and stops a loop.
++const PAGE_PER_MINUTE: usize = 120;
+ 
+ const PAIR_PATH: &str = "/api/v1/pair";
+ const INFO_PATH: &str = "/api/v1/info";
+@@ -623,6 +664,7 @@ impl RateWindow {
+ struct Limits {
+     pair: Mutex<RateWindow>,
+     info: Mutex<RateWindow>,
++    page: Mutex<RateWindow>,
+ }
+ 
+ impl Limits {
+@@ -632,6 +674,7 @@ impl Limits {
+         let window = match path {
+             PAIR_PATH => &self.pair,
+             INFO_PATH => &self.info,
++            p if crate::web::PAGES.iter().any(|(page, _, _)| *page == p) => &self.page,
+             _ => return false,
+         };
+         !window.lock().map_or(true, |mut w| w.allow(Instant::now()))
+@@ -683,6 +726,7 @@ impl RemotePort {
+             limits: Limits {
+                 pair: Mutex::new(RateWindow::new(PAIR_PER_MINUTE, Duration::from_secs(60))),
+                 info: Mutex::new(RateWindow::new(INFO_PER_MINUTE, Duration::from_secs(60))),
++                page: Mutex::new(RateWindow::new(PAGE_PER_MINUTE, Duration::from_secs(60))),
+             },
+             next_subscriber: AtomicU64::new(1),
+         });
+@@ -788,8 +832,11 @@ fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::
+         if shared.limits.limited(&request.path) {
+             respond(
+                 reader.get_mut(),
+-                429,
+-                &error_body("rate_limited", "too many requests; try again in a minute"),
++                &error_reply(
++                    429,
++                    "rate_limited",
++                    "too many requests; try again in a minute",
++                ),
+             )?;
+             continue;
+         }
+@@ -818,19 +865,14 @@ fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::
+         {
+             respond(
+                 reader.get_mut(),
+-                503,
+-                &error_body("busy", "the host is busy; try again"),
++                &error_reply(503, "busy", "the host is busy; try again"),
+             )?;
+             continue;
+         }
+         (shared.wake)();
+         let reply = match reply_rx.recv_timeout(ANSWER_TIMEOUT) {
+             Ok(reply) => reply,
+-            Err(_) => RemoteReply {
+-                status: 504,
+-                body: error_body("no_answer", "the app did not answer in time"),
+-                authenticated: false,
+-            },
++            Err(_) => error_reply(504, "no_answer", "the app did not answer in time"),
+         };
+         if reply.authenticated && !paired.load(Ordering::SeqCst) {
+             // The device moves from the unauthenticated pool to the
+@@ -838,8 +880,7 @@ fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::
+             if shared.pools.paired.load(Ordering::SeqCst) >= MAX_PAIRED {
+                 respond(
+                     reader.get_mut(),
+-                    503,
+-                    &error_body("full", "too many paired connections"),
++                    &error_reply(503, "full", "too many paired connections"),
+                 )?;
+                 return Ok(());
+             }
+@@ -861,7 +902,7 @@ fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::
+             }
+             return out;
+         }
+-        respond(reader.get_mut(), reply.status, &reply.body)?;
++        respond(reader.get_mut(), &reply)?;
+     }
+     Ok(())
+ }
+diff --git a/src/app.rs b/src/app.rs
+index 4ae5098..9d1c824 100644
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1592,7 +1592,11 @@ impl SwitchboardApp {
+             subscriber,
+         } in incoming
+         {
+-            if let Served::Now(answer) = self.serve_remote(&request, subscriber, &reply) {
++            let served = match page_reply(&request) {
++                Some(page) => Served::Now(page),
++                None => self.serve_remote(&request, subscriber, &reply),
++            };
++            if let Served::Now(answer) = served {
+                 let _ = reply.try_send(answer);
+             }
+         }
+@@ -1665,6 +1669,7 @@ impl SwitchboardApp {
+                             status: 500,
+                             body: self.error_json("too_large", "the reply is over the body cap"),
+                             authenticated: true,
++                            headers: Vec::new(),
+                         }
+                     } else {
+                         out
+@@ -1680,6 +1685,7 @@ impl SwitchboardApp {
+                         status,
+                         body: self.error_json(code, &reason),
+                         authenticated: true,
++                        headers: Vec::new(),
+                     });
+                 }
+             }
+@@ -2366,17 +2372,20 @@ impl SwitchboardApp {
+                     status,
+                     body: self.error_json(code, reason),
+                     authenticated: true,
++                    headers: Vec::new(),
+                 }
+             }
+             (_, Ok(_)) => RemoteReply {
+                 status: 500,
+                 body: self.error_json("failed", "Dispatch answered with something else"),
+                 authenticated: true,
++                headers: Vec::new(),
+             },
+             (_, Err(e)) => RemoteReply {
+                 status: 503,
+                 body: self.error_json("dispatch_off", &format!("Dispatch did not answer: {e}")),
+                 authenticated: true,
++                headers: Vec::new(),
+             },
+         };
+         for r in pending {
+@@ -2755,6 +2764,7 @@ impl SwitchboardApp {
+             status: remote::SUBSCRIBED,
+             body: Vec::new(),
+             authenticated: true,
++            headers: Vec::new(),
+         }
+     }
+ 
+@@ -3122,35 +3132,56 @@ impl SwitchboardApp {
+         Served::Now(self.remote_reply(request, &reply, notes_cap))
+     }
+ 
+-    /// The paired device behind a request's bearer token, seen now; or
+-    /// the refusal, which says nothing of the host.
++    /// The paired device behind a request's token, seen now; or the
++    /// refusal, which says nothing of the host. The bearer is tried
++    /// first, then this host's cookie (a browser has no bearer). A
++    /// refusal over this host's own cookie clears it, so a revoked
++    /// browser drops its token; another host's cookie is never touched.
+     fn authenticate(&mut self, request: &RemoteRequest) -> Result<PairedDevice, RemoteReply> {
+-        let Some(token) = &request.bearer else {
+-            return Err(self.refuse(
+-                request,
+-                401,
+-                "unauthorized",
+-                "pair this device first",
+-                false,
+-            ));
+-        };
+-        let Some(device) = self
++        let cookie_name = self
+             .core
+-            .device_by_token(&remote::token_sha256(token))
+-            .cloned()
+-        else {
+-            return Err(self.refuse(
+-                request,
+-                401,
+-                "unauthorized",
+-                "the token is not known; pair again",
+-                false,
+-            ));
++            .identity()
++            .map(crate::core::remote::token_cookie_name);
++        let cookie = cookie_name.as_deref().and_then(|name| {
++            request
++                .cookies
++                .iter()
++                .find(|(n, _)| n == name)
++                .map(|(_, v)| v.as_str())
++        });
++        let device = request
++            .bearer
++            .as_deref()
++            .and_then(|token| self.device_for(token))
++            .or_else(|| cookie.and_then(|token| self.device_for(token)));
++        let Some(device) = device else {
++            let message = if request.bearer.is_none() && cookie.is_none() {
++                "pair this device first"
++            } else {
++                "the token is not known; pair again"
++            };
++            let mut refused = self.refuse(request, 401, "unauthorized", message, false);
++            // `cookie` is only `Some` when `cookie_name` is, so this clears
++            // this host's cookie and no other.
++            if let Some(name) = cookie_name.as_ref().filter(|_| cookie.is_some()) {
++                refused.headers.push((
++                    "Set-Cookie".to_owned(),
++                    format!("{name}=; Path=/api/v1/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"),
++                ));
++            }
++            return Err(refused);
+         };
+         self.dispatch_inner(AppAction::DeviceSeen(device.id));
+         Ok(device)
+     }
+ 
++    /// The paired device whose token hashes to `token`, if any.
++    fn device_for(&self, token: &str) -> Option<PairedDevice> {
++        self.core
++            .device_by_token(&remote::token_sha256(token))
++            .cloned()
++    }
++
+     /// A command under `control` scope. The body's `op` is the operation
+     /// id the device made, which is the idempotency key: the command
+     /// goes through `serve` as the control socket's do, so a send or a
+@@ -3571,6 +3602,7 @@ impl SwitchboardApp {
+                 status: 503,
+                 body: self.error_json("no_identity", "the host has no identity yet"),
+                 authenticated: false,
++                headers: Vec::new(),
+             };
+         };
+         let body = serde_json::json!({
+@@ -3657,19 +3689,34 @@ impl SwitchboardApp {
+         let device = self
+             .core
+             .new_device(name, remote::token_sha256(&token), now.wall);
+-        let reply = serde_json::json!({
+-            "token": token,
++        let mut reply = serde_json::json!({
+             "scope": device.scope,
+             "server_id": identity.server_id,
+             "device_id": device.id,
+         });
++        // A browser takes the token as an HttpOnly cookie, which script
++        // cannot read; a native client takes it in the body, as before.
++        let mut headers = Vec::new();
++        if field("transport") == "cookie" {
++            headers.push((
++                "Set-Cookie".to_owned(),
++                format!(
++                    "{}={token}; Path=/api/v1/; Secure; HttpOnly; SameSite=Strict",
++                    crate::core::remote::token_cookie_name(&identity)
++                ),
++            ));
++        } else {
++            reply["token"] = token.into();
++        }
+         log::info!(
+             "remote: paired {:?} with {} scope",
+             device.name,
+             device.scope.word()
+         );
+         self.dispatch_inner(AppAction::Paired(device));
+-        self.envelope(200, &reply, false)
++        let mut out = self.envelope(200, &reply, false);
++        out.headers = headers;
++        out
+     }
+ 
+     /// One working set with its pins, found across every space.
+@@ -3724,6 +3771,7 @@ impl SwitchboardApp {
+             status: 200,
+             body: text.to_string().into_bytes(),
+             authenticated: true,
++            headers: Vec::new(),
+         }
+     }
+ 
+@@ -3737,6 +3785,7 @@ impl SwitchboardApp {
+             status,
+             body: text.to_string().into_bytes(),
+             authenticated,
++            headers: Vec::new(),
+         }
+     }
+ 
+@@ -3768,6 +3817,7 @@ impl SwitchboardApp {
+             status,
+             body: self.error_json(code, message),
+             authenticated,
++            headers: Vec::new(),
+         }
+     }
+ 
+@@ -4248,6 +4298,34 @@ impl DispatchWorker {
+     }
+ }
+ 
++/// The page's three files, served before pairing. The policy allows
++/// nothing but the host's own origin: no inline script or style, no
++/// frame, no form posted anywhere, and the socket only to the same host.
++const PAGE_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
++
++/// The page's reply for a `GET` of one of its files, or `None` for any
++/// other request. Nothing is cached across versions, and no type is
++/// sniffed away from the one given.
++fn page_reply(request: &RemoteRequest) -> Option<RemoteReply> {
++    if request.method != "GET" {
++        return None;
++    }
++    let (_, content_type, body) = crate::web::PAGES
++        .iter()
++        .find(|(path, _, _)| *path == request.path)?;
++    Some(RemoteReply {
++        status: 200,
++        body: body.as_bytes().to_vec(),
++        authenticated: false,
++        headers: vec![
++            ("Content-Type".to_owned(), content_type.to_string()),
++            ("Content-Security-Policy".to_owned(), PAGE_CSP.to_owned()),
++            ("Cache-Control".to_owned(), "no-store".to_owned()),
++            ("X-Content-Type-Options".to_owned(), "nosniff".to_owned()),
++        ],
++    })
++}
++
+ /// The remote port's protocol version, in `/info`.
+ const REMOTE_PROTOCOL: u32 = 1;
+ /// The remote port's caps: a reply's bytes, a string in a view, and a
+diff --git a/src/core/mod.rs b/src/core/mod.rs
+index 4cc5198..2d7c19a 100644
+--- a/src/core/mod.rs
++++ b/src/core/mod.rs
+@@ -12,7 +12,7 @@ pub mod file_refs;
+ pub mod grid;
+ pub mod model;
+ pub mod reconcile;
+-mod remote;
++pub mod remote;
+ pub mod revision;
+ mod sessions;
+ pub mod tickets;
+diff --git a/src/core/remote.rs b/src/core/remote.rs
+index e9cc6bc..069b76a 100644
+--- a/src/core/remote.rs
++++ b/src/core/remote.rs
+@@ -174,3 +174,36 @@ impl AppCore {
+         }
+     }
+ }
++
++/// The name prefix of a browser's token cookie; the rest of the name is
++/// the host's `server_id`, which the frame checks.
++pub const TOKEN_COOKIE_PREFIX: &str = "switchboard_token_";
++
++/// The cookie a browser holds this host's token in. Cookies are scoped
++/// by host and not by port, so two instances on one machine would share
++/// a jar; the server id keeps each host's token under its own name, and
++/// it is stable for the host's life because a key rotation keeps it.
++#[must_use]
++pub fn token_cookie_name(identity: &Identity) -> String {
++    format!("{TOKEN_COOKIE_PREFIX}{}", identity.server_id)
++}
++
++/// The invite a phone opens: the page's URL with the code, the key and
++/// the id in the fragment, which a browser never sends to the host.
++/// `address` is `host:port`; an IPv6 host is bracketed here, so the
++/// authority is a valid URL host.
++#[must_use]
++pub fn pairing_invite(identity: &Identity, address: &str, code: &str) -> String {
++    let authority = match address.rsplit_once(':') {
++        Some((host, port)) if host.contains(':') && !host.starts_with('[') => {
++            format!("[{host}]:{port}")
++        }
++        _ => address.to_owned(),
++    };
++    format!(
++        "https://{authority}/#code={}&key={}&id={}",
++        code.to_ascii_uppercase(),
++        identity.spki_sha256,
++        identity.server_id,
++    )
++}
+diff --git a/src/core/tests.rs b/src/core/tests.rs
+index fd3b5ed..baf6fc3 100644
+--- a/src/core/tests.rs
++++ b/src/core/tests.rs
+@@ -11777,6 +11777,42 @@ mod remote {
+         }
+     }
+ 
++    #[test]
++    fn the_invite_is_a_url_with_the_secrets_in_the_fragment_and_never_the_token() {
++        let id = identity();
++        let v4 = super::super::remote::pairing_invite(&id, "192.168.1.9:43187", "abcd2345");
++        assert_eq!(
++            v4,
++            format!(
++                "https://192.168.1.9:43187/#code=ABCD2345&key={}&id={}",
++                id.spki_sha256, id.server_id
++            )
++        );
++        let v6 = super::super::remote::pairing_invite(&id, "fe80::1:43187", "ABCD2345");
++        assert!(v6.starts_with("https://[fe80::1]:43187/#code="), "{v6}");
++        let kept = super::super::remote::pairing_invite(&id, "[fe80::1]:43187", "ABCD2345");
++        assert_eq!(v6, kept);
++        // The fragment is the only place the secrets go: nothing before
++        // the `#` carries them, and the token is never in an invite.
++        let before = v4.split('#').next().unwrap();
++        assert!(!before.contains(&id.spki_sha256));
++        assert!(!v4.contains("token"));
++    }
++
++    #[test]
++    fn the_token_cookie_name_is_per_host() {
++        let id = identity();
++        assert_eq!(
++            super::super::remote::token_cookie_name(&id),
++            format!("switchboard_token_{}", id.server_id)
++        );
++        let other = identity();
++        assert_ne!(
++            super::super::remote::token_cookie_name(&id),
++            super::super::remote::token_cookie_name(&other)
++        );
++    }
++
+     fn device(name: &str, hash: &str) -> PairedDevice {
+         PairedDevice {
+             id: uuid::Uuid::new_v4(),
+diff --git a/src/lib.rs b/src/lib.rs
+index 9bd21dc..5129d84 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -23,5 +23,6 @@ pub mod core;
+ pub mod ports;
+ pub mod script;
+ pub mod ui;
++pub mod web;
+ 
+ pub use app::SwitchboardApp;
+diff --git a/src/ui/remote.rs b/src/ui/remote.rs
+index 2a49f6a..c35b45e 100644
+--- a/src/ui/remote.rs
++++ b/src/ui/remote.rs
+@@ -154,22 +154,25 @@ fn pairing(cx: &mut DrawCtx<'_>, ui: &mut Ui, draft: &mut RemoteDraft) {
+     };
+     if let Some(window) = cx.core.pairing().cloned() {
+         let port = cx.remote_port.unwrap_or(identity.listen.port);
+-        let address = remote::local_address()
+-            .map(|ip| format!("{ip}:{port}"))
+-            .unwrap_or_default();
+-        let payload = serde_json::json!({
+-            "server_id": identity.server_id,
+-            "spki_sha256": identity.spki_sha256,
+-            "code": window.code,
+-            "addresses": if address.is_empty() { Vec::new() } else { vec![address.clone()] },
+-        })
+-        .to_string();
+-        if draft
+-            .qr
+-            .as_ref()
+-            .is_none_or(|(code, _)| *code != window.code)
+-        {
+-            draft.qr = qr_texture(ui.ctx(), &payload).map(|t| (window.code.clone(), t));
++        // Without a network address there is no URL to hand a phone: the
++        // code and the full key are shown for the command-line form.
++        let address = remote::local_address().map(|ip| format!("{ip}:{port}"));
++        let invite = address
++            .as_deref()
++            .map(|a| crate::core::remote::pairing_invite(&identity, a, &window.code));
++        // A picture drawn for an earlier code, or for an address that is
++        // gone now, must not sit beside this code's text.
++        match &invite {
++            None => draft.qr = None,
++            Some(invite)
++                if draft
++                    .qr
++                    .as_ref()
++                    .is_none_or(|(code, _)| *code != window.code) =>
++            {
++                draft.qr = qr_texture(ui.ctx(), invite).map(|t| (window.code.clone(), t));
++            }
++            Some(_) => {}
+         }
+         ui.horizontal(|ui| {
+             if let Some((_, texture)) = &draft.qr {
+@@ -181,28 +184,36 @@ fn pairing(cx: &mut DrawCtx<'_>, ui: &mut Ui, draft: &mut RemoteDraft) {
+                         .text_style(theme::h1())
+                         .family(egui::FontFamily::Monospace),
+                 );
+-                ui.label(theme::meta_text(
+-                    ui,
+-                    format!("Key {}", short_hash(&identity.spki_sha256)),
+-                ));
+-                if !address.is_empty() {
++                let key = if address.is_some() {
++                    short_hash(&identity.spki_sha256)
++                } else {
++                    identity.spki_sha256.clone()
++                };
++                ui.label(theme::meta_text(ui, format!("Key {key}")));
++                if let Some(address) = &address {
+                     ui.label(theme::meta_text(ui, format!("Address {address}")));
+                 }
++                let sentence = if address.is_some() {
++                    "Scan with a phone's camera, or paste the invite into a client. The browser will warn about the certificate: on your own network, accepting it is the trust step, and it may ask again."
++                } else {
++                    "No network address: pair by `switchboard-remote pair <host:port> <code> <key>`."
++                };
+                 ui.label(theme::meta_text(
+                     ui,
+                     format!(
+-                        "Scan, or type the key and the code. Grants {} scope. Open for five minutes or three wrong codes.",
++                        "{sentence} Grants {} scope. Open for five minutes or three wrong codes.",
+                         window.scope.word()
+                     ),
+                 ));
+                 ui.horizontal(|ui| {
+                     // The QR's text, for a client without a camera (the
+                     // command-line browser takes it as one argument).
+-                    if theme::secondary(ui, "Copy invite")
+-                        .on_hover_text("The QR code's text, to paste into a client")
+-                        .clicked()
++                    if let Some(invite) = &invite
++                        && theme::secondary(ui, "Copy invite")
++                            .on_hover_text("The QR code's text: the address a phone opens")
++                            .clicked()
+                     {
+-                        ui.ctx().copy_text(payload.clone());
++                        ui.ctx().copy_text(invite.clone());
+                     }
+                     if theme::secondary(ui, "Stop pairing").clicked() {
+                         cx.dispatch(AppAction::ClosePairing);
+diff --git a/src/web.rs b/src/web.rs
+new file mode 100644
+index 0000000..6d423ef
+--- /dev/null
++++ b/src/web.rs
+@@ -0,0 +1,19 @@
++//! The browser page the remote port serves before pairing: three files
++//! compiled into the binary, the way the icon and fonts are. The frame
++//! answers their `GET`s (`page_reply` in `app.rs`), with a policy that
++//! allows nothing but the host's own origin.
++
++/// The page's document. Its one stylesheet and one script are the other
++/// two files, referenced by path and nothing inline.
++pub const INDEX_HTML: &str = include_str!("../web/index.html");
++/// The page's stylesheet.
++pub const APP_CSS: &str = include_str!("../web/app.css");
++/// The page's script: plain DOM, no framework and no build step.
++pub const APP_JS: &str = include_str!("../web/app.js");
++/// The files by request path, with their content type and body. The
++/// frame serves them before pairing, and the rate window counts them.
++pub const PAGES: [(&str, &str, &str); 3] = [
++    ("/", "text/html; charset=utf-8", INDEX_HTML),
++    ("/app.css", "text/css; charset=utf-8", APP_CSS),
++    ("/app.js", "text/javascript; charset=utf-8", APP_JS),
++];
+diff --git a/tests/remote.rs b/tests/remote.rs
+index b023a1f..5c499bd 100644
+--- a/tests/remote.rs
++++ b/tests/remote.rs
+@@ -240,16 +240,20 @@ fn command_with_run(port: &mut Port, project: &str, text: &str) -> (String, Reco
+     (session, id)
+ }
+ 
+-/// One HTTP request over a fresh pinned TLS connection: the status and
+-/// the body.
++/// A response as the tests read it: the status, the headers (names
++/// lowercased) and the body.
++type Answer = (u16, Vec<(String, String)>, String);
++
++/// One HTTP request over a fresh pinned TLS connection.
+ fn http(
+     addr: SocketAddr,
+     config: &Arc<ClientConfig>,
+     method: &str,
+     path: &str,
+     bearer: Option<&str>,
++    cookie: Option<&str>,
+     body: &str,
+-) -> std::io::Result<(u16, String)> {
++) -> std::io::Result<Answer> {
+     let tcp = TcpStream::connect(addr)?;
+     tcp.set_read_timeout(Some(Duration::from_secs(10)))?;
+     let conn = ClientConnection::new(
+@@ -264,13 +268,22 @@ fn http(
+     let auth = bearer
+         .map(|t| format!("Authorization: Bearer {t}\r\n"))
+         .unwrap_or_default();
++    let cookie = cookie
++        .map(|c| format!("Cookie: {c}\r\n"))
++        .unwrap_or_default();
+     write!(
+         s,
+-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: {}\r\n\r\n{body}",
++        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{auth}{cookie}Content-Length: {}\r\n\r\n{body}",
+         body.len()
+     )?;
+     s.flush()?;
+-    let mut reader = BufReader::new(s);
++    read_response(&mut BufReader::new(s))
++}
++
++/// One response off a connection: the status, its headers and its body
++/// by `Content-Length`. The reader is left at the next response, so a
++/// kept connection can be read again.
++fn read_response<R: BufRead>(reader: &mut R) -> std::io::Result<Answer> {
+     let mut line = String::new();
+     reader.read_line(&mut line)?;
+     let status: u16 = line
+@@ -278,7 +291,7 @@ fn http(
+         .nth(1)
+         .and_then(|s| s.parse().ok())
+         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, line.clone()))?;
+-    let mut length = 0usize;
++    let mut headers = Vec::new();
+     loop {
+         let mut h = String::new();
+         reader.read_line(&mut h)?;
+@@ -286,13 +299,24 @@ fn http(
+         if h.is_empty() {
+             break;
+         }
+-        if let Some(v) = h.strip_prefix("Content-Length:") {
+-            length = v.trim().parse().unwrap_or(0);
++        if let Some((n, v)) = h.split_once(':') {
++            headers.push((n.trim().to_ascii_lowercase(), v.trim().to_owned()));
+         }
+     }
++    let length: usize = header(&headers, "content-length")
++        .and_then(|v| v.parse().ok())
++        .unwrap_or(0);
+     let mut out = vec![0; length];
+     reader.read_exact(&mut out)?;
+-    Ok((status, String::from_utf8_lossy(&out).into_owned()))
++    Ok((status, headers, String::from_utf8_lossy(&out).into_owned()))
++}
++
++/// The value of a response header, by its lowercased name.
++fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
++    headers
++        .iter()
++        .find(|(n, _)| n == name)
++        .map(|(_, v)| v.as_str())
+ }
+ 
+ /// A request from a client thread, served by the app on this thread.
+@@ -303,25 +327,61 @@ fn call(
+     bearer: Option<&str>,
+     body: &str,
+ ) -> (u16, serde_json::Value) {
++    let (status, _, value) = call_with(port, method, path, bearer, None, body);
++    (status, value)
++}
++
++/// `call` with a cookie, and the response's headers as well.
++fn call_with(
++    port: &mut Port,
++    method: &str,
++    path: &str,
++    bearer: Option<&str>,
++    cookie: Option<&str>,
++    body: &str,
++) -> (u16, Vec<(String, String)>, serde_json::Value) {
++    let (status, headers, text) = call_text(port, method, path, bearer, cookie, body);
++    let value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
++    (status, headers, value)
++}
++
++/// One request on a fresh connection, its body as text: the page's
++/// files are not JSON.
++fn call_text(
++    port: &mut Port,
++    method: &str,
++    path: &str,
++    bearer: Option<&str>,
++    cookie: Option<&str>,
++    body: &str,
++) -> (u16, Vec<(String, String)>, String) {
+     let addr = port.addr;
+     let config = Arc::clone(&port.client);
+-    let (method, path, bearer, body) = (
++    let (method, path, bearer, cookie, body) = (
+         method.to_owned(),
+         path.to_owned(),
+         bearer.map(str::to_owned),
++        cookie.map(str::to_owned),
+         body.to_owned(),
+     );
+-    let client =
+-        std::thread::spawn(move || http(addr, &config, &method, &path, bearer.as_deref(), &body));
++    let client = std::thread::spawn(move || {
++        http(
++            addr,
++            &config,
++            &method,
++            &path,
++            bearer.as_deref(),
++            cookie.as_deref(),
++            &body,
++        )
++    });
+     let deadline = std::time::Instant::now() + Duration::from_secs(5);
+     while !client.is_finished() {
+         assert!(std::time::Instant::now() < deadline, "no reply");
+         port.app.serve_pending();
+         std::thread::sleep(Duration::from_millis(2));
+     }
+-    let (status, text) = client.join().unwrap().expect("http");
+-    let value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+-    (status, value)
++    client.join().unwrap().expect("http")
+ }
+ 
+ fn get(port: &mut Port, path: &str, bearer: Option<&str>) -> (u16, serde_json::Value) {
+@@ -1395,7 +1455,7 @@ fn strings_are_bounded_in_a_collection_and_whole_alone() {
+ fn a_wrong_pin_fails_at_the_handshake_before_any_request() {
+     let mut port = port();
+     let other = pinned_client(&"00".repeat(32)).unwrap();
+-    let result = http(port.addr, &other, "GET", "/api/v1/info", None, "");
++    let result = http(port.addr, &other, "GET", "/api/v1/info", None, None, "");
+     assert!(result.is_err(), "{result:?}");
+     // The right pin is still served.
+     let (status, _) = get(&mut port, "/api/v1/info", None);
+@@ -1415,6 +1475,351 @@ fn pair_is_rate_limited_per_listener() {
+     assert_eq!(status, 200, "info has its own limit: {reply}");
+ }
+ 
++/// The page's three files are served before pairing, with the headers
++/// the page's policy needs; any other path, or another method on them,
++/// is `not_found` as it was.
++#[test]
++fn the_page_is_served_unpaired_with_its_headers() {
++    let mut port = port();
++    let csp = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
++    for (path, content_type) in [
++        ("/", "text/html; charset=utf-8"),
++        ("/app.css", "text/css; charset=utf-8"),
++        ("/app.js", "text/javascript; charset=utf-8"),
++    ] {
++        let (status, headers, body) = call_text(&mut port, "GET", path, None, None, "");
++        assert_eq!(status, 200, "{path}");
++        assert!(!body.is_empty(), "{path}");
++        assert_eq!(
++            header(&headers, "content-type"),
++            Some(content_type),
++            "{path}"
++        );
++        assert_eq!(
++            header(&headers, "content-security-policy"),
++            Some(csp),
++            "{path}"
++        );
++        assert_eq!(
++            header(&headers, "cache-control"),
++            Some("no-store"),
++            "{path}"
++        );
++        assert_eq!(
++            header(&headers, "x-content-type-options"),
++            Some("nosniff"),
++            "{path}"
++        );
++    }
++    for (method, path) in [
++        ("GET", "/index.html"),
++        ("GET", "/app.js/"),
++        ("GET", "/other"),
++        ("POST", "/"),
++    ] {
++        let (status, _, reply) = call_with(&mut port, method, path, None, None, "{}");
++        assert_eq!(
++            (status, code(&reply)),
++            (404, "not_found"),
++            "{method} {path}"
++        );
++    }
++}
++
++/// The page names only its own files and runs no script the host did
++/// not ship: no inline script or style, no address outside the host,
++/// and the token never reaches script.
++#[test]
++fn the_page_references_only_what_the_host_serves() {
++    let html = switchboard::web::INDEX_HTML;
++    for attr in ["src=\"", "href=\""] {
++        for rest in html.split(attr).skip(1) {
++            let target = rest.split('"').next().unwrap();
++            assert!(
++                ["/", "/app.css", "/app.js"].contains(&target),
++                "{attr}{target}"
++            );
++        }
++    }
++    for part in html.split("<script").skip(1) {
++        let body = part.split_once('>').unwrap().1;
++        assert!(body.starts_with("</script>"), "a script has a body: {part}");
++    }
++    assert!(!html.contains("<style"), "no inline style");
++    for text in [html, switchboard::web::APP_CSS, switchboard::web::APP_JS] {
++        assert!(!text.contains("style="), "a style attribute");
++        assert!(!text.contains("http://") && !text.contains("https://"));
++    }
++    let js = switchboard::web::APP_JS;
++    assert!(
++        !js.contains("Authorization"),
++        "the token never enters script"
++    );
++    assert!(!js.contains("document.cookie"), "the cookie is never read");
++}
++
++/// Open the window with `code` and pair as a browser: returns the
++/// cookie it was given, as `name=value`.
++fn pair_browser(port: &mut Port, code: &str, device: &str) -> String {
++    port.app.dispatch(AppAction::OpenPairing {
++        code: code.into(),
++        scope: Scope::Read,
++    });
++    let spki = port
++        .remote
++        .state()
++        .identity
++        .as_ref()
++        .unwrap()
++        .spki_sha256
++        .clone();
++    let body = serde_json::json!({
++        "code": code, "spki_sha256": spki, "device_name": device, "transport": "cookie"
++    });
++    let (status, headers, reply) =
++        call_with(port, "POST", "/api/v1/pair", None, None, &body.to_string());
++    assert_eq!(status, 200, "{reply}");
++    header(&headers, "set-cookie")
++        .expect("a cookie")
++        .split("; ")
++        .next()
++        .unwrap()
++        .to_owned()
++}
++
++/// A browser pairs from the invite URL: the token comes back as an
++/// `HttpOnly` cookie and not in the body, the cookie is the browser's
++/// credential, and a revocation clears it. A native client's pairing
++/// keeps the token in the body and sets no cookie.
++#[test]
++#[allow(clippy::too_many_lines)] // one browser's life: pair, read, refuse, revoke
++fn a_browser_pairs_from_the_invite_and_reads_through_its_cookie() {
++    let mut port = port();
++    port.app.dispatch(AppAction::OpenPairing {
++        code: "ABCD2345".into(),
++        scope: Scope::Read,
++    });
++    let identity = port.remote.state().identity.clone().unwrap();
++    let invite =
++        switchboard::core::remote::pairing_invite(&identity, "192.168.1.9:43187", "ABCD2345");
++    // The phone opens the URL: the secrets are in its fragment, which the
++    // host never sees, so the host reads them from what the page sends.
++    let fragment = invite.split_once('#').unwrap().1;
++    let field = |name: &str| {
++        fragment
++            .split('&')
++            .find_map(|p| p.strip_prefix(&format!("{name}=")))
++            .unwrap()
++            .to_owned()
++    };
++    assert_eq!(field("code"), "ABCD2345");
++    assert_eq!(field("id"), identity.server_id.to_string());
++    let (status, info) = get(&mut port, "/api/v1/info", None);
++    assert_eq!(status, 200);
++    assert_eq!(field("key"), info["body"]["spki_sha256"].as_str().unwrap());
++
++    let body = serde_json::json!({
++        "code": field("code"), "spki_sha256": field("key"),
++        "device_name": "Safari on iPhone", "transport": "cookie"
++    });
++    let (status, headers, reply) = call_with(
++        &mut port,
++        "POST",
++        "/api/v1/pair",
++        None,
++        None,
++        &body.to_string(),
++    );
++    assert_eq!(status, 200, "{reply}");
++    assert!(
++        reply["body"]["token"].is_null(),
++        "no token in the body: {reply}"
++    );
++    let name = switchboard::core::remote::token_cookie_name(&identity);
++    let set = header(&headers, "set-cookie").expect("a cookie");
++    assert!(set.starts_with(&format!("{name}=")), "{set}");
++    for attr in ["Path=/api/v1/", "Secure", "HttpOnly", "SameSite=Strict"] {
++        assert!(set.split("; ").any(|a| a == attr), "{attr} in {set}");
++    }
++    let cookie = set.split("; ").next().unwrap().to_owned();
++
++    let (status, _, _) = call_with(&mut port, "GET", "/api/v1/waiting", None, Some(&cookie), "");
++    assert_eq!(status, 200, "the cookie reads");
++    let device = port.app.core().devices()[0].clone();
++    assert_eq!(device.name, "Safari on iPhone");
++    assert!(device.last_seen.is_some(), "the read saw the device");
++    let sub = subscribe_cookie(&mut port, &cookie);
++
++    // A bearer outranks the cookie; a native pairing answers the token
++    // in the body and no cookie.
++    port.app.dispatch(AppAction::OpenPairing {
++        code: "WXYZ6789".into(),
++        scope: Scope::Read,
++    });
++    let native = serde_json::json!({
++        "code": "WXYZ6789", "spki_sha256": field("key"), "device_name": "Pad"
++    });
++    let (status, headers, reply) = call_with(
++        &mut port,
++        "POST",
++        "/api/v1/pair",
++        None,
++        None,
++        &native.to_string(),
++    );
++    assert_eq!(status, 200, "{reply}");
++    let bearer = reply["body"]["token"].as_str().unwrap().to_owned();
++    assert_eq!(bearer.len(), 43);
++    assert!(
++        header(&headers, "set-cookie").is_none(),
++        "no cookie for a client"
++    );
++    let stale = format!("{name}=not-a-token");
++    let (status, _, _) = call_with(
++        &mut port,
++        "GET",
++        "/api/v1/waiting",
++        Some(&bearer),
++        Some(&stale),
++        "",
++    );
++    assert_eq!(status, 200, "a known bearer outranks an unknown cookie");
++
++    // Another host's cookie name is not this host's credential, even
++    // with this host's valid token in it; this host's own name is read
++    // when both are sent.
++    let value = cookie.split_once('=').unwrap().1;
++    let other = format!("switchboard_token_{}", uuid::Uuid::new_v4());
++    let (status, headers, _) = call_with(
++        &mut port,
++        "GET",
++        "/api/v1/waiting",
++        None,
++        Some(&format!("{other}={value}")),
++        "",
++    );
++    assert_eq!(status, 401);
++    assert!(
++        header(&headers, "set-cookie").is_none(),
++        "another host's cookie is left alone"
++    );
++    let both = format!("{other}={value}; {cookie}");
++    let (status, _, _) = call_with(&mut port, "GET", "/api/v1/waiting", None, Some(&both), "");
++    assert_eq!(status, 200, "this host's name is the one read");
++
++    // Revoking the browser closes its socket, and its next request is
++    // refused with its cookie cleared.
++    let id = port
++        .app
++        .core()
++        .devices()
++        .iter()
++        .find(|d| d.name == "Safari on iPhone")
++        .unwrap()
++        .id;
++    port.app.dispatch(AppAction::RevokeDevice(id));
++    let (status, headers, _) =
++        call_with(&mut port, "GET", "/api/v1/waiting", None, Some(&cookie), "");
++    assert_eq!(status, 401);
++    let clear = header(&headers, "set-cookie").expect("the cookie is cleared");
++    assert!(clear.starts_with(&format!("{name}=;")), "{clear}");
++    assert!(clear.contains("Max-Age=0"), "{clear}");
++    match next_frame(&mut port, &sub, 5) {
++        Some(Err(reason)) => assert!(reason.starts_with("closed"), "{reason}"),
++        other => panic!("expected the close, got {other:?}"),
++    }
++}
++
++/// A TLS connection the test keeps across requests, as a browser keeps
++/// the sockets of a page load.
++type Kept = BufReader<StreamOwned<ClientConnection, TcpStream>>;
++
++fn connect_kept(port: &Port) -> Kept {
++    let tcp = TcpStream::connect(port.addr).expect("connect");
++    tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
++    let conn = ClientConnection::new(
++        Arc::clone(&port.client),
++        ServerName::try_from("localhost").unwrap(),
++    )
++    .expect("client");
++    let mut s = StreamOwned::new(conn, tcp);
++    while s.conn.is_handshaking() {
++        s.conn.complete_io(&mut s.sock).expect("handshake");
++    }
++    BufReader::new(s)
++}
++
++/// One `GET` on a kept connection, answered by the app on this thread.
++/// The connection comes back for the next request.
++fn get_kept(
++    port: &mut Port,
++    mut kept: Kept,
++    path: &str,
++    cookie: Option<&str>,
++) -> (Kept, u16, Vec<(String, String)>, String) {
++    let cookie = cookie
++        .map(|c| format!("Cookie: {c}\r\n"))
++        .unwrap_or_default();
++    let request =
++        format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n{cookie}Content-Length: 0\r\n\r\n");
++    let client = std::thread::spawn(move || {
++        kept.get_mut().write_all(request.as_bytes())?;
++        let (status, headers, body) = read_response(&mut kept)?;
++        Ok::<_, std::io::Error>((kept, status, headers, body))
++    });
++    let deadline = std::time::Instant::now() + Duration::from_secs(5);
++    while !client.is_finished() {
++        assert!(std::time::Instant::now() < deadline, "no reply");
++        port.app.serve_pending();
++        std::thread::sleep(Duration::from_millis(2));
++    }
++    client.join().unwrap().expect("a kept request")
++}
++
++/// A page load's three connections fit the unauthenticated pool and stay
++/// open while a browser that has paired reads and subscribes: the
++/// `/waiting` moves its connection to the paired pool, and the socket
++/// then opens as a fourth stranger at most.
++#[test]
++fn a_page_load_fits_the_stranger_pool() {
++    let mut port = port();
++    let cookie = pair_browser(&mut port, "ABCD2345", "Safari on iPhone");
++    // The pairing's own connection must be gone before the pool is counted.
++    std::thread::sleep(Duration::from_millis(100));
++    let mut held = Vec::new();
++    for path in ["/", "/app.css", "/app.js"] {
++        let kept = connect_kept(&port);
++        let (kept, status, _, _) = get_kept(&mut port, kept, path, None);
++        assert_eq!(status, 200, "{path}");
++        held.push(kept);
++    }
++    let fourth = connect_kept(&port);
++    let (_fourth, status, _, _) = get_kept(&mut port, fourth, "/api/v1/waiting", Some(&cookie));
++    assert_eq!(
++        status, 200,
++        "the cookie moves its connection to the paired pool"
++    );
++    let _sub = subscribe_cookie(&mut port, &cookie);
++    // The three page connections were held open all along.
++    let first = held.remove(0);
++    let (_, status, _, _) = get_kept(&mut port, first, "/", None);
++    assert_eq!(status, 200, "a page connection is still open");
++}
++
++/// The page's files share one window, allowing 120 requests a minute
++/// per listener: the 121st is answered 429 without reaching the frame.
++#[test]
++fn the_page_window_is_rate_limited() {
++    let mut port = port();
++    let mut statuses = Vec::new();
++    for _ in 0..121 {
++        let (status, _, _) = call_text(&mut port, "GET", "/app.css", None, None, "");
++        statuses.push(status);
++    }
++    assert!(statuses[..120].iter().all(|s| *s == 200), "{statuses:?}");
++    assert_eq!(statuses[120], 429);
++}
++
+ /// A certificate whose key is gone is remade over a new key under the
+ /// same server id, every pairing is dropped, and the owner is told; a
+ /// key that is present keeps the identity across restarts.
+@@ -1470,7 +1875,7 @@ fn two_instances_have_distinct_identities_and_a_read_only_one_does_not_listen()
+     assert_ne!(ia["body"]["spki_sha256"], ib["body"]["spki_sha256"]);
+     assert_ne!(ia["epoch"], ib["epoch"]);
+     // B's pin does not open A.
+-    let result = http(a.addr, &b.client, "GET", "/api/v1/info", None, "");
++    let result = http(a.addr, &b.client, "GET", "/api/v1/info", None, None, "");
+     assert!(result.is_err());
+ 
+     let services = Services {
+@@ -1697,6 +2102,10 @@ fn write_fixtures(dir: &std::path::Path) {
+         let text = serde_json::to_string_pretty(value).unwrap();
+         std::fs::write(dir.join(format!("{name}.json")), text + "\n").unwrap();
+     }
++    // The invite a phone opens, for the Swift parser's test.
++    let invite =
++        switchboard::core::remote::pairing_invite(&identity, "192.168.1.9:43187", "ABCD2345");
++    std::fs::write(dir.join("invite.txt"), invite + "\n").unwrap();
+ }
+ 
+ /// The fixture ticket's notes, read by the key its listing gave.
+@@ -1899,6 +2308,18 @@ fn the_client_fixtures_decode_on_both_sides() {
+     let info = read("info");
+     assert_eq!(info["body"]["protocol"], 1);
+     assert!(info["body"]["spki_sha256"].is_string());
++    // The invite names the same host and key as `/info`, so the Swift
++    // parser's test reads the same identity the other fixtures hold.
++    let invite = std::fs::read_to_string(dir.join("invite.txt")).unwrap();
++    let fragment = invite.trim().split_once('#').unwrap().1;
++    assert_eq!(
++        fragment,
++        format!(
++            "code=ABCD2345&key={}&id={}",
++            info["body"]["spki_sha256"].as_str().unwrap(),
++            info["body"]["server_id"].as_str().unwrap()
++        )
++    );
+     let pair = read("pair");
+     assert_eq!(pair["body"]["token"].as_str().map(str::len), Some(43));
+     assert_eq!(pair["body"]["scope"], "read");
+@@ -1958,10 +2379,27 @@ fn subscribe(port: &mut Port, token: &str) -> Subscriber {
+ 
+ /// A subscription at `path`, for its query (`?scope=all`).
+ fn subscribe_at(port: &mut Port, token: &str, path: &str) -> Subscriber {
++    subscribe_with(port, Some(token), None, path)
++}
++
++/// A subscription made the way a browser makes it: its token is the
++/// cookie, not a bearer.
++fn subscribe_cookie(port: &mut Port, cookie: &str) -> Subscriber {
++    subscribe_with(port, None, Some(cookie), "/api/v1/events")
++}
++
++/// A subscription whose upgrade request carries a bearer, a cookie or both.
++fn subscribe_with(
++    port: &mut Port,
++    bearer: Option<&str>,
++    cookie: Option<&str>,
++    path: &str,
++) -> Subscriber {
+     let addr = port.addr;
+     let url = format!("wss://localhost{path}");
+     let config = Arc::clone(&port.client);
+-    let token = token.to_owned();
++    let bearer = bearer.map(str::to_owned);
++    let cookie = cookie.map(str::to_owned);
+     let (tx, frames) = std::sync::mpsc::channel();
+     let (outbox, out_rx) = std::sync::mpsc::channel::<Out>();
+     let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+@@ -1975,9 +2413,16 @@ fn subscribe_at(port: &mut Port, token: &str, path: &str) -> Subscriber {
+             s.conn.complete_io(&mut s.sock).expect("handshake");
+         }
+         let mut request = url.into_client_request().unwrap();
+-        request
+-            .headers_mut()
+-            .insert("Authorization", format!("Bearer {token}").parse().unwrap());
++        if let Some(token) = &bearer {
++            request
++                .headers_mut()
++                .insert("Authorization", format!("Bearer {token}").parse().unwrap());
++        }
++        if let Some(cookie) = &cookie {
++            request
++                .headers_mut()
++                .insert("Cookie", cookie.parse().unwrap());
++        }
+         let (mut ws, _) = match tungstenite::client(request, s) {
+             Ok(ok) => ok,
+             Err(e) => {
+diff --git a/tests/ui.rs b/tests/ui.rs
+index e58bfcf..1156f17 100644
+--- a/tests/ui.rs
++++ b/tests/ui.rs
+@@ -7483,13 +7483,13 @@ fn remote_devices_dialog_opens_pairing_and_revokes_a_device() {
+             _ => None,
+         })
+         .expect("the invite went to the clipboard");
+-    let invite: serde_json::Value = serde_json::from_str(&invite).unwrap();
+-    assert_eq!(invite["code"], code);
+-    assert_eq!(
+-        invite["spki_sha256"],
+-        harness.state().core().identity().unwrap().spki_sha256
+-    );
+-    assert!(invite["addresses"].is_array());
++    // The invite is the page's URL: the secrets ride in its fragment.
++    assert!(invite.starts_with("https://"), "{invite}");
++    let fragment = invite.split_once('#').expect("a fragment").1;
++    let identity = harness.state().core().identity().unwrap().clone();
++    assert!(fragment.contains(&format!("code={code}")), "{invite}");
++    assert!(fragment.contains(&format!("key={}", identity.spki_sha256)));
++    assert!(fragment.contains(&format!("id={}", identity.server_id)));
+     harness.run_steps(2);
+     click(&mut harness, "Stop pairing");
+     assert!(actions(&harness).contains(&AppAction::ClosePairing));
+diff --git a/web/app.css b/web/app.css
+new file mode 100644
+index 0000000..b983789
+--- /dev/null
++++ b/web/app.css
+@@ -0,0 +1,103 @@
++:root {
++  color-scheme: light dark;
++  --fg: #1d1d1f;
++  --bg: #ffffff;
++  --muted: #6e6e73;
++  --accent: #0a6cff;
++  --warn: #b3261e;
++}
++
++@media (prefers-color-scheme: dark) {
++  :root {
++    --fg: #f5f5f7;
++    --bg: #1c1c1e;
++    --muted: #98989d;
++    --warn: #ff8a80;
++  }
++}
++
++[hidden] {
++  display: none !important;
++}
++
++body {
++  margin: 0;
++  padding: 16px;
++  font: 16px/1.4 -apple-system, system-ui, sans-serif;
++  color: var(--fg);
++  background: var(--bg);
++}
++
++h1 {
++  font-size: 22px;
++  margin: 0;
++}
++
++h2 {
++  font-size: 17px;
++  margin: 18px 0 6px;
++}
++
++.meta {
++  color: var(--muted);
++  font-size: 13px;
++  margin: 4px 0;
++}
++
++.notice {
++  color: var(--warn);
++  font-weight: 600;
++}
++
++.row {
++  display: block;
++  width: 100%;
++  box-sizing: border-box;
++  text-align: left;
++  padding: 10px 12px;
++  margin: 4px 0;
++  border: 1px solid #8884;
++  border-radius: 10px;
++  background: transparent;
++  color: inherit;
++  font: inherit;
++}
++
++.row.waiting {
++  border-color: var(--accent);
++}
++
++.row .name {
++  font-weight: 600;
++}
++
++.row .meta {
++  display: block;
++}
++
++pre {
++  white-space: pre-wrap;
++  word-break: break-word;
++  font: 14px/1.45 ui-monospace, Menlo, monospace;
++  background: #8881;
++  padding: 10px;
++  border-radius: 8px;
++  max-height: 60vh;
++  overflow: auto;
++}
++
++textarea {
++  width: 100%;
++  box-sizing: border-box;
++  font: inherit;
++}
++
++button {
++  font: inherit;
++  padding: 8px 14px;
++  border-radius: 8px;
++}
++
++nav {
++  margin-bottom: 8px;
++}
+diff --git a/web/app.js b/web/app.js
+new file mode 100644
+index 0000000..f3c9231
+--- /dev/null
++++ b/web/app.js
+@@ -0,0 +1,436 @@
++"use strict";
++
++// The token is not here. The host set it as an HttpOnly cookie that
++// script cannot read, and the browser sends it with every request to
++// this host. What is kept is public: which host this is, its key hash
++// (to see an identity change) and the scope the pairing granted.
++const STORE = {
++  server: "switchboard.server_id",
++  key: "switchboard.spki_sha256",
++  scope: "switchboard.scope",
++};
++
++const state = {
++  host: "",
++  live: false,
++  socket: null,
++  stopped: false,
++  justPaired: false,
++  listRevision: -1,
++  listSeq: 0,
++  scope: null,
++  sessions: [],
++  projects: [],
++  waitingIds: new Set(),
++  open: null,
++  ticks: 0,
++};
++
++const $ = (id) => document.getElementById(id);
++
++function readStored(name) {
++  try {
++    return localStorage.getItem(name);
++  } catch (e) {
++    return null;
++  }
++}
++
++function writeStored(name, value) {
++  try {
++    localStorage.setItem(name, value);
++  } catch (e) {
++    // Private browsing: this visit still works, the next one pairs again.
++  }
++}
++
++function notice(text) {
++  $("notice").textContent = text;
++  $("notice").hidden = text === "";
++}
++
++// One request. The reply is the host's envelope: `body` on success,
++// `error {code, message}` on a refusal.
++async function api(method, path, body) {
++  const init = { method, credentials: "same-origin", cache: "no-store", headers: {} };
++  if (body !== undefined) {
++    init.headers["Content-Type"] = "application/json";
++    init.body = JSON.stringify(body);
++  }
++  let res;
++  try {
++    res = await fetch(path, init);
++  } catch (e) {
++    return { ok: false, status: 0, error: { message: "The host did not answer." } };
++  }
++  let json = {};
++  try {
++    json = await res.json();
++  } catch (e) {
++    json = {};
++  }
++  if (res.ok) {
++    return { ok: true, status: res.status, body: json.body, revision: json.revision };
++  }
++  return {
++    ok: false,
++    status: res.status,
++    error: json.error || { message: "The host answered " + res.status + "." },
++  };
++}
++
++// The invite is the URL's fragment. A browser never sends it, so the
++// code reaches the host only in the pairing request. The URL is replaced
++// before anything else runs, so the code leaves the address bar.
++function readInvite() {
++  const params = new URLSearchParams(location.hash.slice(1));
++  if (!params.has("code") || !params.has("key") || !params.has("id")) {
++    return null;
++  }
++  const invite = {
++    code: (params.get("code") || "").toUpperCase(),
++    key: params.get("key"),
++    id: params.get("id"),
++  };
++  history.replaceState(null, "", "/");
++  return invite;
++}
++
++function deviceName() {
++  const ua = navigator.userAgent;
++  let browser = "Browser";
++  if (/Edg\//.test(ua)) browser = "Edge";
++  else if (/Chrome|CriOS|Chromium/.test(ua)) browser = "Chrome";
++  else if (/Firefox|FxiOS/.test(ua)) browser = "Firefox";
++  else if (/Safari/.test(ua)) browser = "Safari";
++  let device = "computer";
++  if (/iPhone/.test(ua)) device = "iPhone";
++  else if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) {
++    device = "iPad";
++  } else if (/Android/.test(ua)) device = "Android";
++  else if (/Macintosh/.test(ua)) device = "Mac";
++  return browser + " on " + device;
++}
++
++function newOp() {
++  const b = crypto.getRandomValues(new Uint8Array(16));
++  b[6] = (b[6] & 0x0f) | 0x40;
++  b[8] = (b[8] & 0x3f) | 0x80;
++  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
++  return [h.slice(0, 8), h.slice(8, 12), h.slice(12, 16), h.slice(16, 20), h.slice(20)].join("-");
++}
++
++// A refusal on an authenticated call: 401 ends the page's polling, and
++// the words say which of the three ways it happened.
++function failed(r) {
++  // Any answer settles whether the pairing was kept; a network failure does not.
++  const justPaired = state.justPaired;
++  if (r.status !== 0) state.justPaired = false;
++  if (r.status !== 401) {
++    notice(r.error.message);
++    return;
++  }
++  state.stopped = true;
++  if (state.socket) state.socket.close();
++  if (justPaired) {
++    notice("This browser did not keep its pairing. Pair again.");
++  } else if (readStored(STORE.server)) {
++    notice("This device was revoked. Pair again.");
++  } else {
++    notice("Not paired. Open Remote devices on the Mac and scan the code.");
++  }
++}
++
++async function pair(invite, host) {
++  const r = await api("POST", "/api/v1/pair", {
++    code: invite.code,
++    spki_sha256: invite.key,
++    device_name: deviceName(),
++    transport: "cookie",
++  });
++  if (!r.ok) {
++    notice(r.error.message);
++    return false;
++  }
++  writeStored(STORE.server, host.server_id);
++  writeStored(STORE.key, invite.key);
++  writeStored(STORE.scope, r.body.scope);
++  state.scope = r.body.scope;
++  state.justPaired = true;
++  notice("");
++  return true;
++}
++
++async function boot() {
++  const invite = readInvite();
++  const info = await api("GET", "/api/v1/info");
++  if (!info.ok) {
++    notice(info.error.message);
++    return;
++  }
++  const host = info.body;
++  state.host = host.server_name;
++  $("host").textContent = host.server_name;
++  if (invite) {
++    if (invite.key !== host.spki_sha256 || invite.id !== host.server_id) {
++      notice("This is not the host whose code was scanned.");
++      return;
++    }
++    if (!(await pair(invite, host))) return;
++  } else if (
++    readStored(STORE.server) === host.server_id &&
++    readStored(STORE.key) !== host.spki_sha256
++  ) {
++    notice("This host's identity changed. Pair again.");
++    return;
++  }
++  // A pairing this visit made has its scope already; storage may refuse
++  // the write that would have kept it.
++  if (!invite) state.scope = readStored(STORE.scope);
++  if (!invite && !readStored(STORE.server)) {
++    notice("Not paired. Open Remote devices on the Mac and scan the code.");
++    return;
++  }
++  await refreshList();
++  connectSocket();
++  setInterval(tick, 5000);
++}
++
++// The list: the waiting call is the first authenticated request, so a
++// pairing the host refused shows here. Each call takes a sequence number
++// and only the newest one applies, so an older reply never overwrites a
++// newer list. The socket's `hello` calls this again: its snapshot is
++// taken after the subscription, which closes the gap this one left.
++async function refreshList() {
++  const seq = ++state.listSeq;
++  const waiting = await api("GET", "/api/v1/waiting");
++  if (!waiting.ok) {
++    failed(waiting);
++    return;
++  }
++  state.justPaired = false;
++  let revision = waiting.revision;
++  const projects = await api("GET", "/api/v1/projects");
++  if (!projects.ok) {
++    failed(projects);
++    return;
++  }
++  const sessions = [];
++  for (const p of projects.body.projects) {
++    const list = await api("GET", "/api/v1/projects/" + p.id + "/sessions");
++    if (!list.ok) {
++      failed(list);
++      return;
++    }
++    revision = Math.max(revision, list.revision);
++    for (const s of list.body.sessions) {
++      sessions.push(Object.assign({}, s, { projectName: p.name }));
++    }
++  }
++  if (seq !== state.listSeq) return;
++  state.listRevision = Math.max(revision, projects.revision);
++  state.waitingIds = new Set(waiting.body.sessions.map((s) => s.id));
++  state.projects = projects.body.projects;
++  state.sessions = sessions;
++  render();
++}
++
++function render() {
++  const list = $("list");
++  list.replaceChildren();
++  const groups = new Map();
++  for (const s of state.sessions) {
++    if (!groups.has(s.project)) groups.set(s.project, { name: s.projectName, items: [] });
++    groups.get(s.project).items.push(s);
++  }
++  const isWaiting = (s) => s.waiting || state.waitingIds.has(s.id);
++  const ordered = [...groups.values()]
++    .map((g) => {
++      g.items.sort((a, b) => Number(isWaiting(b)) - Number(isWaiting(a)));
++      g.waiting = g.items.filter(isWaiting).length;
++      return g;
++    })
++    .sort((a, b) => b.waiting - a.waiting || a.name.localeCompare(b.name));
++  if (ordered.length === 0) {
++    const p = document.createElement("p");
++    p.className = "meta";
++    p.textContent = "No sessions yet.";
++    list.append(p);
++  }
++  for (const g of ordered) {
++    const h = document.createElement("h2");
++    h.textContent = g.name;
++    list.append(h);
++    for (const s of g.items) {
++      const button = document.createElement("button");
++      button.type = "button";
++      button.className = "row" + (isWaiting(s) ? " waiting" : "");
++      const name = document.createElement("span");
++      name.className = "name";
++      name.textContent = s.name;
++      const meta = document.createElement("span");
++      meta.className = "meta";
++      meta.textContent = [s.kind, s.card, s.waiting_reason].filter(Boolean).join(" · ");
++      button.append(name, meta);
++      button.addEventListener("click", () => openSession(s));
++      list.append(button);
++    }
++  }
++  setStatus();
++}
++
++function setStatus() {
++  const scope = state.scope ? (state.scope === "control" ? "control" : "read-only") : "";
++  $("status").textContent = [state.host, state.live ? "live" : "polling", scope]
++    .filter(Boolean)
++    .join(" · ");
++}
++
++// The socket is an upgrade: the page works without it, polling the same
++// collections, and the socket's events only say what to refetch.
++function connectSocket() {
++  if (state.socket || state.stopped) return;
++  let ws;
++  try {
++    ws = new WebSocket("wss://" + location.host + "/api/v1/events");
++  } catch (e) {
++    return;
++  }
++  state.socket = ws;
++  ws.onmessage = (m) => {
++    let ev;
++    try {
++      ev = JSON.parse(m.data);
++    } catch (e) {
++      return;
++    }
++    onEvent(ev);
++  };
++  ws.onclose = () => {
++    if (state.socket === ws) state.socket = null;
++    state.live = false;
++    setStatus();
++  };
++}
++
++function sendFrame(type, open) {
++  if (state.socket && state.socket.readyState === WebSocket.OPEN) {
++    state.socket.send(JSON.stringify({ type, resource: { kind: open.contentKind, id: open.id } }));
++  }
++}
++
++function onEvent(ev) {
++  if (ev.type === "hello") {
++    state.live = true;
++    setStatus();
++    if (state.open) sendFrame("watch", state.open);
++    refreshList();
++    return;
++  }
++  if (ev.type === "resync_required") {
++    if (state.socket) state.socket.close();
++    return;
++  }
++  const kind = ev.resource ? ev.resource.kind : "";
++  const id = ev.resource ? ev.resource.id : "";
++  if (ev.type === "watching") {
++    if (state.open && id === state.open.id && kind === state.open.contentKind) loadOpen();
++    return;
++  }
++  if (ev.type !== "changed" && ev.type !== "removed") return;
++  if (kind === "conversation" || kind === "screen") {
++    if (state.open && id === state.open.id && ev.revision > state.open.revision) loadOpen();
++    return;
++  }
++  if (ev.revision > state.listRevision) refreshList();
++}
++
++// Polling while the socket is down, and the socket retried every 30 s.
++function tick() {
++  if (state.stopped) return;
++  state.ticks += 1;
++  if (!state.live) {
++    refreshList();
++    if (state.open) loadOpen();
++  }
++  if (state.ticks % 6 === 0) connectSocket();
++}
++
++async function openSession(s) {
++  closeOpen();
++  state.open = {
++    id: s.id,
++    name: s.name,
++    contentKind: s.kind === "claude" ? "conversation" : "screen",
++    revision: -1,
++  };
++  $("list").hidden = true;
++  $("session").hidden = false;
++  $("session-name").textContent = s.name;
++  $("session-text").textContent = "";
++  $("reply-note").textContent = "";
++  renderReplyBox();
++  if (state.socket && state.socket.readyState === WebSocket.OPEN) {
++    sendFrame("watch", state.open);
++  } else {
++    loadOpen();
++  }
++}
++
++function closeOpen() {
++  if (state.open) sendFrame("unwatch", state.open);
++  state.open = null;
++}
++
++async function loadOpen() {
++  const open = state.open;
++  if (!open) return;
++  const path =
++    open.contentKind === "conversation"
++      ? "/api/v1/sessions/" + open.id + "/last-response"
++      : "/api/v1/sessions/" + open.id + "/screen";
++  const r = await api("GET", path);
++  if (state.open !== open) return;
++  if (!r.ok) {
++    failed(r);
++    return;
++  }
++  open.revision = r.revision;
++  const text = r.body.text || (open.contentKind === "conversation" ? "No response yet." : "");
++  $("session-text").textContent = text;
++}
++
++function renderReplyBox() {
++  $("reply").hidden = !(state.open && state.scope === "control");
++}
++
++$("back").addEventListener("click", () => {
++  closeOpen();
++  $("session").hidden = true;
++  $("list").hidden = false;
++});
++
++$("reply").addEventListener("submit", async (ev) => {
++  ev.preventDefault();
++  const open = state.open;
++  const text = $("reply-text").value.trim();
++  if (!open || text === "") return;
++  const r = await api("POST", "/api/v1/sessions/" + open.id + "/send", { op: newOp(), text });
++  if (state.open !== open) return;
++  if (r.ok) {
++    $("reply-text").value = "";
++    $("reply-note").textContent = "Sent.";
++    loadOpen();
++  } else if (r.status === 403) {
++    state.scope = "read";
++    writeStored(STORE.scope, "read");
++    renderReplyBox();
++    setStatus();
++    $("reply-note").textContent = "This device is read-only now.";
++  } else {
++    failed(r);
++    $("reply-note").textContent = r.error.message;
++  }
++});
++
++boot();
+diff --git a/web/index.html b/web/index.html
+new file mode 100644
+index 0000000..b3018c9
+--- /dev/null
++++ b/web/index.html
+@@ -0,0 +1,29 @@
++<!DOCTYPE html>
++<html lang="en">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width, initial-scale=1">
++<meta name="referrer" content="no-referrer">
++<title>Switchboard</title>
++<link rel="stylesheet" href="/app.css">
++</head>
++<body>
++<header>
++  <h1 id="host">Switchboard</h1>
++  <p id="status" class="meta"></p>
++</header>
++<p id="notice" class="notice" hidden></p>
++<main id="list"></main>
++<section id="session" hidden>
++  <nav><button id="back" type="button">Sessions</button></nav>
++  <h2 id="session-name"></h2>
++  <pre id="session-text"></pre>
++  <form id="reply" hidden>
++    <textarea id="reply-text" rows="3" aria-label="Message to the session"></textarea>
++    <p><button type="submit">Send</button></p>
++    <p id="reply-note" class="meta"></p>
++  </form>
++</section>
++<script src="/app.js" defer></script>
++</body>
++</html>

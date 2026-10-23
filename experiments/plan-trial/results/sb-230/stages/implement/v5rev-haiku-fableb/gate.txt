@@ -1,0 +1,365 @@
+exit 0 in 130 s
+
+paces_and_holds_no_project ... ok
+test a_setup_command_is_refused_while_locked_and_persisted_once_unlocked ... ok
+test op_status_tells_a_lost_reply_from_a_launch_the_app_died_in ... ok
+test session_screen_redacts_a_set_secret_too ... ok
+test env_resolve_answers_only_the_token_holder_and_nothing_keeps_a_value ... ok
+test the_binary_refuses_without_credentials_and_while_setup_is_locked ... ok
+test the_binary_runs_a_child_with_the_pairs_and_without_the_token ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+
+running 13 tests
+test a_structured_answer_arrives_as_the_next_prompt ... ignored, runs one real claude session; a fraction of a cent
+test claude_sessions_map_to_their_cards ... ignored, runs two real claude sessions; a few cents
+test codex_launches_bind_distinct_ids ... ignored, runs two real codex sessions
+test hook_events_while_down_apply_in_order ... ignored, runs one real claude session; a fraction of a cent
+test multi_paragraph_send_submits_once ... ignored, runs one real claude session; a fraction of a cent
+test return_while_in_flight_spawns_once ... ok
+test corrupt_record_recovers_from_backup_with_notice ... ok
+test missing_transcript_is_not_resumable ... ok
+test repeated_return_opens_at_most_one_window_and_one_session ... ok
+test autostart_service_starts_and_agent_does_not ... ok
+test restart_reattaches_to_live_sessions ... ok
+test killing_the_attached_client_keeps_the_session ... ok
+test project_config_is_listed_but_never_run_until_approved ... ok
+
+test result: ok. 8 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 2.77s
+
+
+running 3 tests
+test claude_live ... ignored, runs claude with --model haiku; costs a fraction of a cent
+test codex_live ... ignored, runs codex exec once; uses the Codex account
+test ghostty_live ... ignored, opens a Ghostty window for two seconds and raises it
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 49 tests
+test a_missing_key_at_start_remakes_the_identity_and_clears_the_devices ... ok
+test a_change_of_address_rebinds_the_port ... ok
+test a_consumed_code_is_refused_and_the_window_grants_its_scope ... ok
+test a_pairing_with_another_hosts_key_or_the_wrong_code_counts_and_three_close_the_window ... ok
+test a_conversation_page_anchored_before_a_held_turn_ends_there ... ok
+test a_parked_ticket_is_resumed_and_without_a_runner_the_tickets_still_read ... ok
+test a_page_carries_the_head_of_a_tool_result_and_the_turn_alone_carries_it_whole ... ok
+test a_browser_pairs_from_the_invite_and_reads_through_its_cookie ... ok
+test a_conversation_pages_by_turn_and_its_last_response_shares_the_revision ... ok
+test a_pairing_inside_the_window_gives_a_token_that_reads_every_view ... ok
+test a_control_device_opens_a_session_in_a_project_and_nowhere_else ... ok
+test a_set_is_read_by_its_id_across_spaces ... ok
+test a_screen_is_read_with_the_projects_secret_values_named ... ok
+test a_wrong_pin_fails_at_the_handshake_before_any_request ... ok
+test a_page_load_fits_the_stranger_pool ... ok
+test a_tickets_events_are_read_and_a_closable_ticket_is_closed ... ok
+test a_tickets_files_are_listed_by_key_and_read_through_the_port ... ok
+test bonjour_advertises_only_while_the_port_is_on_the_lan ... ok
+test ops_status_is_read_on_the_port_and_events_needs_an_upgrade ... ok
+test info_is_served_to_anyone_and_every_other_read_is_refused_unpaired ... ok
+test revoke_and_a_scope_change_take_effect_on_the_next_request ... ok
+test pair_is_rate_limited_per_listener ... ok
+test a_mutation_after_hello_is_seen_at_the_revision_the_snapshot_carries ... ok
+test revoke_closes_the_devices_socket ... ok
+test a_decision_is_answered_under_control_and_checked_against_the_record ... ok
+test the_client_fixtures_decode_on_both_sides ... ok
+test strings_are_bounded_in_a_collection_and_whole_alone ... ok
+test the_allowlist_refuses_everything_else_with_no_side_effect ... ok
+test the_control_scope_sends_with_the_op_as_the_key_and_a_read_device_is_refused ... ok
+test the_page_is_served_unpaired_with_its_headers ... ok
+test the_page_references_only_what_the_host_serves ... ok
+test a_draft_is_the_sessions_editor_fed_by_dictation_and_worked_by_its_tools ... ok
+test tickets_are_listed_with_their_standing_and_read_alone ... ok
+test an_overflowed_subscriber_is_told_to_resync_and_closed_while_another_keeps_up ... ok
+test trust_answers_the_folder_question_the_session_view_carries ... ok
+test a_subscriber_gets_hello_then_changed_and_removed_as_the_state_moves ... ok
+test two_instances_have_distinct_identities_and_a_read_only_one_does_not_listen ... ok
+test a_policy_change_moves_a_watched_screen_though_the_pane_did_not ... ok
+test stalled_strangers_fill_their_own_pool_and_never_a_paired_clients ... ok
+test dispatchs_worker_records_are_listed_and_announced_only_for_scope_all ... ok
+test a_pinned_file_is_read_masked_and_watched_and_only_when_pinned ... ok
+test a_runs_output_is_the_logs_masked_tail_and_moves_when_the_log_grows ... ok
+test the_fingerprint_pass_over_three_hundred_sessions_is_measured ... ok
+test a_watched_conversation_moves_when_the_transcript_grows ... ok
+test a_watched_screen_moves_on_poll_and_an_unchanged_read_keeps_its_revision ... ok
+test the_page_window_is_rate_limited ... ok
+test a_rename_a_trust_question_and_a_quiet_pane_emit_but_ten_quiet_passes_do_not ... ok
+test unwatch_a_closed_socket_and_a_revocation_each_drop_their_watches ... ok
+test the_watch_set_is_capped_and_a_read_of_an_evicted_key_puts_it_back ... ok
+
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.12s
+
+
+running 205 tests
+test a_decision_answered_by_the_supervisor_says_so ... ok
+test a_board_card_shows_a_question_beside_a_permission_prompt ... ok
+test a_failed_send_keeps_the_draft ... ok
+test a_delivery_leaves_the_message_box_draft ... ok
+test a_delivered_answer_keeps_the_owners_prompt_draft ... ok
+test a_failed_review_offers_continue ... ok
+test a_failed_editor_write_gives_the_prompt_back ... ok
+test a_board_card_answers_a_choice_ask ... ok
+test a_closing_ticket_does_not_wait_on_you ... ok
+test a_draft_for_an_earlier_text_ask_is_dropped ... ok
+test a_dispatch_ticket_shows_its_holds_and_services ... ok
+test a_board_card_shows_a_sessions_question_and_dismisses_it ... ok
+test a_long_question_folds_and_keeps_the_tabs_in_view ... ok
+test a_finalize_on_another_subject_keeps_the_cards_note ... ok
+test a_long_excerpt_is_clamped_above_the_card_buttons ... ok
+test a_long_file_name_is_cut_before_the_document_buttons ... ok
+test a_focus_request_for_an_undrawn_box_is_dropped ... ok
+test a_close_dialog_goes_with_its_page ... ok
+test a_notice_is_named_in_global ... ok
+test a_pending_answer_shows_instead_of_the_buttons ... ok
+test a_flick_left_steps_back_through_the_users_messages_and_right_forward ... ok
+test a_new_workspace_shows_nothing_of_the_others_until_the_selector_opens ... ok
+test a_pending_decision_is_pinned_on_every_tab ... ok
+test a_removal_notice_offers_undo ... ok
+test a_project_moves_to_another_workspace_from_its_board ... ok
+test a_file_card_previews_the_file_rendered_or_raw ... ok
+test a_real_workspace_named_everywhere_keeps_its_script_name ... ok
+test a_markdown_table_keeps_its_columns_apart_and_inside_the_answer ... ok
+test a_press_on_a_working_set_card_selects_it_for_the_controller ... ok
+test a_file_an_agent_names_is_a_link_that_opens_it_at_the_line ... ok
+test a_file_row_dragged_onto_the_message_box_adds_its_path ... ok
+test a_rendered_answer_on_a_working_set_card_opens_in_the_message_dialog ... ok
+test a_rule_sets_hours_are_typed_in_its_header_and_it_cannot_be_arranged ... ok
+test a_running_rule_set_card_is_killed_and_dismissed_from_its_menu ... ok
+test a_rule_sets_running_only_and_card_size_are_set_in_its_header ... ok
+test a_session_send_leaves_the_card_line_draft ... ok
+test a_send_into_a_cold_session_fails_and_keeps_the_prompt ... ok
+test a_rule_set_card_is_dismissed_from_its_corner ... ok
+test a_round_in_progress_shows_the_working_agents_terminal_and_opens_its_session ... ok
+test a_secret_artifact_is_a_label_and_a_click_on_it_reads_nothing ... ok
+test a_short_question_draws_unfolded ... ok
+test a_ticket_leaving_the_status_drops_its_close_dialog ... ok
+test a_working_set_card_shows_a_question_beside_a_permission_prompt ... ok
+test a_directory_can_become_the_file_sides_top_and_the_project_root_comes_back ... ok
+test a_working_set_card_shows_a_sessions_question_and_dismisses_it ... ok
+test a_ticket_tab_click_dispatches_nothing_but_the_reads_it_draws ... ok
+test agent_session_runs_in_ghostty_and_shows_its_snapshot ... ok
+test add_project_dialog_dispatches_add_project ... ok
+test a_supervisor_that_cannot_resume_offers_only_fresh ... ok
+test a_word_that_cannot_break_does_not_widen_the_turns_after_it ... ok
+test agent_sessions_get_the_prompt_box_and_send_goes_to_the_pane ... ok
+test an_editor_made_from_a_cards_microphone_can_send_into_its_running_pane ... ok
+test a_file_shown_again_after_a_link_comes_up_at_the_top ... ok
+test an_idle_agent_with_pending_work_says_so_in_the_header ... ok
+test an_off_grid_card_size_is_not_saved_by_showing_its_set ... ok
+test an_editor_send_leaves_the_card_line_draft ... ok
+test adding_a_project_in_global_asks_for_its_workspace ... ok
+test a_session_shrinks_to_the_width_a_wide_side_leaves_it ... ok
+test board_lists_the_projects_sessions_and_notes ... ok
+test arranging_moves_and_resizes_cards_in_units_and_refuses_an_overlap ... ok
+test claude_session_without_a_conversation_falls_back_to_the_snapshot ... ok
+test clicking_a_project_dispatches_show_board ... ok
+test board_separates_commands_and_services_from_sessions ... ok
+test cleaning_up_asks_first_and_lists_the_files ... ok
+test clicking_a_card_dispatches_show_session ... ok
+test card_buttons_kill_running_and_remove_stopped_sessions ... ok
+test clicking_into_a_settings_field_keeps_the_menu_open ... ok
+test cancelling_the_session_dialog_dispatches_nothing ... ok
+test command_digits_switch_projects ... ok
+test clone_session_on_a_prompt_makes_a_new_session_with_that_prompt_primed ... ok
+test dispatch_page_holds_revise_until_a_note_is_written ... ok
+test claude_session_shows_the_conversation_and_message_box ... ok
+test dispatch_page_folds_each_tickets_question_apart ... ok
+test discard_to_a_prompt_cuts_in_place_and_the_header_offers_undo ... ok
+test dispatch_page_folds_a_pile_of_questions_behind_their_count ... ok
+test dispatch_page_shows_a_lane_agents_question_and_dismisses_it ... ok
+test dispatch_page_sends_a_note_with_an_answer ... ok
+test dispatch_page_answers_a_decision_with_a_click ... ok
+test cmd_r_opens_the_run_tab_beside_a_session ... ok
+test dispatch_runner_toggle_starts_and_stops ... ok
+test dispatch_page_sets_the_worktree_root ... ok
+test dispatch_page_shows_a_lane_agents_question_beside_a_permission_prompt ... ok
+test a_wide_table_in_a_document_scrolls_sideways_while_prose_wraps ... ok
+test dispatch_ticket_closes_after_a_confirmation_naming_its_tree ... ok
+test each_session_keeps_its_own_prompt ... ok
+test editing_notes_dispatches_set_session_notes ... ok
+test dispatch_page_shows_a_tickets_agent_waiting_for_itself ... ok
+test host_error_and_read_only_tag_are_shown ... ok
+test environment_dialog_saves_variables_and_stores_secrets ... ok
+test clicking_a_changed_file_shows_its_diff ... ok
+test escape_goes_back ... ok
+test finalize_on_the_ticket_card_does_not_send_the_plan_tabs_draft ... ok
+test hovering_terminal_on_an_agent_card_shows_the_panes_tail ... ok
+test dispatch_table_filters_sorts_and_resumes ... ok
+test listening_is_bound_to_one_session_and_shown_in_the_rail ... ok
+test long_activity_lines_wrap_instead_of_being_cut ... ok
+test notice_bar_shows_the_notice_and_dismisses_it ... ok
+test messages_before_the_answer_are_their_own_blocks_with_the_tools_between ... ok
+test messages_have_a_context_menu_with_copy ... ok
+test message_box_is_multiline_and_enter_sends ... ok
+test exited_command_shows_its_last_output ... ok
+test polling_reads_the_transcript_into_the_ui_state ... ok
+test dispatch_ticket_offers_close_where_the_runner_says ... ok
+test new_session_dialog_dispatches_new_session ... ok
+test open_terminal_panel_has_no_kicker ... ok
+test new_command_session_carries_the_command ... ok
+test quick_switcher_opens_the_best_match_on_enter ... ok
+test run_bar_shows_a_running_commands_last_line_and_hover_after ... ok
+test pins_two_sessions_from_two_workspaces_into_one_global_set ... ok
+test revise_on_the_ticket_card_opens_the_plan_tab_and_focuses_the_box ... ok
+test preview_while_listening_is_a_setting_that_reaches_the_editor ... ok
+test pop_out_moves_the_session_page_into_its_own_window ... ok
+test review_plan_starts_from_the_session_header_with_a_file_the_session_wrote ... ok
+test run_tab_beside_a_session_keeps_the_sides_width ... ok
+test rail_item_and_side_tab_open_and_close_the_side_and_the_text_reflows ... ok
+test run_bar_runs_commands_and_toggles_services ... ok
+test file_tree_previews_a_file_and_hands_off_to_the_editor ... ok
+test remote_devices_dialog_opens_pairing_and_revokes_a_device ... ok
+test run_tab_lists_definitions_and_approves ... ok
+test service_header_offers_restart_and_autostart ... ok
+test session_meta_names_each_model_when_there_are_several ... ok
+test settings_menu_sets_the_theme ... ok
+test session_view_header_buttons_dispatch ... ok
+test session_view_renames_on_enter ... ok
+test pinned_card_previews_and_opens ... ok
+test stop_button_and_cmd_period_interrupt ... ok
+test switchboard_lists_sessions_from_both_projects ... ok
+test the_controllers_escape_closes_the_dialog_and_leaves_the_field ... ok
+test terminal_panel_sits_under_the_message_box ... ok
+test the_cc_button_turns_captions_off_and_the_setting_follows ... ok
+test the_close_dialog_reads_the_runners_flags ... ok
+test the_id_menu_copies_the_session_id_or_its_transcript_path ... ok
+test the_boards_config_button_edits_project_json_and_save_writes_it ... ok
+test the_main_window_draws_at_the_zoom_saved_for_its_display ... ok
+test the_microphone_on_a_working_set_card_binds_listening_to_that_session ... ok
+test terminal_panel_toggles_from_the_header ... ok
+test session_view_toggles_the_file_side_with_a_preview ... ok
+test finder_matches_across_the_project ... ok
+test the_close_ticket_script_line_opens_the_dialog ... ok
+test the_notes_tab_is_only_offered_beside_a_session ... ok
+test the_changes_tab_lists_the_branchs_commits_and_files ... ok
+test the_plan_is_read_again_once_the_ticket_moves ... ok
+test the_rail_counts_sessions_and_decisions_apart_in_global ... ok
+test the_radial_menus_view_opens_the_message_dialog ... ok
+test the_rail_does_not_scroll_when_it_fits ... ok
+test the_plan_tab_marks_the_owners_round ... ok
+test the_plan_tab_takes_the_owners_feedback_on_a_pending_finalize ... ok
+test the_rail_lists_projects_most_recent_first ... ok
+test the_plan_tab_lists_its_review_rounds ... ok
+test the_radial_menus_terminal_opens_the_pane_dialog ... ok
+test the_rail_groups_projects_by_workspace_in_global ... ok
+test the_rail_lists_rule_sets_above_hand_sets ... ok
+test the_rail_makes_a_recent_sessions_set ... ok
+test the_rail_offers_a_newer_release_and_the_settings_menu_names_the_version ... ok
+test the_selector_marks_everywhere_while_it_is_active_with_one_workspace ... ok
+test saving_from_the_prompt_box_refreshes_the_projects_file_tree ... ok
+test the_rail_follows_a_new_selection_once ... ok
+test the_plan_tab_labels_a_reviewed_copy ... ok
+test the_review_plan_dialog_keeps_its_buttons_on_screen_in_a_long_session ... ok
+test the_rail_scrolls_a_sessions_neighbours ... ok
+test the_file_side_hands_a_path_to_the_prompt_box_editor ... ok
+test the_review_page_lists_rounds_and_its_controls_dispatch ... ok
+test the_review_plan_dialog_offers_only_the_newest_eight_files ... ok
+test shift_click_the_menu_and_the_pane_put_a_path_in_the_message ... ok
+test the_session_page_answers_a_text_ask ... ok
+test the_session_page_shows_a_sessions_question_and_dismisses_it ... ok
+test the_settings_menu_toggles_opening_the_terminal_on_launch ... ok
+test the_settings_menu_picks_the_screen_for_the_overlays_and_the_editor_follows ... ok
+test the_selector_offers_everywhere_without_rename_or_delete ... ok
+test the_rail_scrolls_its_list_between_a_fixed_head_and_bottom ... ok
+test the_review_plan_dialog_offers_many_owner_definitions_as_a_menu ... ok
+test the_review_plan_dialog_hides_dispatch_definitions_and_keeps_its_height ... ok
+test the_settings_menu_moves_the_side_panel_to_the_left ... ok
+test the_supervisor_ask_line_answers_a_confirm ... ok
+test the_supervisor_chip_shows_what_the_supervisor_asked ... ok
+test the_settings_menu_turns_the_prompt_box_off_and_on ... ok
+test the_supervisor_ask_has_its_own_uncut_line ... ok
+test the_switcher_has_no_checkbox_in_global ... ok
+test the_ticket_diff_script_line_opens_a_files_diff ... ok
+test ticket_page_lane_chip_wraps_whole_on_a_full_meta_row ... ok
+test the_supervisor_chip_opens_resumes_and_freshens_after_a_confirmation ... ok
+test the_usage_tab_draws_models_sessions_and_what_was_not_counted ... ok
+test the_ticket_timeline_lists_events_newest_first_under_stage_headings ... ok
+test the_ticket_tab_script_line_opens_the_usage_tab ... ok
+test the_ticket_tab_script_line_opens_the_tab ... ok
+test the_settings_menu_unlocks_and_locks_environment_setup ... ok
+test ticket_page_shows_a_resolution_reviews_conflict ... ok
+test ticket_page_shows_commits_kept_by_hand ... ok
+test ticket_page_lists_evidence_and_opens_only_documents ... ok
+test ticket_page_shows_an_attempts_nudges ... ok
+test ticket_page_shows_the_attempts_pull_request ... ok
+test ticket_page_shows_how_a_review_rewrote_its_commits ... ok
+test ticket_page_shows_swept_evidence ... ok
+test waiting_badge_counts_waiting_sessions ... ok
+test ticket_page_shows_what_became_of_a_stale_folded_message ... ok
+test ticket_page_shows_what_a_held_merge_waits_for ... ok
+test ticket_page_views_an_evidence_note_inline ... ok
+test waiting_reason_is_shown_in_the_session_header ... ok
+test the_review_note_stays_on_screen_and_cmd_enter_sends_it ... ok
+test working_set_cards_show_the_last_exchange_and_send_a_line ... ok
+test working_set_keys_move_the_selection_and_step_into_a_card ... ok
+test working_sets_are_renamed_cloned_and_deleted_from_the_header ... ok
+test view_links_lists_a_messages_urls_in_a_dialog ... ok
+test view_raw_shows_the_message_unformatted_in_a_dialog ... ok
+test the_working_set_takes_a_session_from_its_header_and_a_file_from_the_tree ... ok
+
+test result: ok. 205 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+
+running 13 tests
+test tests::a_dispatch_worker_op_is_a_ticket_and_a_nonce ... ok
+test tests::a_resume_line_reads_as_the_doc_writes_it ... ok
+test tests::a_session_new_without_replaces_writes_no_replaces_key ... ok
+test tests::a_structured_ask_keeps_its_kind_tag_and_older_lines_read_as_plain ... ok
+test tests::a_runner_line_round_trips_for_each_verb_and_only_a_restart_is_non_replayable ... ok
+test tests::env_lines_read_as_the_doc_writes_them_and_resolve_is_a_query ... ok
+test tests::a_request_line_reads_as_the_doc_writes_it ... ok
+test tests::a_paused_run_reads_without_the_failed_flag_and_writes_it_only_when_set ... ok
+test tests::an_ask_line_reads_with_or_without_a_message_and_is_idempotent ... ok
+test tests::op_ids_carry_the_program_name ... ok
+test tests::every_reply_round_trips ... ok
+test tests::every_request_round_trips_and_names_its_kind ... ok
+test client::tests::a_call_is_one_line_out_and_one_line_back ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.16s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running unittests src/lib.rs (target/debug/deps/dispatch-d007d965cfd6f145)
+     Running unittests src/main.rs (target/debug/deps/dispatch-4b80e964a56ab2ab)
+     Running tests/first_slice.rs (target/debug/deps/first_slice-71558b3d9a8e7361)
+     Running tests/live.rs (target/debug/deps/live-eb35cb849f8f73c1)
+     Running tests/sandbox.rs (target/debug/deps/sandbox-2b8680c07c490fc1)
+     Running tests/supervisor.rs (target/debug/deps/supervisor-8e5a7c1fb38ba4c3)
+     Running unittests src/lib.rs (target/debug/deps/dispatch_control-3708823935aa4dc0)
+     Running unittests src/lib.rs (target/debug/deps/switchboard-76552ebeadb924bb)
+ditto: Cannot get the real path for source '/var/folders/yc/w_bz19lj32g4rv_3773ck1480000gn/T/.tmp2QHAKu/new.app'
+     Running unittests src/main.rs (target/debug/deps/switchboard-c21fcf73873ae1e9)
+     Running unittests src/bin/switchboard-ask.rs (target/debug/deps/switchboard_ask-b620915454d5c0d5)
+     Running unittests src/bin/switchboard-env.rs (target/debug/deps/switchboard_env-718ec33049dd135b)
+     Running unittests src/bin/switchboard-hook.rs (target/debug/deps/switchboard_hook-e3a4bb36a62c5509)
+     Running tests/control.rs (target/debug/deps/control-0831ac24ee853512)
+     Running tests/gate.rs (target/debug/deps/gate-158ff3682a029e1c)
+     Running tests/live.rs (target/debug/deps/live-d10cfa9af888a9f9)
+     Running tests/remote.rs (target/debug/deps/remote-560c39f86af15bf2)
+     Running tests/ui.rs (target/debug/deps/ui-64e36a8b350f80e9)
+     Running unittests src/lib.rs (target/debug/deps/switchboard_control-40a593cac5d92ba7)
+   Doc-tests dispatch
+   Doc-tests dispatch_control
+   Doc-tests switchboard
+   Doc-tests switchboard_control

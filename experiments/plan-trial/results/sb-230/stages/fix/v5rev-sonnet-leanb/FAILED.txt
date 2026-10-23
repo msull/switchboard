@@ -1,0 +1,1 @@
+disk full (ENOSPC) near the end of the run: every point but one was edited in the worktree and nothing committed; attempt 2 (v5rev-sonnet-leanb-2) continues on that worktree

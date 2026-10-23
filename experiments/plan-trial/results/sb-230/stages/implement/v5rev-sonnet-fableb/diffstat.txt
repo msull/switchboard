@@ -1,0 +1,22 @@
+ CHANGELOG.md                                       |   2 +
+ README.md                                          |  23 +-
+ client/Fixtures/invite.txt                         |   1 +
+ client/README.md                                   |   4 +-
+ client/Sources/SwitchboardProtocol/Info.swift      |  32 +-
+ .../SwitchboardProtocolTests/FixturesTests.swift   |  15 +
+ docs/design.md                                     |  29 +-
+ docs/remote-client.md                              |  19 +-
+ src/adapters/remote.rs                             |  84 ++++-
+ src/app.rs                                         | 103 ++++-
+ src/core/mod.rs                                    |   2 +-
+ src/core/remote.rs                                 |  26 ++
+ src/core/tests.rs                                  |  28 ++
+ src/lib.rs                                         |   1 +
+ src/ui/remote.rs                                   |  49 ++-
+ src/web.rs                                         |  10 +
+ tests/remote.rs                                    | 414 ++++++++++++++++++++-
+ tests/ui.rs                                        |  52 ++-
+ web/app.css                                        |  83 +++++
+ web/app.js                                         | 360 ++++++++++++++++++
+ web/index.html                                     |  18 +
+ 21 files changed, 1258 insertions(+), 97 deletions(-)

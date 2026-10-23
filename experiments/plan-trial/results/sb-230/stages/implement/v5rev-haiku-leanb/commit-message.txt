@@ -1,0 +1,13 @@
+Serve a web control surface from the remote port, paired from a URL whose fragment carries the code
+
+The host serves a small page from the port it already has. A browser opens it from the pairing window's QR, pairs, lists the sessions with the waiting ones first, reads a session's last response or screen, and sends a reply. The page is three embedded files (web/index.html, web/app.js, web/app.css) with no build step, and it speaks the protocol the headset speaks.
+
+The invite is a URL whose fragment carries the code, the key and the installation's id, so the code is never in a request line. A browser's token is an HttpOnly cookie named __Host-sb-<server_id>, so the page's script never holds it, and a cookie write must come from the host's own origin. A browser cannot pin the host's key as a native client does; the page checks the key against /info before it sends the code, and the dialog says to pair a browser only on a network the owner trusts. The browser checks are not yet run on a device: see spikes/23-web-page/README.md.
+
+Contract additions:
+
+- No new AppAction or Effect variant, no port method.
+- RemoteReply.headers, RemoteReply::new; RemoteRequest.{cookie, origin, host}.
+- core::remote::invite_url.
+- Wire: GET /api/v1/me; /pair request field transport; the __Host-sb-<server_id> cookie accepted as a credential beside the bearer header; the 403 code origin; GET /, /app.js, /app.css before pairing; the invite text is a URL (the JSON still parses in the Swift client).
+- No change to model.rs, control/, or any schema version.

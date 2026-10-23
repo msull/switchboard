@@ -2,7 +2,7 @@
 
 usage: uv run --with tomli stage.py <stage> <label> <model> <rep> <from> [pipeline.toml]
 
-<stage>   investigate | facts | plan | review | respond | review2 | respond2 | revise | implement
+<stage>   investigate | facts | plan | review | respond | review2 | respond2 | revise | implement | review-code | fix
 <label>   a word for this guidance revision, so runs group: v1, v2-evidence
 <from>    a results directory of a finished run (results/sb-230/facts/opus-a)
           whose files are the stage's inputs: notes.md for facts, notes.md
@@ -13,7 +13,11 @@ usage: uv run --with tomli stage.py <stage> <label> <model> <rep> <from> [pipeli
           revise is the owner's edit (TEXT holds the words, PLAN the plan);
           implement takes a final plan (PLAN) and facts and builds on the
           worktree, then records the commits, the diff and the gate's
-          result (gate.txt). An
+          result (gate.txt); review-code runs one of that stage's reviewers
+          (REVIEWER=correctness or style) on an implement run's branch,
+          with TREE naming the implement run's worktree; fix runs the
+          fixer on that worktree over the feedback files FEEDBACK names
+          (colon-separated) and records the commits and the gate again. An
           environment variable NOTES, FACTS, PLAN, FEEDBACK or RESPONSE
           naming a file overrides
           the one from there, so a stage can be fed the previous stage's
@@ -86,6 +90,9 @@ IMPLEMENT_ALLOW = [
     "Bash(rg:*)", "Bash(find:*)", "Bash(sed -n:*)", "Bash(mkdir:*)", "Bash(diff:*)",
 ]
 
+REVIEW_ALLOW = [r for r in IMPLEMENT_ALLOW if not any(
+    r.startswith(f"Bash(git {w}") for w in ("add", "commit", "rm", "mv", "restore", "stash"))]
+
 def worktree(res, name):
     """A writable worktree at the issue's base commit, on its own branch."""
     base = (res / "base.txt").read_text().strip()
@@ -121,8 +128,11 @@ def main():
     stage, label, model, rep, from_dir = sys.argv[1:6]
     pipeline = pathlib.Path(sys.argv[6]) if len(sys.argv) > 6 else HERE / "pipelines/switchboard-facts.toml"
     from_dir = pathlib.Path(from_dir).resolve()
-    res = from_dir.parent.parent
-    if not (res / "base.txt").exists():
+    # The issue directory: the nearest ancestor holding base.txt, so a
+    # stage run's own directory (results/<issue>/stages/<stage>/<name>)
+    # serves as <from> as well as an arm's.
+    res = next((d for d in from_dir.parents if (d / "base.txt").exists()), None)
+    if res is None:
         die(f"{from_dir} is not under a results/<issue> directory with base.txt")
     p = tomllib.loads(pipeline.read_text())
     name = f"{label}-{model}-{rep}"
@@ -134,7 +144,11 @@ def main():
     shutil.copy(pipeline, out / "pipeline.toml")
     (out / "from.txt").write_text(f"{from_dir}\n")
     issue = issue_json(res)
-    tree, base = worktree(res, f"{stage}-{name}")
+    if os.environ.get("TREE"):
+        tree = pathlib.Path(os.environ["TREE"]).resolve()
+        base = (res / "base.txt").read_text().strip()
+    else:
+        tree, base = worktree(res, f"{stage}-{name}")
     branch = run(["git", "-C", str(tree), "rev-parse", "--abbrev-ref", "HEAD"]).strip()
     vars = {"issue.number": issue["number"], "issue.title": issue["title"], "issue.body": issue["body"],
             "worktree": tree, "branch": branch, "no_feedback": NO_FEEDBACK}
@@ -263,6 +277,56 @@ def main():
         args = list(op.get("args", []))
         for rule in IMPLEMENT_ALLOW:
             args += ["--allowedTools", rule]
+    elif stage == "review-code":
+        # One of the review-code stage's reviewers on an implemented
+        # branch. In the pipeline the reviewer runs under Switchboard's
+        # code-review workflow, whose templates live in the app; here it
+        # gets the operator's guidance and one paragraph naming the
+        # branch, the plan and where to write, which is the approximation.
+        # <from> is the implement run's directory: its worktree holds the
+        # branch, its inputs the plan and facts. REVIEWER picks the
+        # operator (correctness by default, or style).
+        who = os.environ.get("REVIEWER", "correctness")
+        op = p["operators"][who]
+        plan = take("plan", "inputs/plan.md", "PLAN")
+        facts = take("facts", "inputs/facts.md", "FACTS")
+        vars["plan"] = plan
+        vars["inputs.facts"] = facts
+        vars["feedback"] = out / f"feedback.{who}.md"
+        artifacts.append(out / f"feedback.{who}.md")
+        guidance = render(op.get("guidance", "").strip(), vars)
+        prompt = (guidance + "\n\n" if guidance else "") + (
+            f"Review branch {branch} in the worktree at {tree}: the change is every commit since {base} "
+            f"(git log and git diff {base}..HEAD). It implements the plan at {plan}; the facts the plan rests on are at {facts}. "
+            f"Write your feedback to {vars['feedback']}.")
+        args = list(op.get("args", []))
+        for rule in REVIEW_ALLOW:
+            args += ["--allowedTools", rule]
+    elif stage == "fix":
+        # The fixer on one round of code review: FEEDBACK names the
+        # feedback files, separated by colons, and TREE the implement
+        # run's worktree. As with review-code, the prompt paragraph
+        # stands in for the workflow template the app holds.
+        op = p["operators"][stages["review-code"]["implementer"]]
+        plan = take("plan", "inputs/plan.md", "PLAN")
+        vars["plan"] = plan
+        fbs = []
+        for i, f in enumerate(os.environ.get("FEEDBACK", "").split(":")):
+            if not f:
+                die("fix needs FEEDBACK, the feedback files separated by colons")
+            dst = out / "inputs" / f"feedback-{i + 1}.md"
+            shutil.copy(f, dst)
+            fbs.append(dst)
+        vars["response"] = out / "response.md"
+        artifacts.append(out / "response.md")
+        guidance = render(op.get("guidance", "").strip(), vars)
+        prompt = (guidance + "\n\n" if guidance else "") + (
+            f"The branch {branch} in the worktree at {tree} (every commit since {base}) implements the plan at {plan}. "
+            f"The review round's points are at {' and '.join(str(f) for f in fbs)}. "
+            f"Address them on the branch, commit, and write your response, one entry per point, to {vars['response']}.")
+        args = list(op.get("args", []))
+        for rule in IMPLEMENT_ALLOW:
+            args += ["--allowedTools", rule]
     else:
         die(f"unknown stage {stage}")
 
@@ -307,7 +371,7 @@ def main():
         print("run.json unreadable", file=sys.stderr)
     for a in artifacts:
         print(f"{a}: {'written, ' + str(len(a.read_text().split())) + ' words' if a.exists() else 'MISSING'}")
-    if stage == "implement":
+    if stage in ("implement", "fix"):
         g = lambda *a: subprocess.run(["git", "-C", str(tree), *a], text=True, capture_output=True).stdout
         (out / "commits.txt").write_text(g("log", "--format=%h %s", f"{base}..HEAD"))
         (out / "diffstat.txt").write_text(g("diff", "--stat", base, "HEAD"))

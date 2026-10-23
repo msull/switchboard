@@ -1,0 +1,1651 @@
+diff --git a/client/Sources/SwitchboardProtocol/Info.swift b/client/Sources/SwitchboardProtocol/Info.swift
+index d2f52d2..2c0bb45 100644
+--- a/client/Sources/SwitchboardProtocol/Info.swift
++++ b/client/Sources/SwitchboardProtocol/Info.swift
+@@ -110,8 +110,38 @@ public struct PairingInvite: Decodable, Sendable, Equatable {
+         self.addresses = addresses
+     }
+ 
+-    /// The invite from the scanned or pasted text.
++    /// The invite from the scanned or pasted text: the URL a host's QR
++    /// code holds, or the JSON an older host wrote.
+     public static func parse(_ text: String) throws -> PairingInvite {
+-        try Wire.decode(PairingInvite.self, from: Data(text.utf8))
++        if text.hasPrefix("https://") {
++            return try parseURL(text)
++        }
++        return try Wire.decode(PairingInvite.self, from: Data(text.utf8))
++    }
++
++    /// `https://<host>:<port>/#code=…&key=…&id=…`: the fragment holds the
++    /// code, the key and the id, and the URL names where the host answers.
++    static func parseURL(_ text: String) throws -> PairingInvite {
++        guard let components = URLComponents(string: text),
++              let host = components.host,
++              let fragment = components.fragment
++        else {
++            throw DecodingError.dataCorrupted(
++                .init(codingPath: [], debugDescription: "not an invite URL"))
++        }
++        var values: [String: String] = [:]
++        for pair in fragment.split(separator: "&") {
++            let parts = pair.split(separator: "=", maxSplits: 1).map(String.init)
++            if parts.count == 2 {
++                values[parts[0]] = parts[1]
++            }
++        }
++        guard let code = values["code"], let key = values["key"], let id = values["id"] else {
++            throw DecodingError.dataCorrupted(
++                .init(codingPath: [], debugDescription: "the invite has no code, key or id"))
++        }
++        let address = components.port.map { "\(host):\($0)" } ?? host
++        return PairingInvite(
++            serverID: ServerID(id), spkiSha256: key, code: code, addresses: [address])
+     }
+ }
+diff --git a/client/Tests/SwitchboardProtocolTests/FixturesTests.swift b/client/Tests/SwitchboardProtocolTests/FixturesTests.swift
+index c2ba2a3..7bc7ab2 100644
+--- a/client/Tests/SwitchboardProtocolTests/FixturesTests.swift
++++ b/client/Tests/SwitchboardProtocolTests/FixturesTests.swift
+@@ -163,6 +163,21 @@ final class FixturesTests: XCTestCase {
+         XCTAssertEqual(invite.serverID.short, "17a9b8")
+         XCTAssertEqual(invite.addresses, ["192.168.1.9:43187"])
+     }
++
++    func testInviteParsesTheQRURL() throws {
++        let url = "https://192.168.1.9:43187/#code=ABCD2345&key=ab&id=17A9B824-AC51-47DC-A96A-C2B9E69C85B4"
++        let json = """
++            {"server_id":"17A9B824-AC51-47DC-A96A-C2B9E69C85B4","spki_sha256":"ab","code":"ABCD2345","addresses":["192.168.1.9:43187"]}
++            """
++        let invite = try PairingInvite.parse(url)
++        XCTAssertEqual(invite, try PairingInvite.parse(json))
++        XCTAssertEqual(invite.serverID.raw, "17a9b824-ac51-47dc-a96a-c2b9e69c85b4")
++    }
++
++    func testAnInviteURLWithoutItsCodeIsAnError() {
++        let url = "https://192.168.1.9:43187/#key=ab&id=17A9B824-AC51-47DC-A96A-C2B9E69C85B4"
++        XCTAssertThrowsError(try PairingInvite.parse(url))
++    }
+ }
+ 
+ enum Fixtures {
+diff --git a/src/adapters/mod.rs b/src/adapters/mod.rs
+index 74a9a79..0c0b144 100644
+--- a/src/adapters/mod.rs
++++ b/src/adapters/mod.rs
+@@ -25,6 +25,7 @@ pub mod store;
+ pub mod tmux;
+ pub mod transcript;
+ pub mod updates;
++pub mod web;
+ 
+ use std::path::{Path, PathBuf};
+ 
+diff --git a/src/adapters/remote.rs b/src/adapters/remote.rs
+index c33fac8..e980a44 100644
+--- a/src/adapters/remote.rs
++++ b/src/adapters/remote.rs
+@@ -33,6 +33,7 @@ use sha2::{Digest, Sha256};
+ use uuid::Uuid;
+ 
+ use crate::adapters::store::JsonStore;
++use crate::adapters::web;
+ use crate::ports::remote::{
+     DEVICES_FILE, IDENTITY_FILE, IDENTITY_SCHEMA_VERSION, Identity, Listen, PairedDevice,
+     RemoteStore,
+@@ -369,6 +370,12 @@ pub struct RemoteRequest {
+     /// The `Sec-WebSocket-Key` of a request that asks to upgrade to a
+     /// WebSocket; the frame answers [`SUBSCRIBED`] to accept it.
+     pub upgrade: Option<String>,
++    /// The `Cookie` header, whole; the frame picks out this host's own.
++    pub cookie: Option<String>,
++    /// The `Origin` header, if the browser sent one.
++    pub origin: Option<String>,
++    /// The `Host` header: the address and port the device asked for.
++    pub host: Option<String>,
+ }
+ 
+ impl RemoteRequest {
+@@ -384,12 +391,26 @@ impl RemoteRequest {
+ 
+ /// What the frame answers: a status and a JSON body, and whether the
+ /// request was made by a paired device, which moves the connection
+-/// from the unauthenticated pool to the paired one.
++/// from the unauthenticated pool to the paired one. `headers` are the
++/// reply's own, beyond the ones every reply carries (a `Set-Cookie`).
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct RemoteReply {
+     pub status: u16,
+     pub body: Vec<u8>,
+     pub authenticated: bool,
++    pub headers: Vec<(&'static str, String)>,
++}
++
++impl RemoteReply {
++    #[must_use]
++    pub fn new(status: u16, body: Vec<u8>, authenticated: bool) -> Self {
++        Self {
++            status,
++            body,
++            authenticated,
++            headers: Vec::new(),
++        }
++    }
+ }
+ 
+ /// One request off a connection, with the channel its reply goes back
+@@ -492,6 +513,9 @@ fn read_request<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<RemoteR
+         .filter(|u| u.eq_ignore_ascii_case("websocket"))
+         .and_then(|_| header("sec-websocket-key"))
+         .map(str::to_owned);
++    let cookie = header("cookie").map(str::to_owned);
++    let origin = header("origin").map(str::to_owned);
++    let host = header("host").map(str::to_owned);
+     let (path, query) = target.split_once('?').unwrap_or((target, ""));
+     let query = query
+         .split('&')
+@@ -510,6 +534,9 @@ fn read_request<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<RemoteR
+         body,
+         bearer,
+         upgrade,
++        cookie,
++        origin,
++        host,
+     }))
+ }
+ 
+@@ -525,9 +552,24 @@ fn respond_upgrade<W: Write>(w: &mut W, key: &str) -> io::Result<()> {
+     w.flush()
+ }
+ 
++const JSON: &str = "application/json";
++
++/// Write one JSON reply, with the reply's own headers.
++fn respond<W: Write>(w: &mut W, reply: &RemoteReply) -> io::Result<()> {
++    write_response(w, reply.status, JSON, &reply.headers, &reply.body, false)
++}
++
+ /// Write one response. Head and body in one write, so a reply is one
+-/// TLS record and one segment.
+-fn respond<W: Write>(w: &mut W, status: u16, body: &[u8]) -> io::Result<()> {
++/// TLS record and one segment. Every response says what it is and that
++/// nothing may cache or sniff it; `close` ends the connection after it.
++fn write_response<W: Write>(
++    w: &mut W,
++    status: u16,
++    content_type: &str,
++    headers: &[(&str, String)],
++    body: &[u8],
++    close: bool,
++) -> io::Result<()> {
+     let reason = match status {
+         200 => "OK",
+         400 => "Bad Request",
+@@ -541,16 +583,44 @@ fn respond<W: Write>(w: &mut W, status: u16, body: &[u8]) -> io::Result<()> {
+         504 => "Gateway Timeout",
+         _ => "Error",
+     };
+-    let mut out = format!(
+-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
++    let connection = if close { "close" } else { "keep-alive" };
++    let mut head = format!(
++        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: {connection}\r\n",
+         body.len()
+-    )
+-    .into_bytes();
++    );
++    for (name, value) in headers {
++        let _ = write!(head, "{name}: {value}\r\n");
++    }
++    head.push_str("\r\n");
++    let mut out = head.into_bytes();
+     out.extend_from_slice(body);
+     w.write_all(&out)?;
+     w.flush()
+ }
+ 
++/// The name of the cookie a host reads and writes: `__Host-sb-` and its
++/// server id. Cookies ignore ports, so two instances on one address
++/// share a jar; the id keeps each one's token apart from the other's.
++/// The id is stable across a key rotation, so a rotation keeps the
++/// cookie. The `__Host-` prefix pins it to this host, path `/`, `Secure`.
++#[must_use]
++pub fn cookie_name(server_id: Uuid) -> String {
++    format!("__Host-sb-{server_id}")
++}
++
++/// The `Set-Cookie` that hands a browser its token. `HttpOnly`, so the
++/// page's script never holds it.
++#[must_use]
++pub fn set_cookie(server_id: Uuid, token: &str) -> String {
++    format!(
++        "{}={token}; Max-Age={COOKIE_MAX_AGE}; Path=/; Secure; HttpOnly; SameSite=Strict",
++        cookie_name(server_id)
++    )
++}
++
++/// 400 days, in seconds.
++const COOKIE_MAX_AGE: u64 = 34_560_000;
++
+ /// The error body the connection thread sends for what never reaches
+ /// the frame.
+ fn error_body(code: &str, message: &str) -> Vec<u8> {
+@@ -579,9 +649,11 @@ pub(crate) const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
+ /// this deep; a full channel answers 503 without reaching the frame.
+ pub const DRAIN_PER_PASS: usize = 8;
+ const INBOX: usize = 64;
+-/// `/pair` and `/info` per minute per listener, answered 429 past it.
++/// `/pair` and `/info` per minute per listener, answered 429 past it. A
++/// page load is three requests, so the page window is generous.
+ const PAIR_PER_MINUTE: usize = 6;
+ const INFO_PER_MINUTE: usize = 60;
++const PAGE_PER_MINUTE: usize = 120;
+ 
+ const PAIR_PATH: &str = "/api/v1/pair";
+ const INFO_PATH: &str = "/api/v1/info";
+@@ -623,21 +695,26 @@ impl RateWindow {
+ struct Limits {
+     pair: Mutex<RateWindow>,
+     info: Mutex<RateWindow>,
++    page: Mutex<RateWindow>,
+ }
+ 
+ impl Limits {
+     /// Whether a request for `path` is over its window; a poisoned lock
+     /// counts as over, never as open.
+     fn limited(&self, path: &str) -> bool {
+-        let window = match path {
+-            PAIR_PATH => &self.pair,
+-            INFO_PATH => &self.info,
+-            _ => return false,
+-        };
+-        !window.lock().map_or(true, |mut w| w.allow(Instant::now()))
++        match path {
++            PAIR_PATH => over(&self.pair),
++            INFO_PATH => over(&self.info),
++            _ => false,
++        }
+     }
+ }
+ 
++/// Whether a window has no room left for one more event now.
++fn over(window: &Mutex<RateWindow>) -> bool {
++    !window.lock().map_or(true, |mut w| w.allow(Instant::now()))
++}
++
+ /// What every connection thread shares.
+ struct Shared {
+     tls: Arc<ServerConfig>,
+@@ -683,6 +760,7 @@ impl RemotePort {
+             limits: Limits {
+                 pair: Mutex::new(RateWindow::new(PAIR_PER_MINUTE, Duration::from_secs(60))),
+                 info: Mutex::new(RateWindow::new(INFO_PER_MINUTE, Duration::from_secs(60))),
++                page: Mutex::new(RateWindow::new(PAGE_PER_MINUTE, Duration::from_secs(60))),
+             },
+             next_subscriber: AtomicU64::new(1),
+         });
+@@ -765,6 +843,31 @@ impl Drop for RemotePort {
+     }
+ }
+ 
++/// Answer a request for a page, if it is one: the page, or a 429 past the
++/// page window. A page is constant bytes, so it never waits on the frame.
++/// The connection closes after it, which frees its unauthenticated slot
++/// at once rather than at the idle timeout. `false` for any other request.
++fn answer_page<W: Write>(w: &mut W, request: &RemoteRequest, limits: &Limits) -> io::Result<bool> {
++    let Some(page) = web::page(&request.path).filter(|_| request.method == "GET") else {
++        return Ok(false);
++    };
++    if over(&limits.page) {
++        let body = error_body("rate_limited", "too many requests; try again in a minute");
++        write_response(w, 429, JSON, &[], &body, true)?;
++    } else {
++        let headers = web::headers();
++        write_response(
++            w,
++            200,
++            page.content_type,
++            &headers,
++            page.body.as_bytes(),
++            true,
++        )?;
++    }
++    Ok(true)
++}
++
+ /// One connection: the handshake, then a request and a reply at a time
+ /// until the device hangs up or a deadline passes.
+ fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::Result<()> {
+@@ -785,12 +888,12 @@ fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::
+             reader.get_ref().sock.set_read_timeout(Some(IDLE_TIMEOUT))?;
+             first = false;
+         }
++        if answer_page(reader.get_mut(), &request, &shared.limits)? {
++            return Ok(());
++        }
+         if shared.limits.limited(&request.path) {
+-            respond(
+-                reader.get_mut(),
+-                429,
+-                &error_body("rate_limited", "too many requests; try again in a minute"),
+-            )?;
++            let body = error_body("rate_limited", "too many requests; try again in a minute");
++            respond(reader.get_mut(), &RemoteReply::new(429, body, false))?;
+             continue;
+         }
+         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+@@ -816,31 +919,25 @@ fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::
+             })
+             .is_err()
+         {
+-            respond(
+-                reader.get_mut(),
+-                503,
+-                &error_body("busy", "the host is busy; try again"),
+-            )?;
++            let body = error_body("busy", "the host is busy; try again");
++            respond(reader.get_mut(), &RemoteReply::new(503, body, false))?;
+             continue;
+         }
+         (shared.wake)();
+         let reply = match reply_rx.recv_timeout(ANSWER_TIMEOUT) {
+             Ok(reply) => reply,
+-            Err(_) => RemoteReply {
+-                status: 504,
+-                body: error_body("no_answer", "the app did not answer in time"),
+-                authenticated: false,
+-            },
++            Err(_) => RemoteReply::new(
++                504,
++                error_body("no_answer", "the app did not answer in time"),
++                false,
++            ),
+         };
+         if reply.authenticated && !paired.load(Ordering::SeqCst) {
+             // The device moves from the unauthenticated pool to the
+             // paired one on its first authenticated request.
+             if shared.pools.paired.load(Ordering::SeqCst) >= MAX_PAIRED {
+-                respond(
+-                    reader.get_mut(),
+-                    503,
+-                    &error_body("full", "too many paired connections"),
+-                )?;
++                let body = error_body("full", "too many paired connections");
++                respond(reader.get_mut(), &RemoteReply::new(503, body, false))?;
+                 return Ok(());
+             }
+             shared.pools.paired.fetch_add(1, Ordering::SeqCst);
+@@ -861,7 +958,7 @@ fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::
+             }
+             return out;
+         }
+-        respond(reader.get_mut(), reply.status, &reply.body)?;
++        respond(reader.get_mut(), &reply)?;
+     }
+     Ok(())
+ }
+@@ -1070,6 +1167,48 @@ mod tests {
+         assert!(w.allow(t0 + Duration::from_secs(61)));
+     }
+ 
++    #[test]
++    fn a_cookie_is_named_for_the_server_and_a_request_reads_its_headers() {
++        let id = Uuid::parse_str("17a9b824-ac51-47dc-a96a-c2b9e69c85b4").unwrap();
++        assert_eq!(
++            cookie_name(id),
++            "__Host-sb-17a9b824-ac51-47dc-a96a-c2b9e69c85b4"
++        );
++        assert_eq!(
++            set_cookie(id, "tok"),
++            "__Host-sb-17a9b824-ac51-47dc-a96a-c2b9e69c85b4=tok; Max-Age=34560000; Path=/; Secure; HttpOnly; SameSite=Strict"
++        );
++        let text = b"GET /api/v1/me HTTP/1.1\r\nHost: 127.0.0.1:43187\r\nCookie: a=1; __Host-sb-x=tok\r\nOrigin: https://127.0.0.1:43187\r\n\r\n";
++        let mut r = BufReader::new(&text[..]);
++        let req = read_request(&mut r).unwrap().unwrap();
++        assert_eq!(req.cookie.as_deref(), Some("a=1; __Host-sb-x=tok"));
++        assert_eq!(req.host.as_deref(), Some("127.0.0.1:43187"));
++        assert_eq!(req.origin.as_deref(), Some("https://127.0.0.1:43187"));
++        assert!(req.bearer.is_none());
++    }
++
++    #[test]
++    fn a_response_carries_its_headers_and_the_connection_it_asks_for() {
++        let mut out = Vec::new();
++        let headers = [("Set-Cookie", "c=1".to_owned())];
++        write_response(&mut out, 200, JSON, &headers, b"{}", true).unwrap();
++        let text = String::from_utf8(out).unwrap();
++        assert!(text.starts_with("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"));
++        for line in [
++            "Cache-Control: no-store\r\n",
++            "X-Content-Type-Options: nosniff\r\n",
++            "Connection: close\r\n",
++            "Set-Cookie: c=1\r\n",
++        ] {
++            assert!(text.contains(line), "{line} in {text}");
++        }
++        assert!(text.ends_with("\r\n\r\n{}"), "{text}");
++        let mut out = Vec::new();
++        respond(&mut out, &RemoteReply::new(401, b"{}".to_vec(), false)).unwrap();
++        let text = String::from_utf8(out).unwrap();
++        assert!(text.contains("Connection: keep-alive\r\n"), "{text}");
++    }
++
+     #[test]
+     fn der_elements_walk_short_and_long_lengths() {
+         let short = [0x30, 0x02, 0x05, 0x00, 0xff];
+diff --git a/src/app.rs b/src/app.rs
+index 4ae5098..35bba8b 100644
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1661,11 +1661,11 @@ impl SwitchboardApp {
+                     let out = self.envelope_at(revision, &body);
+                     let out = if out.body.len() > BODY_CAP {
+                         log::warn!("remote: {} {} is over the body cap", key.kind(), key.id());
+-                        RemoteReply {
+-                            status: 500,
+-                            body: self.error_json("too_large", "the reply is over the body cap"),
+-                            authenticated: true,
+-                        }
++                        RemoteReply::new(
++                            500,
++                            self.error_json("too_large", "the reply is over the body cap"),
++                            true,
++                        )
+                     } else {
+                         out
+                     };
+@@ -1676,11 +1676,11 @@ impl SwitchboardApp {
+                 if let Some(reply) = reply {
+                     let (status, code, reason) = error.refusal();
+                     log::info!("remote: {} {} refused: {code}", key.kind(), key.id());
+-                    let _ = reply.try_send(RemoteReply {
++                    let _ = reply.try_send(RemoteReply::new(
+                         status,
+-                        body: self.error_json(code, &reason),
+-                        authenticated: true,
+-                    });
++                        self.error_json(code, &reason),
++                        true,
++                    ));
+                 }
+             }
+         }
+@@ -2362,22 +2362,18 @@ impl SwitchboardApp {
+                 } else {
+                     (400, "failed")
+                 };
+-                RemoteReply {
+-                    status,
+-                    body: self.error_json(code, reason),
+-                    authenticated: true,
+-                }
++                RemoteReply::new(status, self.error_json(code, reason), true)
+             }
+-            (_, Ok(_)) => RemoteReply {
+-                status: 500,
+-                body: self.error_json("failed", "Dispatch answered with something else"),
+-                authenticated: true,
+-            },
+-            (_, Err(e)) => RemoteReply {
+-                status: 503,
+-                body: self.error_json("dispatch_off", &format!("Dispatch did not answer: {e}")),
+-                authenticated: true,
+-            },
++            (_, Ok(_)) => RemoteReply::new(
++                500,
++                self.error_json("failed", "Dispatch answered with something else"),
++                true,
++            ),
++            (_, Err(e)) => RemoteReply::new(
++                503,
++                self.error_json("dispatch_off", &format!("Dispatch did not answer: {e}")),
++                true,
++            ),
+         };
+         for r in pending {
+             let _ = r.reply.try_send(answer.clone());
+@@ -2751,11 +2747,7 @@ impl SwitchboardApp {
+             device,
+             all: request.param("scope") == Some("all"),
+         });
+-        RemoteReply {
+-            status: remote::SUBSCRIBED,
+-            body: Vec::new(),
+-            authenticated: true,
+-        }
++        RemoteReply::new(remote::SUBSCRIBED, Vec::new(), true)
+     }
+ 
+     /// How many devices are subscribed to events.
+@@ -3014,6 +3006,8 @@ impl SwitchboardApp {
+     /// One HTTP request from a device, answered on the frame: `/info`
+     /// and `/pair` to anyone, the allowlisted reads to a paired device,
+     /// everything else refused before it is translated to the wire.
++    // One arm per route, so the length is the route table.
++    #[allow(clippy::too_many_lines)]
+     fn serve_remote(
+         &mut self,
+         request: &RemoteRequest,
+@@ -3036,6 +3030,9 @@ impl SwitchboardApp {
+         if let ("GET", ["events"]) = (request.method.as_str(), segments.as_slice()) {
+             return Served::Now(self.remote_subscribe(request, device.id, subscriber));
+         }
++        if let ("GET", ["me"]) = (request.method.as_str(), segments.as_slice()) {
++            return Served::Now(self.remote_me(request, &device));
++        }
+         let notes_cap = if matches!(segments.as_slice(), ["sessions", _]) {
+             NOTES_CAP_ALONE
+         } else {
+@@ -3122,10 +3119,18 @@ impl SwitchboardApp {
+         Served::Now(self.remote_reply(request, &reply, notes_cap))
+     }
+ 
+-    /// The paired device behind a request's bearer token, seen now; or
+-    /// the refusal, which says nothing of the host.
++    /// The paired device behind a request's token, seen now; or the
++    /// refusal, which says nothing of the host. The token is the bearer
++    /// header when there is one, else this host's own cookie. A cookie
++    /// is sent by the browser on its own, so a request that changes
++    /// anything, or upgrades, must also say it came from this host's
++    /// page: a cross-site or other-port request is refused.
+     fn authenticate(&mut self, request: &RemoteRequest) -> Result<PairedDevice, RemoteReply> {
+-        let Some(token) = &request.bearer else {
++        let (token, by_cookie) = if let Some(token) = &request.bearer {
++            (token.clone(), false)
++        } else if let Some(token) = self.cookie_token(request) {
++            (token, true)
++        } else {
+             return Err(self.refuse(
+                 request,
+                 401,
+@@ -3136,7 +3141,7 @@ impl SwitchboardApp {
+         };
+         let Some(device) = self
+             .core
+-            .device_by_token(&remote::token_sha256(token))
++            .device_by_token(&remote::token_sha256(&token))
+             .cloned()
+         else {
+             return Err(self.refuse(
+@@ -3147,10 +3152,54 @@ impl SwitchboardApp {
+                 false,
+             ));
+         };
++        let writes = request.method != "GET" || request.upgrade.is_some();
++        if by_cookie && writes && !same_origin(request) {
++            return Err(self.refuse(
++                request,
++                403,
++                "origin",
++                "a request from another site is refused",
++                false,
++            ));
++        }
+         self.dispatch_inner(AppAction::DeviceSeen(device.id));
+         Ok(device)
+     }
+ 
++    /// The token in this host's own cookie. Cookies ignore ports, so the
++    /// name carries the server id: another instance's cookie is not this
++    /// host's, whatever else the browser holds.
++    fn cookie_token(&self, request: &RemoteRequest) -> Option<String> {
++        let identity = self.core.identity()?;
++        let name = remote::cookie_name(identity.server_id);
++        request.cookie.as_deref()?.split(';').find_map(|pair| {
++            let (n, v) = pair.trim().split_once('=')?;
++            (n == name && !v.is_empty()).then(|| v.to_owned())
++        })
++    }
++
++    /// The device behind the request and the host it is paired with, so
++    /// a browser can show whose page it is and what it may do.
++    fn remote_me(&self, request: &RemoteRequest, device: &PairedDevice) -> RemoteReply {
++        let Some(identity) = self.core.identity() else {
++            return self.refuse(
++                request,
++                503,
++                "no_identity",
++                "the host has no identity",
++                true,
++            );
++        };
++        let body = serde_json::json!({
++            "device_id": device.id,
++            "name": device.name,
++            "scope": device.scope,
++            "server_id": identity.server_id,
++            "server_name": identity.server_name,
++        });
++        self.envelope(200, &body, true)
++    }
++
+     /// A command under `control` scope. The body's `op` is the operation
+     /// id the device made, which is the idempotency key: the command
+     /// goes through `serve` as the control socket's do, so a send or a
+@@ -3567,11 +3616,11 @@ impl SwitchboardApp {
+     /// nothing in it is trusted until the key is pinned.
+     fn remote_info(&self) -> RemoteReply {
+         let Some(identity) = self.core.identity() else {
+-            return RemoteReply {
+-                status: 503,
+-                body: self.error_json("no_identity", "the host has no identity yet"),
+-                authenticated: false,
+-            };
++            return RemoteReply::new(
++                503,
++                self.error_json("no_identity", "the host has no identity yet"),
++                false,
++            );
+         };
+         let body = serde_json::json!({
+             "server_id": identity.server_id,
+@@ -3653,23 +3702,33 @@ impl SwitchboardApp {
+         } else {
+             name.as_str()
+         };
++        // A browser asks for its token as a cookie, so the page's script
++        // never holds it; a native client takes it in the body.
++        let cookie = field("transport") == "cookie";
+         let token = remote::bearer_token();
+         let device = self
+             .core
+             .new_device(name, remote::token_sha256(&token), now.wall);
+-        let reply = serde_json::json!({
+-            "token": token,
++        let mut reply = serde_json::json!({
+             "scope": device.scope,
+             "server_id": identity.server_id,
+             "device_id": device.id,
+         });
++        if !cookie {
++            reply["token"] = serde_json::json!(token);
++        }
+         log::info!(
+             "remote: paired {:?} with {} scope",
+             device.name,
+             device.scope.word()
+         );
+         self.dispatch_inner(AppAction::Paired(device));
+-        self.envelope(200, &reply, false)
++        let mut out = self.envelope(200, &reply, false);
++        if cookie {
++            out.headers
++                .push(("Set-Cookie", remote::set_cookie(identity.server_id, &token)));
++        }
++        out
+     }
+ 
+     /// One working set with its pins, found across every space.
+@@ -3720,11 +3779,7 @@ impl SwitchboardApp {
+             "revision": revision,
+             "body": body,
+         });
+-        RemoteReply {
+-            status: 200,
+-            body: text.to_string().into_bytes(),
+-            authenticated: true,
+-        }
++        RemoteReply::new(200, text.to_string().into_bytes(), true)
+     }
+ 
+     fn envelope(&self, status: u16, body: &serde_json::Value, authenticated: bool) -> RemoteReply {
+@@ -3733,11 +3788,7 @@ impl SwitchboardApp {
+             "revision": self.revision,
+             "body": body,
+         });
+-        RemoteReply {
+-            status,
+-            body: text.to_string().into_bytes(),
+-            authenticated,
+-        }
++        RemoteReply::new(status, text.to_string().into_bytes(), authenticated)
+     }
+ 
+     fn error_json(&self, code: &str, message: &str) -> Vec<u8> {
+@@ -3764,11 +3815,7 @@ impl SwitchboardApp {
+             request.method,
+             request.path
+         );
+-        RemoteReply {
+-            status,
+-            body: self.error_json(code, message),
+-            authenticated,
+-        }
++        RemoteReply::new(status, self.error_json(code, message), authenticated)
+     }
+ 
+     /// One request, one reply. A query reads; a command runs through the
+@@ -4272,6 +4319,17 @@ const FILE_CAP: usize = 256 * 1024;
+ /// body cap; a screenshot is well under it.
+ const IMAGE_CAP: u64 = 700 * 1024;
+ 
++/// Whether a request's `Origin` is this host's own page: the scheme the
++/// port serves and the `Host` the request asked for. A request with
++/// either header missing is not, since only a browser sends `Origin` and
++/// only a same-site page gets through with it.
++fn same_origin(request: &RemoteRequest) -> bool {
++    match (&request.origin, &request.host) {
++        (Some(origin), Some(host)) => *origin == format!("https://{host}"),
++        _ => false,
++    }
++}
++
+ /// Cut every string in `value` to its cap, `notes` to `notes_cap` and
+ /// the rest to `STRING_CAP`, naming each cut field in a `truncated`
+ /// list on its object, so no field leaves unbounded and a client can
+diff --git a/src/core/mod.rs b/src/core/mod.rs
+index 4cc5198..7226491 100644
+--- a/src/core/mod.rs
++++ b/src/core/mod.rs
+@@ -13,6 +13,7 @@ pub mod grid;
+ pub mod model;
+ pub mod reconcile;
+ mod remote;
++pub use remote::invite_url;
+ pub mod revision;
+ mod sessions;
+ pub mod tickets;
+diff --git a/src/core/remote.rs b/src/core/remote.rs
+index e9cc6bc..6ed652d 100644
+--- a/src/core/remote.rs
++++ b/src/core/remote.rs
+@@ -4,6 +4,7 @@
+ //! compared and kept, so every transition is a plain function of its
+ //! inputs.
+ 
++use std::net::IpAddr;
+ use std::time::SystemTime;
+ 
+ use uuid::Uuid;
+@@ -12,6 +13,28 @@ use super::action::PairingWindow;
+ use super::action::{AppAction, AppCore, Clock, Effect, Out, PAIRING_ATTEMPTS, PAIRING_WINDOW};
+ use crate::ports::remote::{Identity, PairedDevice, Scope};
+ 
++/// The pairing invite a phone scans or a person pastes: an `https` URL
++/// at the address the port answers, its fragment carrying the window's
++/// code and the host's key and id. A browser never sends a fragment, so
++/// the code is in no request line; the page checks the key and the id
++/// against the host before it sends the code.
++#[must_use]
++pub fn invite_url(
++    identity: &Identity,
++    window: &PairingWindow,
++    address: IpAddr,
++    port: u16,
++) -> String {
++    let host = match address {
++        IpAddr::V4(a) => a.to_string(),
++        IpAddr::V6(a) => format!("[{a}]"),
++    };
++    format!(
++        "https://{host}:{port}/#code={}&key={}&id={}",
++        window.code, identity.spki_sha256, identity.server_id
++    )
++}
++
+ /// A device's last-seen time is saved when it moved by at least this
+ /// much, so a polling device does not rewrite `devices.json` on every
+ /// request.
+diff --git a/src/core/tests.rs b/src/core/tests.rs
+index fd3b5ed..77779f1 100644
+--- a/src/core/tests.rs
++++ b/src/core/tests.rs
+@@ -11802,6 +11802,37 @@ mod remote {
+         core
+     }
+ 
++    #[test]
++    fn the_invite_url_carries_the_code_and_key_in_its_fragment_alone() {
++        use crate::core::action::PairingWindow;
++        use crate::core::invite_url;
++        use std::net::IpAddr;
++        let id = identity();
++        let window = PairingWindow {
++            until: Clock::at(0).mono,
++            code: "ABCD2345".into(),
++            scope: Scope::Read,
++            failures: 0,
++        };
++        let lan = invite_url(&id, &window, IpAddr::from([192, 168, 1, 9]), 43187);
++        assert_eq!(
++            lan,
++            format!(
++                "https://192.168.1.9:43187/#code=ABCD2345&key={}&id={}",
++                "ab".repeat(32),
++                id.server_id
++            )
++        );
++        assert!(!lan.contains('?'), "a query would reach the server: {lan}");
++        let loopback = invite_url(&id, &window, IpAddr::from([127, 0, 0, 1]), 9);
++        assert!(
++            loopback.starts_with("https://127.0.0.1:9/#code="),
++            "{loopback}"
++        );
++        let v6 = invite_url(&id, &window, "fe80::1".parse().unwrap(), 9);
++        assert!(v6.starts_with("https://[fe80::1]:9/#code="), "{v6}");
++    }
++
+     #[test]
+     fn the_identity_loads_and_a_rename_or_an_address_change_saves_it() {
+         let mut core = loaded_core();
+diff --git a/src/ui/remote.rs b/src/ui/remote.rs
+index 2a49f6a..99cb645 100644
+--- a/src/ui/remote.rs
++++ b/src/ui/remote.rs
+@@ -4,11 +4,13 @@
+ //! every change is an action, and the host's state is read back from
+ //! the core each frame.
+ 
++use std::net::{IpAddr, SocketAddr};
++
+ use egui::{Context, RichText, Ui};
+ 
+ use super::{DrawCtx, GAP, cards::since_text, theme};
+ use crate::adapters::remote;
+-use crate::core::{AppAction, AppCore};
++use crate::core::{AppAction, AppCore, invite_url};
+ use crate::ports::remote::Scope;
+ 
+ /// What the dialog edits between frames: the name and port fields, the
+@@ -17,7 +19,7 @@ pub struct RemoteDraft {
+     pub name: String,
+     pub port: String,
+     pub scope: Scope,
+-    /// The QR texture for the code it was made for.
++    /// The QR texture, with the invite text it encodes.
+     qr: Option<(String, egui::TextureHandle)>,
+ }
+ 
+@@ -74,6 +76,13 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
+                 .small()
+                 .color(p.n600),
+             );
++            ui.label(
++                RichText::new(
++                    "A browser cannot pin this Mac's key. It will warn about this Mac's certificate; proceed past the warning only if the address is this Mac's, and pair a browser only on a network you trust. The code works once.",
++                )
++                .small()
++                .color(p.n600),
++            );
+             ui.horizontal(|ui| {
+                 if theme::ghost_muted(ui, "Close").clicked() {
+                     keep = false;
+@@ -154,22 +163,14 @@ fn pairing(cx: &mut DrawCtx<'_>, ui: &mut Ui, draft: &mut RemoteDraft) {
+     };
+     if let Some(window) = cx.core.pairing().cloned() {
+         let port = cx.remote_port.unwrap_or(identity.listen.port);
+-        let address = remote::local_address()
+-            .map(|ip| format!("{ip}:{port}"))
+-            .unwrap_or_default();
+-        let payload = serde_json::json!({
+-            "server_id": identity.server_id,
+-            "spki_sha256": identity.spki_sha256,
+-            "code": window.code,
+-            "addresses": if address.is_empty() { Vec::new() } else { vec![address.clone()] },
+-        })
+-        .to_string();
+-        if draft
+-            .qr
+-            .as_ref()
+-            .is_none_or(|(code, _)| *code != window.code)
+-        {
+-            draft.qr = qr_texture(ui.ctx(), &payload).map(|t| (window.code.clone(), t));
++        // A phone reaches this Mac only when the port listens on the
++        // network; otherwise the invite names the loopback, which only
++        // this Mac can reach, and the dialog says so.
++        let network = identity.listen.lan.then(remote::local_address).flatten();
++        let address = network.unwrap_or(IpAddr::from([127, 0, 0, 1]));
++        let invite = invite_url(&identity, &window, address, port);
++        if draft.qr.as_ref().is_none_or(|(text, _)| *text != invite) {
++            draft.qr = qr_texture(ui.ctx(), &invite).map(|t| (invite.clone(), t));
+         }
+         ui.horizontal(|ui| {
+             if let Some((_, texture)) = &draft.qr {
+@@ -185,8 +186,21 @@ fn pairing(cx: &mut DrawCtx<'_>, ui: &mut Ui, draft: &mut RemoteDraft) {
+                     ui,
+                     format!("Key {}", short_hash(&identity.spki_sha256)),
+                 ));
+-                if !address.is_empty() {
+-                    ui.label(theme::meta_text(ui, format!("Address {address}")));
++                if identity.listen.lan && network.is_some() {
++                    ui.label(theme::meta_text(
++                        ui,
++                        format!("Address {}", SocketAddr::new(address, port)),
++                    ));
++                } else if !identity.listen.lan {
++                    ui.label(theme::meta_text(
++                        ui,
++                        "This port answers this Mac only. Turn on Allow devices on the local network to pair a phone.",
++                    ));
++                } else {
++                    ui.label(theme::meta_text(
++                        ui,
++                        "No network address is up, so the invite names this Mac only.",
++                    ));
+                 }
+                 ui.label(theme::meta_text(
+                     ui,
+@@ -196,13 +210,13 @@ fn pairing(cx: &mut DrawCtx<'_>, ui: &mut Ui, draft: &mut RemoteDraft) {
+                     ),
+                 ));
+                 ui.horizontal(|ui| {
+-                    // The QR's text, for a client without a camera (the
+-                    // command-line browser takes it as one argument).
++                    // The invite's text, for a client without a camera: the
++                    // command line takes it as one argument.
+                     if theme::secondary(ui, "Copy invite")
+                         .on_hover_text("The QR code's text, to paste into a client")
+                         .clicked()
+                     {
+-                        ui.ctx().copy_text(payload.clone());
++                        ui.ctx().copy_text(invite.clone());
+                     }
+                     if theme::secondary(ui, "Stop pairing").clicked() {
+                         cx.dispatch(AppAction::ClosePairing);
+diff --git a/tests/remote.rs b/tests/remote.rs
+index b023a1f..df01736 100644
+--- a/tests/remote.rs
++++ b/tests/remote.rs
+@@ -9,6 +9,7 @@
+ // Tests assert emptiness with `assert!` throughout.
+ #![allow(clippy::assert_is_empty)]
+ 
++use std::fmt::Write as _;
+ use std::io::{BufRead, BufReader, Read, Write};
+ use std::net::{SocketAddr, TcpStream};
+ use std::path::PathBuf;
+@@ -23,6 +24,7 @@ use switchboard::adapters::fakes::{
+     FakeTranscripts, MemoryStore,
+ };
+ use switchboard::adapters::remote::{self, MAX_UNAUTHENTICATED, pinned_client};
++use switchboard::adapters::web;
+ use switchboard::app::Services;
+ use switchboard::content::ContentKey;
+ use switchboard::core::{AppAction, RecordId};
+@@ -240,16 +242,22 @@ fn command_with_run(port: &mut Port, project: &str, text: &str) -> (String, Reco
+     (session, id)
+ }
+ 
+-/// One HTTP request over a fresh pinned TLS connection: the status and
+-/// the body.
+-fn http(
++/// The response's headers, names lowercased.
++type Head = Vec<(String, String)>;
++
++/// A TLS connection to the port with its request sent and its reply
++/// not yet read.
++type Conn = BufReader<StreamOwned<ClientConnection, TcpStream>>;
++
++/// Open a pinned connection and send one request on it.
++fn send(
+     addr: SocketAddr,
+     config: &Arc<ClientConfig>,
+     method: &str,
+     path: &str,
+-    bearer: Option<&str>,
++    headers: &[(&str, &str)],
+     body: &str,
+-) -> std::io::Result<(u16, String)> {
++) -> std::io::Result<Conn> {
+     let tcp = TcpStream::connect(addr)?;
+     tcp.set_read_timeout(Some(Duration::from_secs(10)))?;
+     let conn = ClientConnection::new(
+@@ -261,16 +269,22 @@ fn http(
+     while s.conn.is_handshaking() {
+         s.conn.complete_io(&mut s.sock)?;
+     }
+-    let auth = bearer
+-        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+-        .unwrap_or_default();
++    let mut extra = String::new();
++    for (name, value) in headers {
++        let _ = write!(extra, "{name}: {value}\r\n");
++    }
+     write!(
+         s,
+-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: {}\r\n\r\n{body}",
++        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{extra}Content-Length: {}\r\n\r\n{body}",
+         body.len()
+     )?;
+     s.flush()?;
+-    let mut reader = BufReader::new(s);
++    Ok(BufReader::new(s))
++}
++
++/// The reply to a sent request: the status, the response's headers and
++/// its body, as bytes.
++fn receive(reader: &mut Conn) -> std::io::Result<(u16, Head, Vec<u8>)> {
+     let mut line = String::new();
+     reader.read_line(&mut line)?;
+     let status: u16 = line
+@@ -278,6 +292,7 @@ fn http(
+         .nth(1)
+         .and_then(|s| s.parse().ok())
+         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, line.clone()))?;
++    let mut out_headers = Head::new();
+     let mut length = 0usize;
+     loop {
+         let mut h = String::new();
+@@ -286,41 +301,102 @@ fn http(
+         if h.is_empty() {
+             break;
+         }
+-        if let Some(v) = h.strip_prefix("Content-Length:") {
+-            length = v.trim().parse().unwrap_or(0);
++        if let Some((name, value)) = h.split_once(':') {
++            let (name, value) = (name.trim().to_ascii_lowercase(), value.trim().to_owned());
++            if name == "content-length" {
++                length = value.parse().unwrap_or(0);
++            }
++            out_headers.push((name, value));
+         }
+     }
+     let mut out = vec![0; length];
+     reader.read_exact(&mut out)?;
++    Ok((status, out_headers, out))
++}
++
++/// One request over a fresh pinned TLS connection, with extra headers:
++/// the status, the response's headers and its body, as bytes.
++fn exchange(
++    addr: SocketAddr,
++    config: &Arc<ClientConfig>,
++    method: &str,
++    path: &str,
++    headers: &[(&str, &str)],
++    body: &str,
++) -> std::io::Result<(u16, Head, Vec<u8>)> {
++    let mut conn = send(addr, config, method, path, headers, body)?;
++    receive(&mut conn)
++}
++
++/// One HTTP request over a fresh pinned TLS connection: the status and
++/// the body.
++fn http(
++    addr: SocketAddr,
++    config: &Arc<ClientConfig>,
++    method: &str,
++    path: &str,
++    bearer: Option<&str>,
++    body: &str,
++) -> std::io::Result<(u16, String)> {
++    let auth = bearer.map(|t| format!("Bearer {t}"));
++    let headers: Vec<(&str, &str)> = auth.iter().map(|a| ("Authorization", a.as_str())).collect();
++    let (status, _, out) = exchange(addr, config, method, path, &headers, body)?;
+     Ok((status, String::from_utf8_lossy(&out).into_owned()))
+ }
+ 
+-/// A request from a client thread, served by the app on this thread.
+-fn call(
++/// A header of a response, by its lowercased name.
++fn header<'a>(head: &'a Head, name: &str) -> Option<&'a str> {
++    head.iter()
++        .find(|(n, _)| n == name)
++        .map(|(_, v)| v.as_str())
++}
++
++/// A request from a client thread with extra headers, served by the app
++/// on this thread: the status, the response's headers and the JSON body.
++fn call_with(
+     port: &mut Port,
+     method: &str,
+     path: &str,
+-    bearer: Option<&str>,
++    headers: &[(&str, &str)],
+     body: &str,
+-) -> (u16, serde_json::Value) {
++) -> (u16, Head, serde_json::Value) {
+     let addr = port.addr;
+     let config = Arc::clone(&port.client);
+-    let (method, path, bearer, body) = (
+-        method.to_owned(),
+-        path.to_owned(),
+-        bearer.map(str::to_owned),
+-        body.to_owned(),
+-    );
+-    let client =
+-        std::thread::spawn(move || http(addr, &config, &method, &path, bearer.as_deref(), &body));
++    let (method, path, body) = (method.to_owned(), path.to_owned(), body.to_owned());
++    let owned: Head = headers
++        .iter()
++        .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
++        .collect();
++    let client = std::thread::spawn(move || {
++        let refs: Vec<(&str, &str)> = owned
++            .iter()
++            .map(|(n, v)| (n.as_str(), v.as_str()))
++            .collect();
++        exchange(addr, &config, &method, &path, &refs, &body)
++    });
+     let deadline = std::time::Instant::now() + Duration::from_secs(5);
+     while !client.is_finished() {
+         assert!(std::time::Instant::now() < deadline, "no reply");
+         port.app.serve_pending();
+         std::thread::sleep(Duration::from_millis(2));
+     }
+-    let (status, text) = client.join().unwrap().expect("http");
++    let (status, head, out) = client.join().unwrap().expect("http");
++    let text = String::from_utf8_lossy(&out).into_owned();
+     let value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
++    (status, head, value)
++}
++
++/// A request from a client thread, served by the app on this thread.
++fn call(
++    port: &mut Port,
++    method: &str,
++    path: &str,
++    bearer: Option<&str>,
++    body: &str,
++) -> (u16, serde_json::Value) {
++    let auth = bearer.map(|t| format!("Bearer {t}"));
++    let headers: Vec<(&str, &str)> = auth.iter().map(|a| ("Authorization", a.as_str())).collect();
++    let (status, _, value) = call_with(port, method, path, &headers, body);
+     (status, value)
+ }
+ 
+@@ -3590,3 +3666,474 @@ fn a_runs_output_is_the_logs_masked_tail_and_moves_when_the_log_grows() {
+     );
+     assert_eq!(out["body"]["text"], "done");
+ }
++
++// --- the web page and the browser's cookie
++
++/// The three files the port serves before pairing, with the headers each
++/// carries and the bytes the crate was built with.
++#[test]
++fn the_pages_answer_before_pairing_with_their_headers_and_nothing_else() {
++    let port = port();
++    let pages: [(&str, &str, &[u8]); 3] = [
++        (
++            "/",
++            "text/html; charset=utf-8",
++            include_bytes!("../web/index.html"),
++        ),
++        (
++            "/app.js",
++            "text/javascript; charset=utf-8",
++            include_bytes!("../web/app.js"),
++        ),
++        (
++            "/app.css",
++            "text/css; charset=utf-8",
++            include_bytes!("../web/app.css"),
++        ),
++    ];
++    for (path, content_type, body) in pages {
++        let (status, head, out) = exchange(port.addr, &port.client, "GET", path, &[], "").unwrap();
++        assert_eq!(status, 200, "{path}");
++        assert_eq!(header(&head, "content-type"), Some(content_type), "{path}");
++        assert_eq!(
++            header(&head, "content-security-policy"),
++            Some(web::CSP),
++            "{path}"
++        );
++        assert_eq!(header(&head, "referrer-policy"), Some("no-referrer"));
++        assert_eq!(header(&head, "cache-control"), Some("no-store"));
++        assert_eq!(header(&head, "x-content-type-options"), Some("nosniff"));
++        assert_eq!(header(&head, "connection"), Some("close"));
++        assert_eq!(out, body, "{path} is the file the crate was built with");
++    }
++    // A query is not part of the path, and is not echoed.
++    let (status, _, out) =
++        exchange(port.addr, &port.client, "GET", "/?code=ABCD2345", &[], "").unwrap();
++    assert_eq!(status, 200);
++    assert_eq!(out, include_bytes!("../web/index.html"));
++}
++
++/// Nothing outside the pages and `/api/v1/` is a page: it is refused as
++/// the JSON 404 it was before the page existed.
++#[test]
++fn what_is_not_a_page_or_the_api_is_still_refused_as_json() {
++    let mut port = port();
++    for (method, path) in [
++        ("GET", "/favicon.ico"),
++        ("POST", "/"),
++        ("GET", "/api"),
++        ("GET", "/app.js/x"),
++    ] {
++        let (status, reply) = call(&mut port, method, path, None, "");
++        assert_eq!(
++            (status, code(&reply)),
++            (404, "not_found"),
++            "{method} {path}: {reply}"
++        );
++    }
++}
++
++/// A page connection is closed after its reply, so it frees its
++/// unauthenticated slot at once: four pages held open with their
++/// replies read do not fill the pool for a fifth.
++#[test]
++fn a_page_frees_its_slot_when_it_is_answered() {
++    let port = port();
++    let mut kept = Vec::new();
++    for _ in 0..MAX_UNAUTHENTICATED {
++        let mut conn = send(port.addr, &port.client, "GET", "/app.css", &[], "").unwrap();
++        let (status, head, _) = receive(&mut conn).unwrap();
++        assert_eq!(status, 200);
++        assert_eq!(header(&head, "connection"), Some("close"));
++        kept.push(conn);
++    }
++    std::thread::sleep(Duration::from_millis(100));
++    let (status, _, _) = exchange(port.addr, &port.client, "GET", "/app.css", &[], "").unwrap();
++    assert_eq!(status, 200, "the closed pages gave their slots back");
++    drop(kept);
++}
++
++/// Pages have a window of their own: the 121st in a minute is 429, and
++/// `/info` and `/pair` are not counted against it.
++#[test]
++fn the_page_window_is_120_a_minute_and_the_others_are_their_own() {
++    let mut port = port();
++    for _ in 0..120 {
++        let (status, _, _) = exchange(port.addr, &port.client, "GET", "/", &[], "").unwrap();
++        assert_eq!(status, 200);
++    }
++    let (status, _, out) = exchange(port.addr, &port.client, "GET", "/", &[], "").unwrap();
++    let text = String::from_utf8_lossy(&out);
++    assert_eq!(status, 429, "{text}");
++    assert!(text.contains("rate_limited"), "{text}");
++    let (status, _) = get(&mut port, "/api/v1/info", None);
++    assert_eq!(status, 200, "info has its own window");
++    let (status, reply) = call(&mut port, "POST", "/api/v1/pair", None, "{}");
++    assert_eq!(
++        (status, code(&reply)),
++        (403, "pairing_closed"),
++        "pair has its own window"
++    );
++}
++
++/// Pairs a browser through the window the way the page does, with the
++/// `cookie` transport, and returns the `Set-Cookie` the host sent.
++fn browser_cookie(port: &mut Port, code: &str, scope: Scope, device_name: &str) -> String {
++    port.app.dispatch(AppAction::OpenPairing {
++        code: code.into(),
++        scope,
++    });
++    let spki = port
++        .remote
++        .state()
++        .identity
++        .as_ref()
++        .unwrap()
++        .spki_sha256
++        .clone();
++    let body = serde_json::json!({
++        "code": code,
++        "device_name": device_name,
++        "spki_sha256": spki,
++        "transport": "cookie",
++    });
++    let (status, head, reply) = call_with(port, "POST", "/api/v1/pair", &[], &body.to_string());
++    assert_eq!(status, 200, "{reply}");
++    assert!(
++        reply["body"].get("token").is_none(),
++        "no token in the body: {reply}"
++    );
++    header(&head, "set-cookie")
++        .expect("a cookie for the browser")
++        .to_owned()
++}
++
++/// The `name=value` a browser sends back from a `Set-Cookie`.
++fn cookie_pair(set_cookie: &str) -> String {
++    set_cookie.split(';').next().unwrap().to_owned()
++}
++
++/// A browser's pairing: the cookie is named for the host and carries
++/// the attributes that keep it from script and from other sites; its
++/// value alone reads `/me`, and a native client's pairing is unchanged.
++#[test]
++fn a_browser_pairs_with_a_cookie_its_script_cannot_read_and_the_cookie_alone_reads_me() {
++    let mut port = port();
++    let server_id = port.remote.state().identity.as_ref().unwrap().server_id;
++    let set = browser_cookie(&mut port, "ABCD2345", Scope::Control, "Safari on iPhone");
++    let name = format!("__Host-sb-{server_id}");
++    assert!(set.starts_with(&format!("{name}=")), "{set}");
++    for attr in [
++        "Path=/",
++        "Secure",
++        "HttpOnly",
++        "SameSite=Strict",
++        "Max-Age=34560000",
++    ] {
++        assert!(set.contains(attr), "{attr} in {set}");
++    }
++    assert!(!set.contains("Domain"), "{set}");
++    let pair = cookie_pair(&set);
++    let token = pair.split_once('=').unwrap().1;
++    assert_eq!(token.len(), 43, "a bearer token's length");
++
++    let (status, _, me) = call_with(&mut port, "GET", "/api/v1/me", &[("Cookie", &pair)], "");
++    assert_eq!(status, 200, "{me}");
++    assert_eq!(me["body"]["scope"], "control");
++    assert_eq!(me["body"]["name"], "Safari on iPhone");
++    assert_eq!(me["body"]["server_id"], server_id.to_string());
++
++    // A cookie under the fixed name, or with a wrong value, is nothing.
++    for cookie in [format!("__Host-sb={token}"), format!("{name}=nope")] {
++        let (status, _, reply) =
++            call_with(&mut port, "GET", "/api/v1/me", &[("Cookie", &cookie)], "");
++        assert_eq!((status, code(&reply)), (401, "unauthorized"), "{cookie}");
++    }
++    // Other cookies in the jar are ignored.
++    let jar = format!("theme=dark; {pair}; other=1");
++    let (status, _, _) = call_with(&mut port, "GET", "/api/v1/me", &[("Cookie", &jar)], "");
++    assert_eq!(status, 200);
++
++    // A native client is given its token in the body and no cookie.
++    port.app.dispatch(AppAction::OpenPairing {
++        code: "BCDE2345".into(),
++        scope: Scope::Read,
++    });
++    let spki = port
++        .remote
++        .state()
++        .identity
++        .as_ref()
++        .unwrap()
++        .spki_sha256
++        .clone();
++    let body = serde_json::json!({ "code": "BCDE2345", "device_name": "Pad", "spki_sha256": spki });
++    let (status, head, reply) =
++        call_with(&mut port, "POST", "/api/v1/pair", &[], &body.to_string());
++    assert_eq!(status, 200, "{reply}");
++    assert!(reply["body"]["token"].is_string(), "{reply}");
++    assert!(header(&head, "set-cookie").is_none(), "{head:?}");
++}
++
++/// Two instances on one address: each names its cookie for its own id,
++/// and each reads only its own, so one pairing never overwrites the other.
++#[test]
++fn two_instances_on_one_address_keep_their_cookies_apart() {
++    let mut first = port();
++    let mut second = port();
++    let cookie_first = cookie_pair(&browser_cookie(
++        &mut first,
++        "ABCD2345",
++        Scope::Read,
++        "First",
++    ));
++    let cookie_second = cookie_pair(&browser_cookie(
++        &mut second,
++        "ABCD2345",
++        Scope::Read,
++        "Second",
++    ));
++    assert_ne!(
++        cookie_first.split('=').next(),
++        cookie_second.split('=').next(),
++        "each host's cookie has its own name"
++    );
++
++    let jar = format!("{cookie_first}; {cookie_second}");
++    let (status, _, me) = call_with(&mut first, "GET", "/api/v1/me", &[("Cookie", &jar)], "");
++    assert_eq!(
++        (status, me["body"]["name"].as_str()),
++        (200, Some("First")),
++        "{me}"
++    );
++    let (status, _, me) = call_with(&mut second, "GET", "/api/v1/me", &[("Cookie", &jar)], "");
++    assert_eq!(
++        (status, me["body"]["name"].as_str()),
++        (200, Some("Second")),
++        "{me}"
++    );
++    let (status, _, reply) = call_with(
++        &mut second,
++        "GET",
++        "/api/v1/me",
++        &[("Cookie", &cookie_first)],
++        "",
++    );
++    assert_eq!((status, code(&reply)), (401, "unauthorized"), "{reply}");
++}
++
++/// A cookie write must come from this host's own page: a request with
++/// no `Origin`, or another one, is 403 `origin`; the page's own origin
++/// gets past it; a bearer request is not asked for an `Origin`.
++#[test]
++fn a_cookie_write_must_come_from_this_hosts_page_and_a_bearer_need_not() {
++    let mut port = port();
++    let (_, _, session) = seed(&mut port, "");
++    let cookie = cookie_pair(&browser_cookie(
++        &mut port,
++        "ABCD2345",
++        Scope::Control,
++        "Pad",
++    ));
++    let token = pair(&mut port, "BCDE2345", Scope::Control, "Mac mini");
++    let path = format!("/api/v1/sessions/{session}/send");
++    let body = r#"{"op":"origin-1","text":"hi"}"#;
++
++    let (status, _, reply) = call_with(&mut port, "POST", &path, &[("Cookie", &cookie)], body);
++    assert_eq!((status, code(&reply)), (403, "origin"), "{reply}");
++    let (status, _, reply) = call_with(
++        &mut port,
++        "POST",
++        &path,
++        &[("Cookie", &cookie), ("Origin", "https://evil.example")],
++        body,
++    );
++    assert_eq!((status, code(&reply)), (403, "origin"), "{reply}");
++    // Same host, another port: the same name, so a different origin.
++    let (status, _, reply) = call_with(
++        &mut port,
++        "POST",
++        &path,
++        &[("Cookie", &cookie), ("Origin", "https://localhost:9999")],
++        body,
++    );
++    assert_eq!((status, code(&reply)), (403, "origin"), "{reply}");
++    // The page's own origin passes the rule; the send is then refused for
++    // a session that is not running, which is not this rule.
++    let (_, _, reply) = call_with(
++        &mut port,
++        "POST",
++        &path,
++        &[("Cookie", &cookie), ("Origin", "https://localhost")],
++        body,
++    );
++    assert_ne!(code(&reply), "origin", "{reply}");
++
++    let bearer = format!("Bearer {token}");
++    let (_, _, reply) = call_with(
++        &mut port,
++        "POST",
++        &path,
++        &[("Authorization", &bearer)],
++        body,
++    );
++    assert_ne!(code(&reply), "origin", "a bearer needs no Origin: {reply}");
++    let (status, _, _) = call_with(&mut port, "GET", "/api/v1/me", &[("Cookie", &cookie)], "");
++    assert_eq!(status, 200, "a cookie read needs no Origin");
++}
++
++/// `/me` says the device's scope and follows a change to it; a revoked
++/// browser is refused as an unknown token, and `/info` still answers
++/// with the host's own id and key, which is what the page compares.
++#[test]
++fn me_follows_the_scope_and_a_revoked_browser_is_refused_as_an_unknown_one() {
++    let mut port = port();
++    let (status, _, _) = call_with(&mut port, "GET", "/api/v1/me", &[], "");
++    assert_eq!(status, 401, "/me is refused to no one");
++    let cookie = cookie_pair(&browser_cookie(
++        &mut port,
++        "ABCD2345",
++        Scope::Read,
++        "Safari on iPad",
++    ));
++    let (_, _, me) = call_with(&mut port, "GET", "/api/v1/me", &[("Cookie", &cookie)], "");
++    assert_eq!(me["body"]["scope"], "read");
++
++    let device = port.app.core().devices()[0].id;
++    port.app.dispatch(AppAction::SetDeviceScope {
++        device,
++        scope: Scope::Control,
++    });
++    let (_, _, me) = call_with(&mut port, "GET", "/api/v1/me", &[("Cookie", &cookie)], "");
++    assert_eq!(me["body"]["scope"], "control");
++
++    port.app.dispatch(AppAction::RevokeDevice(device));
++    let (status, _, reply) = call_with(&mut port, "GET", "/api/v1/me", &[("Cookie", &cookie)], "");
++    assert_eq!((status, code(&reply)), (401, "unauthorized"), "{reply}");
++    let (status, info) = get(&mut port, "/api/v1/info", None);
++    assert_eq!(status, 200);
++    let identity = port.remote.state().identity.clone().unwrap();
++    assert_eq!(info["body"]["server_id"], identity.server_id.to_string());
++    assert_eq!(info["body"]["spki_sha256"], identity.spki_sha256);
++}
++
++/// The route table at the top of `web/app.js`, read from the file.
++fn page_routes() -> Vec<(String, String)> {
++    let js = include_str!("../web/app.js");
++    let table = js
++        .split("const ROUTES = {")
++        .nth(1)
++        .and_then(|rest| rest.split("};").next())
++        .expect("the page has a route table");
++    table
++        .lines()
++        .filter_map(|line| {
++            let (_, rest) = line.trim().split_once(": ['")?;
++            let (method, path) = rest.split_once("', '")?;
++            let path = path.strip_suffix("'],")?;
++            Some((method.to_owned(), path.to_owned()))
++        })
++        .collect()
++}
++
++/// Every route the page calls is one the host serves to a paired device
++/// with an answer other than `not_found`, so a renamed route fails here.
++#[test]
++fn every_route_the_page_calls_is_one_the_host_serves() {
++    let mut port = port();
++    let (_, project, session) = seed(&mut port, "");
++    let token = pair(&mut port, "ABCD2345", Scope::Control, "Pad");
++    let bearer = format!("Bearer {token}");
++    let routes = page_routes();
++    assert!(routes.len() >= 10, "the table is read: {routes:?}");
++    for (method, route) in routes {
++        let id: &str = if route.starts_with("/projects/") {
++            &project
++        } else {
++            &session
++        };
++        let path = format!("/api/v1{}", route.replace("{id}", id));
++        let body = if route.ends_with("/send") {
++            r#"{"op":"route-test","text":"hi"}"#
++        } else {
++            "{}"
++        };
++        let (status, _, reply) = call_with(
++            &mut port,
++            &method,
++            &path,
++            &[("Authorization", &bearer)],
++            body,
++        );
++        assert_ne!(
++            code(&reply),
++            "not_found",
++            "{method} {path} is not served: {status} {reply}"
++        );
++    }
++}
++
++/// The page's markup and script stay within the policy it is served
++/// under: no inline script, style or handler, its references are to
++/// files the port serves, and the script never writes markup from text.
++#[test]
++fn the_page_has_no_inline_script_style_or_handler_and_writes_no_markup() {
++    let html = include_str!("../web/index.html");
++    for tag in html.split("<script").skip(1) {
++        let open = tag.split('>').next().unwrap_or("");
++        assert!(open.contains("src=\""), "an inline script: {open}");
++    }
++    assert!(!html.contains("style="), "an inline style");
++    assert!(
++        !html
++            .split_whitespace()
++            .any(|w| w.starts_with("on") && w.contains('=')),
++        "an inline handler"
++    );
++    for attr in ["src=\"", "href=\""] {
++        for value in html.split(attr).skip(1) {
++            let value = value.split('"').next().unwrap_or("");
++            assert!(
++                value.starts_with("data:") || web::page(value).is_some(),
++                "{value} is not served"
++            );
++        }
++    }
++    let js = include_str!("../web/app.js");
++    for banned in [
++        "innerHTML",
++        "outerHTML",
++        "insertAdjacentHTML",
++        "eval(",
++        "document.write",
++    ] {
++        assert!(
++            !js.contains(banned),
++            "{banned} writes markup or code from text"
++        );
++    }
++}
++
++/// The page's own unit tests, under node, when node is installed.
++#[test]
++fn the_page_script_passes_its_own_unit_tests() {
++    if std::process::Command::new("node")
++        .arg("--version")
++        .output()
++        .is_err()
++    {
++        eprintln!("node is not installed; the page's unit tests are skipped");
++        return;
++    }
++    let out = std::process::Command::new("node")
++        .args(["--test", "web/app.test.js"])
++        .current_dir(env!("CARGO_MANIFEST_DIR"))
++        .output()
++        .expect("node runs");
++    assert!(
++        out.status.success(),
++        "{}{}",
++        String::from_utf8_lossy(&out.stdout),
++        String::from_utf8_lossy(&out.stderr)
++    );
++}
+diff --git a/tests/ui.rs b/tests/ui.rs
+index e58bfcf..925e32f 100644
+--- a/tests/ui.rs
++++ b/tests/ui.rs
+@@ -7483,13 +7483,19 @@ fn remote_devices_dialog_opens_pairing_and_revokes_a_device() {
+             _ => None,
+         })
+         .expect("the invite went to the clipboard");
+-    let invite: serde_json::Value = serde_json::from_str(&invite).unwrap();
+-    assert_eq!(invite["code"], code);
+-    assert_eq!(
+-        invite["spki_sha256"],
+-        harness.state().core().identity().unwrap().spki_sha256
++    // The invite is a URL whose fragment carries the code, the key and
++    // the id; the port is Mac-only here, so it names the loopback.
++    let identity = harness.state().core().identity().unwrap().clone();
++    let fragment = format!(
++        "#code={code}&key={}&id={}",
++        identity.spki_sha256, identity.server_id
++    );
++    assert!(invite.starts_with("https://127.0.0.1:"), "{invite}");
++    assert!(invite.ends_with(&fragment), "{invite}");
++    assert!(!invite.contains('?'), "no query: {invite}");
++    harness.get_by_label(
++        "This port answers this Mac only. Turn on Allow devices on the local network to pair a phone.",
+     );
+-    assert!(invite["addresses"].is_array());
+     harness.run_steps(2);
+     click(&mut harness, "Stop pairing");
+     assert!(actions(&harness).contains(&AppAction::ClosePairing));

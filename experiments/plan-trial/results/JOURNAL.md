@@ -488,3 +488,32 @@ the step ran. Costs are list price from the runs' own reports.
   named by server id; lean-b lost the reissue, the export and their
   tests and gained the name. Both revised plans then went to a sonnet
   implementer, in parallel, on worktrees at 7fe8949.
+
+## 2026-10-22, late: four implementations of #230 ($32.82 of the second $50)
+
+- The two revised plans (fable-b, lean-b) each built by a sonnet and
+  a haiku implementer, reviewed by the pipeline's correctness and
+  style reviewers at sonnet, and fixed by the arm's own model; every
+  branch green on the implement gate after its fix round. The table
+  and the reading are in `results/sb-230/implementations.md`.
+- Implementing cost $2.04 to $2.36 and 18 to 25 minutes a branch,
+  about the price of planning it; reviews $0.24 to $0.42; a fix round
+  $0.10 (haiku) to $0.34 (sonnet).
+- The Mac's disk filled during the first haiku runs and the lean-b
+  sonnet fix: each implement worktree builds its own target directory
+  (5 to 7 GB) and the shared one under the main checkout had grown to
+  53 GB. With the owner's leave the shared cache and the failed runs'
+  caches were removed; the failed runs are kept as `-attempt1`
+  directories with their partial diffs, and nothing else was lost.
+  This is what the trial Mac was for.
+- The lean-b sonnet fix's gate failed once on a dispatch unit test
+  (`a_second_kill_of_a_check_sends_nothing_and_only_escalate_does`)
+  with four cargo builds running; the rerun passed. The branch does
+  not touch dispatch.
+- Harness additions this session: `review-code` and `fix` stages
+  (the workflow templates the app holds are stood in for by one
+  paragraph), `TREE` to run a stage on an existing worktree, and a
+  stage run's directory accepted as `<from>`.
+- Not done: no page was opened in a browser, and no second review
+  round. The owner's phone against one of the four worktrees is the
+  next test, and the one the whole #230 trial has been pointing at.

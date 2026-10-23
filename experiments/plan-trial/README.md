@@ -299,6 +299,14 @@ so the model choice shows in cost and time, not in the grade: lean
 about $2 and 18 minutes, sonnet about $3.70 and 19, checked about
 $5.30 and 21, opus about $9.20 and 27, fable about $20.60 and 38.
 
+## The implementation test
+
+Two of the revision 5 plans were implemented four times on 2026-10-22,
+by sonnet and haiku each, reviewed and fixed through the harness
+stages below; `results/sb-230/implementations.md` has the table, the
+branches and the reading. Every branch passes the implement gate;
+none has been opened in a browser.
+
 ## Testing one stage in isolation
 
 
@@ -340,9 +348,14 @@ plan on the worktree with the implementer's guidance and the implement
 prompt, allows the build, test and local git commands by rule (on the
 trial Mac they go through that Mac's permission settings and a pane),
 then records the commits, the diff and the stage gate's result in
-`gate.txt`. `chain.sh <label> <investigate model> <model> <rep>
-results/<issue>` runs the whole plan pipeline stage by stage, so an
-issue can be planned under a revision without the trial Mac:
+`gate.txt`. `review-code` runs one of that stage's two reviewers
+(`REVIEWER=correctness` or `style`) on an implement run's branch, and
+`fix` runs the fixer over their feedback files and the gate again; for
+both, `TREE` names the implement run's worktree and the prompt
+paragraph stands in for the workflow template the app holds.
+`chain.sh <label> <investigate model> <model> <rep> results/<issue>`
+runs the whole plan pipeline stage by stage, so an issue can be
+planned under a revision without the trial Mac:
 
 ```sh
 ./chain.sh v5 sonnet sonnet a results/sb-187                           # investigate to the second answer
@@ -351,6 +364,10 @@ TEXT="Drop the reissue..." PLAN=results/sb-230/facts5/lean-b/plan.md \
   ./stage.sh revise v5rev sonnet leanb results/sb-230/facts5/lean-b pipelines/switchboard-facts-v5.toml
 PLAN=results/sb-230/stages/revise/v5rev-sonnet-leanb/plan.md \
   ./stage.sh implement v5rev sonnet leanb results/sb-230/facts5/lean-b pipelines/switchboard-facts-v5.toml
+i=results/sb-230/stages/implement/v5rev-sonnet-leanb
+TREE=$(cat $i/worktree.txt) REVIEWER=correctness ./stage.sh review-code v5rev sonnet leanb-c $i pipelines/switchboard-facts-v5.toml
+TREE=$(cat $i/worktree.txt) FEEDBACK=results/sb-230/stages/review-code/v5rev-sonnet-leanb-c/feedback.correctness.md \
+  ./stage.sh fix v5rev sonnet leanb $i pipelines/switchboard-facts-v5.toml
 ```
 
 A chained plan is graded from its last stage's directory once the
