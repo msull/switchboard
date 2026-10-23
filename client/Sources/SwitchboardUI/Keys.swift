@@ -385,6 +385,23 @@ public enum KeysWindow {
     }
 }
 
+private extension View {
+    /// Content kept above the window while `shown`, moving with it. Only
+    /// the headset has ornaments; elsewhere the panel is not opened.
+    @ViewBuilder
+    func peek(_ shown: Bool, @ViewBuilder content: () -> some View) -> some View {
+        #if os(visionOS)
+        ornament(visibility: shown ? .visible : .hidden, attachmentAnchor: .scene(.top), contentAlignment: .bottom) {
+            content()
+                .glassBackgroundEffect()
+                .padding(.bottom, 8)
+        }
+        #else
+        self
+        #endif
+    }
+}
+
 /// The keys panel: three rows of keys the size of the system
 /// keyboard's, with undo and redo where the host keeps the draft, under
 /// a strip with the caret's line and a row with the session's name, a
@@ -461,6 +478,7 @@ public struct KeysPanelView: View {
             }
         }
         .padding(16)
+        .peek(peeking) { peek }
         .task(id: ref) {
             if let held, held != ref {
                 await model.releaseDraft(held)
@@ -509,30 +527,35 @@ public struct KeysPanelView: View {
         .help(dictation.listening ? "Stop dictation" : "Dictate into the prompt")
     }
 
-    /// A peek at the whole prompt, opened over the panel and closed by
-    /// a tap outside it; the panel itself does not move.
+    /// The toggle that keeps the whole prompt open above the panel
+    /// (`peek`), until it is pressed again.
     private var peekButton: some View {
-        Button {
-            peeking.toggle()
-        } label: {
+        Toggle(isOn: $peeking) {
             Image(systemName: "text.viewfinder")
                 .frame(width: Self.smallWidth, height: Self.smallHeight)
         }
+        .toggleStyle(.button)
         .buttonStyle(.bordered)
         .disabled(ref == nil)
         .accessibilityLabel("Peek at the prompt")
-        .help("The whole prompt, over the keys")
-        .popover(isPresented: $peeking, arrowEdge: .bottom) {
-            ScrollView {
-                Text(whole)
-                    .font(.body)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding()
-            }
-            .frame(width: Self.rowWidth + 48)
-            .frame(minHeight: 80, maxHeight: 420)
+        .help("The whole prompt, above the keys, until pressed again")
+    }
+
+    /// The whole prompt, shown above the panel while the peek is on.
+    /// On the headset it is an ornament: attached to the window's top
+    /// edge, so it goes wherever the panel is dragged and stays open
+    /// while the keys are pressed, and the panel itself never changes
+    /// size or place.
+    private var peek: some View {
+        ScrollView {
+            Text(whole)
+                .font(.body)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .padding()
         }
+        .frame(width: Self.rowWidth + 48)
+        .frame(minHeight: 80, maxHeight: 420)
     }
 
     /// The whole prompt for the peek: the host's draft with the live
