@@ -1,1 +1,2 @@
 B codex grounding 3 — Codex marked `model.rs`, `action.rs` and `ports/` wrong as root-relative paths while calling them recognizable shorthand for src/core/model.rs, src/core/action.rs and src/ports/; the two line references it opened were right.
+AC codex grounding 3 — Codex marked the three files the plan proposes to create (`web/index.html`, `web/app.js`, `web/app.css`) "wrong (absent)" while saying itself they are proposed new files, not citations; every line reference it opened was right.

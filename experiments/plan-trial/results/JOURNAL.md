@@ -375,3 +375,64 @@ the step ran. Costs are list price from the runs' own reports.
 - The owner added two scenarios to the revision 5 set: opus throughout
   and fable throughout, the latter to see how the strongest model
   handles each stage. Ten sbf5 arms in all.
+
+## 2026-10-22: the revision 5 arms graded ($53.15 of $50)
+
+- The trial Mac returned the ten `sbf5-*` arms (commit 5ccb675),
+  blinded W to AF. Two arms, sonnet-a and checked-a, needed the one
+  allowed rerun: Claude Code 2.1.309 auto-updated mid-batch and its
+  first-run dialog ("Teach auto mode about your environment?")
+  swallowed the round-2 reviewer prompt, which Dispatch's workflow
+  does not detect (it fails a round only on a Stop after the ask).
+  Their attempt-1 transcripts are kept beside attempt 2's. The
+  tally's "3 cap" on checked-a is Dispatch's count across both
+  attempts; the graded plan had two rounds.
+- Both graders on all ten, $14.21 at Fable and five Codex runs
+  refused by a usage limit and rerun an hour later. Spend ends at
+  $53.15 against the $50, the overrun being the four opus and fable
+  arms the owner added knowing the cost would stretch.
+- What the plans did. Ten of ten put the token in an `HttpOnly`
+  cookie, no `localStorage`, no second transport: the revision 4
+  planner rule held in every arm. Ten of ten build the page to work
+  without the socket; nine poll first (sonnet-b polls only and defers
+  the socket, which the Fable grader reversed) and opus-a opens the
+  socket first with a five-second fall back to polling (also
+  reversed: five blank seconds on the device the page is for).
+- The facts stage split five and five: lean-a, lean-b, sonnet-b,
+  checked-a and checked-b settled the Safari question (WebKit 41419
+  or Cockpit's note, two with the newer 158345); sonnet-a, opus-a,
+  opus-b, fable-a and fable-b filed it unresolved with the same
+  evidence attached. The plans do not show which: the "works either
+  way" rule made the filing irrelevant, which is what it was for.
+- The one reversal left is the certificate reissue over the same
+  key, in nine of ten plans and named by the Fable grader on every
+  one of them; Codex counts it in none (its overturn column is 0
+  across the ten, as through the whole trial). fable-b alone keeps
+  the identity as it is and lists the reissue as a follow-up; the
+  Fable grader then reversed its frame-side static route and
+  three-file page instead. The second reversal, in six plans, is a
+  fixed cookie name without the server id. Neither is in the planner
+  guidance and I am not adding either: the reissue is the owner's
+  call and the cookie name is a detail the reference happens to fix.
+- The fable reviewer is the first to argue with the reissue policy
+  (fable-a round 1: "the dialog's trust signal is defeated by the
+  plan's own reissue policy"), without reversing it. The sonnet
+  reviewer approved lean-a, lean-b and sonnet-a with "No further
+  feedback" after 37 to 78 tool calls each, and raised four
+  objections on sonnet-b; the variance stands. Zero WebSearch calls
+  in any of the ten review sessions, again.
+- Scores: Fable 3 / 2-3 / 1-2 / 2 / note on all ten, Codex 3 / 2 / 0
+  / 1 / no on eight and 2 and 1 on grounding for the lean pair (the
+  lean-b 1 is a grader error, overridden: it marked the plan's three
+  new files "absent from the tree"; lean-a's 2 is one section number
+  wrong). Level with revision 4's isolated plans and with each other.
+  The model choice shows in cost and time only: lean $2.07 and 18
+  min, sonnet $3.69 and 19, checked $5.33 and 21, opus $9.22 and 27,
+  fable $20.57 and 38. Plans run 2.4k to 4.7k words; fable-b's is the
+  shortest of the set at 3.1k and the one with no reissue.
+- The case for a model per stage, from everything so far: haiku
+  investigate and sonnet everywhere else (lean) loses nothing a grader
+  can see at a fifth of opus's cost; the opus reviewer (checked) buys
+  nothing on this issue over sonnet's; opus and fable throughout
+  produce the same plan at three and ten times the price. The next
+  test that would move this is a fresh issue, not another #230 run.

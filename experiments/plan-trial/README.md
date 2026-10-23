@@ -285,6 +285,20 @@ On the trial Mac:
 then commit `results/` and push as before. `grade-all.sh` now grades
 every letter the key holds.
 
+The ten arms ran on 2026-10-22 (W to AF in the key; the full account is
+the journal entry of that date). All ten plans put the token in an
+`HttpOnly` cookie and build the page to poll first, whichever way the
+facts stage filed the Safari question: five arms settled it and five
+filed it as unresolved with the evidence attached, and the planner's
+"works either way" rule made the difference invisible in the plan. The
+one reversal every grader still names is the certificate reissue over
+the same key, which nine of ten plans make; the fable-b plan alone
+keeps the identity as it is and files the reissue as a follow-up. The
+scores are level with revision 4's isolated plans and with each other,
+so the model choice shows in cost and time, not in the grade: lean
+about $2 and 18 minutes, sonnet about $3.70 and 19, checked about
+$5.30 and 21, opus about $9.20 and 27, fable about $20.60 and 38.
+
 ## Testing one stage in isolation
 
 

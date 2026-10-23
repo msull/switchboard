@@ -9,3 +9,8 @@ at a flat $0.30. Not counted: anything before the grant, and runs on
 the trial Mac, which are the pipeline's cost rather than the
 iteration's. `spend.py` prints the current total; the figure in each
 journal entry is from it.
+
+Closed 2026-10-22 at $53.15: the revision 5 arms' twenty grades took
+the total past $50, by the four opus and fable arms the owner added
+with that cost in view. No further stage runs or grades are charged
+to this budget.
