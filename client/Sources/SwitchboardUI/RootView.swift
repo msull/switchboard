@@ -41,6 +41,7 @@ public struct RootView: View {
         Self.closedOnRequest = true
         try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
         dismissWindow(id: PromptWindow.id)
+        dismissWindow(id: KeysWindow.id)
         for (id, ref) in model.open {
             dismissWindow(value: CardWindowRequest(id: id, ref: ref))
         }
@@ -60,6 +61,14 @@ public struct RootView: View {
                 try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
             }
             openWindow(id: PromptWindow.id, value: PromptWindow.value)
+        }
+        // `keys` opens the keys panel the same way.
+        if let entry = pending.first(where: { $0 == "keys" || $0.hasPrefix("keys:") }) {
+            pending.removeAll { $0 == entry }
+            if let wait = Double(entry.dropFirst("keys:".count)), entry.hasPrefix("keys:") {
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+            }
+            openWindow(id: KeysWindow.id, value: KeysWindow.value)
         }
         for _ in 0..<100 where !pending.isEmpty {
             for entry in pending {
@@ -89,6 +98,12 @@ public struct RootView: View {
                             Label("Prompt window", systemImage: "text.alignleft")
                         }
                         .help("The prompt window: the whole draft of the session being worked on")
+                        Button {
+                            openWindow(id: KeysWindow.id, value: KeysWindow.value)
+                        } label: {
+                            Label("Keys panel", systemImage: "keyboard")
+                        }
+                        .help("The keys panel: punctuation, breaks and caret moves for the prompt, by touch")
                     }
             }
             .tabItem { Label("Sessions", systemImage: "rectangle.grid.2x2") }
