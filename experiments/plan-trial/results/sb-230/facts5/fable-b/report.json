@@ -1,0 +1,355 @@
+{
+  "id": "f96f6569",
+  "project": "sbf5-fable-b",
+  "title": "A web control surface: the remote port serves a browser page, paired from a URL that carries the code",
+  "state": "active",
+  "stages": [
+    {
+      "stage": "investigate",
+      "attempts": 1,
+      "ms": 543533,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-fable-5-1": {
+          "input": 450,
+          "output": 18287,
+          "cache_write": 128016,
+          "cache_write_1h": 128016,
+          "cache_read": 1304620,
+          "messages": 15
+        }
+      }
+    },
+    {
+      "stage": "lanes",
+      "attempts": 1,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "facts",
+      "attempts": 1,
+      "ms": 576762,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-fable-5-1": {
+          "input": 450,
+          "output": 31241,
+          "cache_write": 96944,
+          "cache_write_1h": 96944,
+          "cache_read": 1357822,
+          "messages": 15
+        }
+      }
+    },
+    {
+      "stage": "plan",
+      "attempts": 1,
+      "ms": 386223,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-fable-5-1": {
+          "input": 642,
+          "output": 26168,
+          "cache_write": 106340,
+          "cache_write_1h": 106340,
+          "cache_read": 1851695,
+          "messages": 21
+        }
+      }
+    },
+    {
+      "stage": "review",
+      "attempts": 1,
+      "ms": 1955801,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {
+        "claude-fable-5-1": {
+          "input": 968,
+          "output": 41351,
+          "cache_write": 222729,
+          "cache_write_1h": 222729,
+          "cache_read": 3607174,
+          "messages": 34
+        }
+      }
+    },
+    {
+      "stage": "implement",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "review-code",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "pr",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "ready",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    },
+    {
+      "stage": "merge",
+      "attempts": 0,
+      "ms": 0,
+      "waiting_ms": 0,
+      "nudges": 0,
+      "tokens": {}
+    }
+  ],
+  "plan_lines": 403,
+  "plan_bytes": 22030,
+  "plans": [
+    {
+      "lane": "repo",
+      "lines": 403,
+      "bytes": 22030
+    }
+  ],
+  "plan_reviews": [
+    {
+      "stage": "review",
+      "attempt": 1,
+      "rounds": [
+        {
+          "n": 1,
+          "new": 7,
+          "open": 7
+        },
+        {
+          "n": 2,
+          "new": 8,
+          "open": 8
+        }
+      ]
+    }
+  ],
+  "plan_rounds": 2,
+  "plan_points": 15,
+  "code_reviews": [],
+  "code_rounds": 0,
+  "code_points": 0,
+  "code_points_by_reviewer": {},
+  "code_incomplete": false,
+  "fix_passes": 0,
+  "rebases": 0,
+  "pr_url": null,
+  "commits": null,
+  "range": null,
+  "tickets": 1,
+  "answered_by": {},
+  "evidence_files": 0,
+  "evidence_bytes": 0,
+  "usage": [
+    {
+      "stage": "investigate",
+      "n": 1,
+      "context": "root",
+      "models": {
+        "claude-fable-5-1": {
+          "input": 450,
+          "output": 18287,
+          "cache_write": 128016,
+          "cache_write_1h": 128016,
+          "cache_read": 1304620,
+          "messages": 15
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "beb3894c-c51e-4c09-854b-9cff794a25fe",
+          "source": "transcript",
+          "models": {
+            "claude-fable-5-1": {
+              "input": 450,
+              "output": 18287,
+              "cache_write": 128016,
+              "cache_write_1h": 128016,
+              "cache_read": 1304620,
+              "messages": 15
+            }
+          },
+          "span_ms": 357162,
+          "active_ms": 357162,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "facts",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-fable-5-1": {
+          "input": 450,
+          "output": 31241,
+          "cache_write": 96944,
+          "cache_write_1h": 96944,
+          "cache_read": 1357822,
+          "messages": 15
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "d371604c-2a15-4102-aae3-f92505087761",
+          "source": "transcript",
+          "models": {
+            "claude-fable-5-1": {
+              "input": 450,
+              "output": 31241,
+              "cache_write": 96944,
+              "cache_write_1h": 96944,
+              "cache_read": 1357822,
+              "messages": 15
+            }
+          },
+          "span_ms": 570333,
+          "active_ms": 570333,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "plan",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-fable-5-1": {
+          "input": 642,
+          "output": 26168,
+          "cache_write": 106340,
+          "cache_write_1h": 106340,
+          "cache_read": 1851695,
+          "messages": 21
+        }
+      },
+      "sessions": [
+        {
+          "role": "agent",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "af2a3af5-8dbf-4ac6-b2a7-75d4688c3bd2",
+          "source": "transcript",
+          "models": {
+            "claude-fable-5-1": {
+              "input": 642,
+              "output": 26168,
+              "cache_write": 106340,
+              "cache_write_1h": 106340,
+              "cache_read": 1851695,
+              "messages": 21
+            }
+          },
+          "span_ms": 380762,
+          "active_ms": 380762,
+          "asking_ms": 0,
+          "idle_ms": 0
+        }
+      ]
+    },
+    {
+      "stage": "review",
+      "n": 1,
+      "context": "repo",
+      "models": {
+        "claude-fable-5-1": {
+          "input": 968,
+          "output": 41351,
+          "cache_write": 222729,
+          "cache_write_1h": 222729,
+          "cache_read": 3607174,
+          "messages": 34
+        }
+      },
+      "sessions": [
+        {
+          "role": "planner",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "657625b3-aabb-4d98-9637-78285061c28e",
+          "source": "transcript",
+          "models": {
+            "claude-fable-5-1": {
+              "input": 420,
+              "output": 17794,
+              "cache_write": 134114,
+              "cache_write_1h": 134114,
+              "cache_read": 2081209,
+              "messages": 15
+            }
+          },
+          "span_ms": 339827,
+          "active_ms": 250748,
+          "asking_ms": 0,
+          "idle_ms": 89079
+        },
+        {
+          "role": "plan reviewer",
+          "kind": "claude",
+          "kind_from_pipeline": false,
+          "session": "d562fdcb-caa3-4145-ba47-a9ed2ab9d446",
+          "source": "transcript",
+          "models": {
+            "claude-fable-5-1": {
+              "input": 548,
+              "output": 23557,
+              "cache_write": 88615,
+              "cache_write_1h": 88615,
+              "cache_read": 1525965,
+              "messages": 19
+            }
+          },
+          "span_ms": 627236,
+          "active_ms": 508814,
+          "asking_ms": 0,
+          "idle_ms": 118422
+        }
+      ]
+    }
+  ],
+  "tokens": {
+    "claude-fable-5-1": {
+      "input": 2510,
+      "output": 117047,
+      "cache_write": 554029,
+      "cache_write_1h": 554029,
+      "cache_read": 8121311,
+      "messages": 85
+    }
+  },
+  "not_counted": 0,
+  "not_found": 0,
+  "kind_unknown": 0
+}

@@ -1,0 +1,310 @@
+{
+  "id": "91423ada",
+  "project": "sbf5-opus-a",
+  "kind": "github",
+  "number": 230,
+  "title": "A web control surface: the remote port serves a browser page, paired from a URL that carries the code",
+  "body": "## What I want\n\nA second control surface beside the headset app: a page the host serves itself, opened in any browser on the local network (a phone, an iPad, another Mac), that lists the sessions with the waiting ones marked, shows a session's last response or screen, and sends a reply. It runs over the remote port that already exists. Nothing to install on the device, no App Store, no Xcode.\n\n## What exists\n\n- The remote port (`docs/remote-client.md`; `src/adapters/remote.rs`; `serve_remote` in `src/app.rs`): TLS with a per-installation self-signed certificate, pairing by a code with a pinned key, bearer tokens, the `/api/v1/*` read and control endpoints, the `/api/v1/events` WebSocket with the revision counter and `changed` events, redaction before every cut. Any path outside `/api/v1/` is refused.\n- The pairing window (`src/ui/remote.rs`): a QR carrying `{server_id, spki_sha256, code, addresses}` as JSON, the same in text beside it, open for five minutes or three wrong codes. The headset pairs from the Bonjour record and a typed code; the command-line `switchboard-remote pair` takes the QR's text as one argument.\n- Three speakers of the protocol already: the visionOS app, `switchboard-remote`, and the fixtures shared by `tests/remote.rs` and the Swift tests.\n\n## The shape\n\n- **The host serves the page from the same port.** `GET /` and the page's few files answer with HTML, CSS and JS embedded in the binary at compile time (`include_str!`), so there is no build step, no bundler and no package manager. Same origin as the API: the page calls `/api/v1/...` and opens `/api/v1/events` directly.\n- **The page speaks the protocol the headset speaks.** REST for reads and commands, the events socket for live changes, replies applied by revision the way §4.4 says. No new read model unless the page cannot do without one.\n- **Pairing from a URL.** The pairing window's QR becomes a URL, `https://<address>:<port>/?code=<code>&key=<spki_sha256>&id=<server_id>`, so a phone's camera opens it in the browser. The page reads the query, removes it from the address bar with `history.replaceState` before anything else happens, compares the key in the URL with the one `/info` presents, posts `/api/v1/pair` only when they match, keeps the token, and shows the sessions. The code never stays in the address bar or the history. The native text path (`switchboard-remote pair`, the headset's paste) takes the URL too, or the JSON as before.\n- **The first cut of the page.** Sessions grouped by project, waiting ones first and marked, each with its kind, state and the one-line excerpt the card shows; a session view with the last response for a Claude Code session or the screen for anything else, refreshed on `changed`; a reply box that posts `send` when the device has `control` scope and is hidden otherwise; the device's scope and host name in the header; \"identity changed, pair again\" and \"revoked\" states said plainly.\n\n## Decisions the plan must settle\n\n1. **Browser trust in the self-signed certificate.** The native client pins the SPKI; a browser cannot. The first visit shows a certificate warning the owner clicks through, and the browser then trusts that certificate for that address. The plan says what this buys and what it does not: the `key` in the URL lets a genuine page refuse to send the code to a host whose `/info` key differs, but a page served by an impostor is not a genuine page. Either the click-through on the local network is the trust step, said in the paired-devices dialog, or the host offers its certificate for download so the owner can trust it on the device first. Pick one, say why, and keep §5's rule that no non-loopback bind serves anything but `/info`, `/pair` and now the page itself before pairing.\n2. **How the token reaches the WebSocket.** A browser cannot set a header on `new WebSocket()`, and the spec forbids the token in a URL. Candidates: the `/pair` reply sets an `HttpOnly; Secure; SameSite=Strict` cookie that `fetch` and the WebSocket both carry and the page's script never sees, or the token travels as a `Sec-WebSocket-Protocol` value. The host keeps accepting the bearer header for the native clients. The choice also decides where the token lives on the device; `localStorage` is readable by any script on the origin, a cookie is not.\n3. **One QR or two.** One URL read by the browser and by the native text path is the preference; the headset has no camera and the CLI parses text, so the JSON form can be kept only if something still needs it.\n4. **Static paths on a port whose allowlist is `/api/v1/*`.** The exact set of paths, their `Content-Type`, a `Content-Security-Policy` with no inline script and no external resource, no caching across versions, which pool and rate window an unpaired browser's page load counts against (§4.1 allows four unauthenticated connections), and what the page shows when opened without a code and without a token.\n5. **Where the page lives and how it is tested.** `web/` embedded at compile time; a test in `tests/remote.rs` that the embedded page references only paths the host serves and that the new paths answer with the headers the plan names; the pairing flow tested end to end with the host's own HTTP client as the CLI does, since no UI test drives a browser; the fixture set extended if a view changes.\n6. **The device record.** A browser is a paired device like any other: a name from the user agent (`Safari on iPhone`), scope chosen in the pairing window as today, listed and revocable in the paired-devices dialog.\n\n## Not in this cut\n\n- Dispatch tickets and decisions on the page (the API serves them; a later issue).\n- The conversation beyond the last response, drafts, dictation, runs and pinned files (the API serves them; later).\n- Anything beyond the local network: no relay, no tunnel; §9 of the spec stands.\n- A framework, a build step or a dependency for the page.\n\n## Where to look\n\n- `docs/remote-client.md` §4.1 (bounds), §4.3 (endpoints), §5 (pairing): the plan amends the spec and the remote status section of `docs/design.md`.\n- `src/adapters/remote.rs`: `connection`, `read_request`, the pools and the rate windows.\n- `src/app.rs` `serve_remote`: the `/api/v1/` prefix match and the allowlist.\n- `src/ui/remote.rs`: the pairing window and its QR payload; `src/core/remote.rs` the pairing state.\n- `client/Sources/switchboard-remote/main.swift` and `client/Sources/SwitchboardProtocol/Info.swift`: the text pairing path that has to keep working.\n\n## Acceptance\n\nOpen the pairing window, scan the QR with a phone, accept the certificate warning, see the sessions; a session that starts waiting moves to the top without a reload; send a reply from the phone and watch it arrive; revoke the phone in the dialog and the page says so on its next request.\n",
+  "url": "https://github.com/msull/switchboard/issues/230",
+  "labels": [
+    "enhancement"
+  ],
+  "state": "active",
+  "reason": null,
+  "stages": [
+    "investigate",
+    "lanes",
+    "facts",
+    "plan",
+    "review",
+    "implement",
+    "review-code",
+    "pr",
+    "ready",
+    "merge"
+  ],
+  "stage_checks": [
+    null,
+    null,
+    null,
+    null,
+    "review-finalized",
+    null,
+    null,
+    null,
+    "pr-checks",
+    "pr-merged"
+  ],
+  "stage": 4,
+  "tree": "/Users/sbgragent/.dispatch/worktrees/91423ada",
+  "tree_removed": false,
+  "trees_kept": null,
+  "closable": false,
+  "trees_retryable": false,
+  "removes": [
+    "/Users/sbgragent/.dispatch/worktrees/91423ada"
+  ],
+  "lanes": [
+    {
+      "name": "repo",
+      "worktree": "/Users/sbgragent/.dispatch/worktrees/91423ada/.",
+      "branch": "dispatch/230-a-web-control-surface-the-remote-port-se",
+      "chosen": true,
+      "setup_done": true,
+      "removed": false,
+      "base_sha": "7fe8949f9d93965279bf8dc42c8e5a4b1bb443a7",
+      "head": "7fe8949f9d93965279bf8dc42c8e5a4b1bb443a7",
+      "pushed_head": null,
+      "rebase_conflicts": null,
+      "resolution": null,
+      "brought_up_by": null,
+      "brought_up_commits": false,
+      "clone": null,
+      "merge_after": [],
+      "merge_after_run": false,
+      "merge_after_step": null
+    }
+  ],
+  "attempts": [
+    {
+      "stage": "investigate",
+      "n": 1,
+      "context": "root",
+      "kind": "agent",
+      "state": "complete",
+      "reason": null,
+      "session": "87fc32da-15a1-49bb-8586-f420a45ce221",
+      "run": null,
+      "artifacts": [
+        [
+          "notes",
+          "/Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/investigate/1/root/notes.md"
+        ]
+      ],
+      "head": null,
+      "checks": null,
+      "pr": null,
+      "rounds": [],
+      "rewrite": null,
+      "nudges": [],
+      "secret": [],
+      "forgotten": [],
+      "waits": null,
+      "waits_since_ms": null,
+      "held": [],
+      "evidence": [],
+      "evidence_over_cap": [],
+      "evidence_swept_ms": null,
+      "started_ms": 1792711825498,
+      "ended_ms": 1792712340979
+    },
+    {
+      "stage": "lanes",
+      "n": 1,
+      "context": "root",
+      "kind": "gate-only",
+      "state": "complete",
+      "reason": null,
+      "session": null,
+      "run": null,
+      "artifacts": [],
+      "head": null,
+      "checks": null,
+      "pr": null,
+      "rounds": [],
+      "rewrite": null,
+      "nudges": [],
+      "secret": [],
+      "forgotten": [],
+      "waits": null,
+      "waits_since_ms": null,
+      "held": [],
+      "evidence": [],
+      "evidence_over_cap": [],
+      "evidence_swept_ms": null,
+      "started_ms": 1792712344699,
+      "ended_ms": 1792712344699
+    },
+    {
+      "stage": "facts",
+      "n": 1,
+      "context": "repo",
+      "kind": "agent",
+      "state": "complete",
+      "reason": null,
+      "session": "149d376c-716d-4e7a-bec7-b277b7b4540e",
+      "run": null,
+      "artifacts": [
+        [
+          "checks",
+          "/Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/facts/1/repo/checks.log"
+        ],
+        [
+          "facts",
+          "/Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/facts/1/repo/facts.md"
+        ]
+      ],
+      "head": "7fe8949f9d93965279bf8dc42c8e5a4b1bb443a7",
+      "checks": {
+        "head": "7fe8949f9d93965279bf8dc42c8e5a4b1bb443a7",
+        "exit": 0,
+        "log": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/facts/1/repo/checks.log"
+      },
+      "pr": null,
+      "rounds": [],
+      "rewrite": null,
+      "nudges": [],
+      "secret": [],
+      "forgotten": [],
+      "waits": null,
+      "waits_since_ms": null,
+      "held": [],
+      "evidence": [],
+      "evidence_over_cap": [],
+      "evidence_swept_ms": null,
+      "started_ms": 1792712346469,
+      "ended_ms": 1792712641020
+    },
+    {
+      "stage": "plan",
+      "n": 1,
+      "context": "repo",
+      "kind": "agent",
+      "state": "complete",
+      "reason": null,
+      "session": "e9b56c6c-a0e1-40f3-89e6-6d5965a1a12d",
+      "run": null,
+      "artifacts": [
+        [
+          "plan",
+          "/Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/plan/1/repo/plan.md"
+        ]
+      ],
+      "head": null,
+      "checks": null,
+      "pr": null,
+      "rounds": [],
+      "rewrite": null,
+      "nudges": [],
+      "secret": [],
+      "forgotten": [],
+      "waits": null,
+      "waits_since_ms": null,
+      "held": [],
+      "evidence": [],
+      "evidence_over_cap": [],
+      "evidence_swept_ms": null,
+      "started_ms": 1792712644410,
+      "ended_ms": 1792713150101
+    },
+    {
+      "stage": "review",
+      "n": 1,
+      "context": "repo",
+      "kind": "workflow",
+      "state": "running",
+      "reason": null,
+      "session": "fb3ce377-353b-467b-9d18-4ee8049f3d02",
+      "run": "81acbc00-56c4-4e96-b19b-979462664118",
+      "artifacts": [
+        [
+          "plan",
+          "/Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/review/1/repo/plan.md"
+        ]
+      ],
+      "head": null,
+      "checks": null,
+      "pr": null,
+      "rounds": [],
+      "rewrite": null,
+      "nudges": [],
+      "secret": [],
+      "forgotten": [],
+      "waits": null,
+      "waits_since_ms": null,
+      "held": [],
+      "evidence": [],
+      "evidence_over_cap": [],
+      "evidence_swept_ms": null,
+      "started_ms": 1792713153505,
+      "ended_ms": null
+    }
+  ],
+  "decisions": [
+    {
+      "id": "d1",
+      "ticket": "91423ada",
+      "stage": "review",
+      "name": "finalize",
+      "question": "The review of plan hit its cap of 2 rounds. The reviewed copy is /Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/review/1/repo/plan.md. Finalize it, or revise with --note?",
+      "options": [
+        "finalize",
+        "revise",
+        "park"
+      ],
+      "recommendation": "finalize",
+      "multiple": false,
+      "state": "pending",
+      "answer": null,
+      "note": null,
+      "made_ms": 1792713555412,
+      "answered_by": null,
+      "answered_ms": null,
+      "needs_note": [
+        "revise"
+      ]
+    }
+  ],
+  "root_project": "281aecd6-ce3f-4a35-bdfb-59d85a8f20f5",
+  "current_session": "fb3ce377-353b-467b-9d18-4ee8049f3d02",
+  "holds": [],
+  "waiting_for": null,
+  "services": [],
+  "created_ms": 1792711824865,
+  "updated_ms": 1792713555412,
+  "paths": {
+    "plan": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/review/1/repo/plan.md",
+    "plan_stage": "review",
+    "plan_reviewed": true,
+    "plan_reviewing": true,
+    "plan_round": 2,
+    "round_file": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/review/1/repo/plan.feedback-2.md",
+    "review_summary": null,
+    "notes": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/investigate/1/root/notes.md",
+    "pr_url": null,
+    "pr_head": null,
+    "plan_rounds": [
+      {
+        "n": 1,
+        "feedback": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/review/1/repo/plan.feedback-1.md",
+        "response": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/review/1/repo/plan.response-1.md",
+        "by": null
+      },
+      {
+        "n": 2,
+        "feedback": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/review/1/repo/plan.feedback-2.md",
+        "response": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/review/1/repo/plan.response-2.md",
+        "by": null
+      }
+    ],
+    "plan_files": [
+      {
+        "lane": "repo",
+        "stage": "review",
+        "path": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/review/1/repo/plan.md",
+        "reviewing": true,
+        "round": 2
+      }
+    ],
+    "notes_files": [
+      {
+        "lane": null,
+        "stage": "investigate",
+        "path": "/Users/sbgragent/Library/Application Support/Dispatch/tickets/91423ada/investigate/1/root/notes.md",
+        "reviewing": false,
+        "round": null
+      }
+    ]
+  },
+  "restarts": []
+}

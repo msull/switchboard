@@ -20,3 +20,13 @@ S facts/haiku-a
 T facts/haiku-b
 U facts/cheap-a
 V facts/cheap-b
+W facts5/fable-b
+X facts5/fable-a
+Y facts5/opus-a
+Z facts5/checked-b
+AA facts5/sonnet-b
+AB facts5/opus-b
+AC facts5/lean-b
+AD facts5/sonnet-a
+AE facts5/lean-a
+AF facts5/checked-a

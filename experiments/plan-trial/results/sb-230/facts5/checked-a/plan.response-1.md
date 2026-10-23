@@ -1,0 +1,12 @@
+1. **Accepted: option (a), persist the browser certificate.** The point is right that a certificate re-made per launch gets different DER (`ring`'s ECDSA is randomised, and the validity is fresh), and that the plan had assumed without support that a browser's click-through survives that. I took (a) because (b) would make the unfavourable U2 branch certain on every launch, and the owner would learn to click through the one warning that signals an impostor.
+
+   Changed in the plan:
+   - **The record**: now one new file, `web-cert.json`, beside `identity.json` (`WEB_CERT_FILE`, `WEB_CERT_SCHEMA_VERSION` = 1, holding the DER, the covered address set and `not_after`), written through the same atomic `save` as the identity. I chose a separate file over a field on `Identity` so `IDENTITY_SCHEMA_VERSION` and the identity model stay as they are. The file is derived data: missing, corrupt or newer-versioned is re-made, never an error, and key rotation deletes it with the device records.
+   - **Actions and effects, step 2**: retitled "persisted". `RemoteStore` gains `load_web_cert`/`save_web_cert` (with fakes), and `tls_config` gains a store parameter, so the earlier "signature unchanged" is gone. The resolver re-makes and saves only when the address is not covered or fewer than 30 days remain. The step lists what still repeats the warning: an address change, the yearly re-make and a key rotation.
+   - **Where this departs from the issue**: the certificate bullet gives the reason for persisting.
+   - **The UI**: the pairing window's line now says the warning returns when the Mac's address changes, and that a warning at any other time is a reason to stop.
+   - **Step 1 (spike)**: it now records, in Safari and Chrome, whether a restart at the same address (should be no warning) and a re-issue over the same key (delete `web-cert.json`) bring the warning back. I did not hide that I found no Safari source.
+   - **The tests**: added byte-identical DER on a second `tls_config` at the same address, a re-make on a different address or under 30 days, and a corrupt file re-made without error.
+   - **Docs and contract additions**: §5 and design.md's gaps now name the returning warning, and the new file, its constants and the `RemoteStore` methods are listed.
+
+   Not run: I did not execute any of this; the persisted-certificate behaviour is checked by the new unit tests and the spike, not yet observed.

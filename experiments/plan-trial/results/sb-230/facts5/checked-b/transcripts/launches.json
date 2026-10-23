@@ -1,0 +1,72 @@
+{
+ "investigate-1": {
+  "session": "13a6f27d-b330-4a80-8f9a-4e231100bc9a",
+  "name": "investigator",
+  "cwd": "/Users/sbgragent/.dispatch/worktrees/846bf0fa",
+  "launch": {
+   "Argv": [
+    "--model",
+    "sonnet",
+    "--allowedTools",
+    "Edit(///Users/sbgragent/Library/Application Support/Dispatch/tickets/846bf0fa/investigate/1/root/**)"
+   ]
+  },
+  "transcript": "/Users/sbgragent/.claude/projects/-Users-sbgragent--dispatch-worktrees-846bf0fa/037e4920-9d02-4acd-801d-6794623501f6.jsonl",
+  "notes": "Dispatch ticket 846bf0fa \u00b7 #230 A web control surface: the remote port serves a browser page, paired from a URL that carries the code \u00b7 stage investigate attempt 1"
+ },
+ "facts-1": {
+  "session": "f640bd7d-af75-42fd-b66b-11c0781e456e",
+  "name": "facts",
+  "cwd": "/Users/sbgragent/.dispatch/worktrees/846bf0fa/.",
+  "launch": {
+   "Argv": [
+    "--model",
+    "sonnet",
+    "--allowedTools",
+    "WebSearch",
+    "--allowedTools",
+    "WebFetch",
+    "--allowedTools",
+    "Bash(cargo:*)",
+    "--allowedTools",
+    "Bash(git add:*)",
+    "--allowedTools",
+    "Bash(git commit:*)",
+    "--allowedTools",
+    "Edit(///Users/sbgragent/Library/Application Support/Dispatch/tickets/846bf0fa/facts/1/repo/**)"
+   ]
+  },
+  "transcript": "/Users/sbgragent/.claude/projects/-Users-sbgragent--dispatch-worktrees-846bf0fa/82db7796-fbda-4169-9835-356fae80919d.jsonl",
+  "notes": "Dispatch ticket 846bf0fa \u00b7 #230 A web control surface: the remote port serves a browser page, paired from a URL that carries the code \u00b7 stage facts attempt 1"
+ },
+ "plan-1": {
+  "session": "0352d59d-0722-4a4f-b7e4-7496bb40f26e",
+  "name": "planner",
+  "cwd": "/Users/sbgragent/.dispatch/worktrees/846bf0fa/.",
+  "launch": {
+   "Argv": [
+    "--model",
+    "sonnet",
+    "--allowedTools",
+    "Edit(///Users/sbgragent/Library/Application Support/Dispatch/tickets/846bf0fa/plan/1/repo/**)"
+   ]
+  },
+  "transcript": "/Users/sbgragent/.claude/projects/-Users-sbgragent--dispatch-worktrees-846bf0fa/02f55323-7884-4388-b221-6fc7e3d30043.jsonl",
+  "notes": "Dispatch ticket 846bf0fa \u00b7 #230 A web control surface: the remote port serves a browser page, paired from a URL that carries the code \u00b7 stage plan attempt 1"
+ },
+ "review-1": {
+  "session": "7c34e1c3-0577-41fc-bfb7-395420894bd6",
+  "name": "planner planner",
+  "cwd": "/Users/sbgragent/.dispatch/worktrees/846bf0fa/.",
+  "launch": {
+   "Argv": [
+    "--model",
+    "sonnet",
+    "--allowedTools",
+    "Edit(///Users/sbgragent/Library/Application Support/Dispatch/tickets/846bf0fa/plan/1/repo/**)"
+   ]
+  },
+  "transcript": "/Users/sbgragent/.claude/projects/-Users-sbgragent--dispatch-worktrees-846bf0fa/d393cd29-c765-4a20-90be-8924082cfa2b.jsonl",
+  "notes": "Dispatch ticket 846bf0fa needs a decision (d1): The review of plan hit its cap of 2 rounds. The reviewed copy is /Users/sbgragent/Library/Application Support/Dispatch/tickets/846bf0fa/review/1/repo/plan.md. Finalize it, or revise with --note?\nAnswer with: dispatch decide 846bf0fa d1 <finalize|revise|park>"
+ }
+}

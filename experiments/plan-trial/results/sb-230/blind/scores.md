@@ -26,3 +26,13 @@ See rubric.md. 0 to 3 per column; hand-off is yes, note or no.
 | T | | | | | | |
 | U | | | | | | |
 | V | | | | | | |
+| W | | | | | | |
+| X | | | | | | |
+| Y | | | | | | |
+| Z | | | | | | |
+| AA | | | | | | |
+| AB | | | | | | |
+| AC | | | | | | |
+| AD | | | | | | |
+| AE | | | | | | |
+| AF | | | | | | |

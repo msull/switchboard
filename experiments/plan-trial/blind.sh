@@ -7,7 +7,7 @@
 # earlier letters keep their grades. So each batch of facts arms is
 # blinded once, when its plans are collected. Score before opening the
 # key. A pipeline arm's plan is the reviewed copy.
-# usage: blind.sh <switchboard|simplesingletable> <issue> [facts]
+# usage: blind.sh <switchboard|simplesingletable> <issue> [facts|facts5]
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
@@ -16,7 +16,7 @@ repo_vars "$repo"
 python3 -I - "$here/results/$short-$issue" "$set_" <<'PY'
 import pathlib, random, string, sys
 res = pathlib.Path(sys.argv[1])
-facts = sys.argv[2] == "facts"
+facts = sys.argv[2] in ("facts", "facts5")
 blind = res / "blind"
 keyfile = blind / "key.txt"
 if facts:
