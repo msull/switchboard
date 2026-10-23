@@ -147,7 +147,7 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   text it types into, and three rows of keys the size of the system
   keyboard's (punctuation, a line break, a paragraph break that first
   closes the sentence with a period when the line ends without a
-  mark, delete and delete word,
+  mark, delete and delete word (the filled delete symbol), moves of
   the caret by character and to the ends of the line and the text,
   with the host's undo and redo), placed where the system puts the
   virtual keyboard and moved like it, pressed by touch; a key is a

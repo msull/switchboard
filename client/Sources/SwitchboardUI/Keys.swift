@@ -434,11 +434,7 @@ public struct KeysPanelView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 micButton
                 peekButton
-                if draft?.busy == true {
-                    ProgressView().controlSize(.small).frame(width: Self.smallWidth, height: Self.smallHeight)
-                } else {
-                    smallTool(.cleanUp, "sparkles", "Clean up with AI", on: draft?.ai ?? false)
-                }
+                smallTool(.cleanUp, "sparkles", "Clean up with AI", on: draft?.ai ?? false, working: draft?.busy == true)
             }
             .frame(width: Self.rowWidth)
             // The caret's line, as the system keyboard shows the text
@@ -611,12 +607,9 @@ public struct KeysPanelView: View {
         case .newline: Image(systemName: "return")
         case .paragraph: Image(systemName: "paragraphsign")
         case .deleteBackward: Image(systemName: "delete.left")
-        case .deleteWord:
-            // The word never wraps, so this key is the size of the rest.
-            VStack(spacing: 2) {
-                Image(systemName: "delete.left")
-                Text("word").font(.caption2).lineLimit(1).fixedSize()
-            }
+        // The filled symbol is the word key: every key is one glyph, so
+        // every key is the same size.
+        case .deleteWord: Image(systemName: "delete.left.fill")
         case .lineStart: Image(systemName: "arrow.left.to.line")
         case .left: Image(systemName: "arrow.left")
         case .right: Image(systemName: "arrow.right")
@@ -636,12 +629,22 @@ public struct KeysPanelView: View {
         .help(label)
     }
 
-    private func smallTool(_ tool: DraftTool, _ symbol: String, _ label: String, on: Bool) -> some View {
+    /// A tool in the top row. While the host is working on it the
+    /// button stays where it is, the same size, with a spinner in place
+    /// of its symbol, so the buttons beside it never move under a
+    /// finger on its way to them.
+    private func smallTool(_ tool: DraftTool, _ symbol: String, _ label: String, on: Bool, working: Bool = false) -> some View {
         Button { apply(tool) } label: {
-            Image(systemName: symbol).frame(width: Self.smallWidth, height: Self.smallHeight)
+            ZStack {
+                Image(systemName: symbol).opacity(working ? 0 : 1)
+                if working {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .frame(width: Self.smallWidth, height: Self.smallHeight)
         }
         .buttonStyle(.bordered)
-        .disabled(!enabled || !hosted || !on)
+        .disabled(!enabled || !hosted || !on || working)
         .accessibilityLabel(label)
         .help(label)
     }
