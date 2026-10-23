@@ -26,8 +26,33 @@ final class KeysTests: XCTestCase {
 
     func testABreakTakesTheSpacesOnBothSidesWithIt() {
         XCTAssertEqual(after(.newline, "one  two", caret: 4), EditState("one\ntwo", caret: 4))
-        XCTAssertEqual(after(.paragraph, "one two ", caret: 8), EditState("one two\n\n", caret: 9))
+        XCTAssertEqual(after(.paragraph, "one two ", caret: 8), EditState("one two.\n\n", caret: 10))
         XCTAssertEqual(after(.newline, "one\n", caret: 4), EditState("one\n\n", caret: 5))
+    }
+
+    func testAParagraphClosesTheSentenceWhenTheLineHasNoMark() {
+        XCTAssertEqual(after(.paragraph, "hello world", caret: 11), EditState("hello world.\n\n", caret: 14))
+        XCTAssertEqual(after(.paragraph, "hello world.", caret: 12), EditState("hello world.\n\n", caret: 14))
+        XCTAssertEqual(after(.paragraph, "really?  ", caret: 9), EditState("really?\n\n", caret: 9))
+        XCTAssertEqual(after(.paragraph, "", caret: 0), EditState("\n\n", caret: 2))
+        XCTAssertEqual(after(.paragraph, "a\n", caret: 2), EditState("a\n\n\n", caret: 4))
+        XCTAssertEqual(after(.paragraph, "one two", caret: 3), EditState("one.\n\ntwo", caret: 6))
+        // The line break alone adds no mark.
+        XCTAssertEqual(after(.newline, "hello world", caret: 11), EditState("hello world\n", caret: 12))
+    }
+
+    func testThePreviewIsTheCaretsLineCutAroundTheSelection() {
+        XCTAssertEqual(
+            KeyEdit.preview(EditState("first\nsecond line\nthird", caret: 13)),
+            LinePreview(before: "second ", selected: "", after: "line"))
+        XCTAssertEqual(
+            KeyEdit.preview(EditState("first\nsecond line\nthird", selection: 6..<12)),
+            LinePreview(before: "", selected: "second", after: " line"))
+        let long = String(repeating: "x", count: 50) + "|" + String(repeating: "y", count: 30)
+        let cut = KeyEdit.preview(EditState(long, caret: 50))
+        XCTAssertEqual(cut.before, "…" + String(repeating: "x", count: 36))
+        XCTAssertEqual(cut.after, "|" + String(repeating: "y", count: 13) + "…")
+        XCTAssertEqual(KeyEdit.preview(EditState("", caret: 0)), LinePreview(before: "", selected: "", after: ""))
     }
 
     func testDeleteTakesACharacterOrAWordAndASelectionFirst() {

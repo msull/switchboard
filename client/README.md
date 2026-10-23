@@ -8,7 +8,7 @@ targets visionOS 26.
 
 ```sh
 swift build                      # every target
-swift test                       # 90 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing, the keys
+swift test                       # 92 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing, the keys
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -137,8 +137,13 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   used with the Working Set; it is a view of the host's editor and
   changes nothing else; the keys panel (`KeysPanelView`, one per app,
   opened from a card's header, the prompt window or the Sessions
-  toolbar): three rows of keys the size of the system keyboard's
-  (punctuation, a line and a paragraph break, delete and delete word,
+  toolbar): the caret's line of the prompt in a strip over the keys,
+  the caret drawn in or the selection marked, cut around the caret
+  (`LinePreview`, `KeyEdit.preview`), as the system keyboard shows the
+  text it types into, and three rows of keys the size of the system
+  keyboard's (punctuation, a line break, a paragraph break that first
+  closes the sentence with a period when the line ends without a
+  mark, delete and delete word,
   the caret by character and to the ends of the line and the text,
   with the host's undo and redo), placed where the system puts the
   virtual keyboard and moved like it, pressed by touch; a key is a

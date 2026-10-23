@@ -168,6 +168,11 @@ public enum KeyEdit {
                 }
             } else {
                 s.stripSpaces(before: true, after: true)
+                if key == .paragraph, let last = s.before, last != "\n", !last.isPunctuation {
+                    // A paragraph ends a sentence: the line gets its
+                    // mark when it has none, so dictation can go on.
+                    s.replaceSelection(with: ".")
+                }
                 s.replaceSelection(with: inserted)
             }
             return s
@@ -230,6 +235,43 @@ public enum KeyEdit {
             break
         }
         return s
+    }
+}
+
+/// The line the caret is on, cut to what a strip above the keys can
+/// show: the text before the selection (its tail), the selection, and
+/// the text after it (its head), each cut marked with an ellipsis.
+public struct LinePreview: Equatable, Sendable {
+    public var before: String
+    public var selected: String
+    public var after: String
+
+    public init(before: String, selected: String, after: String) {
+        self.before = before
+        self.selected = selected
+        self.after = after
+    }
+}
+
+extension KeyEdit {
+    /// The caret's line of `state`, keeping `keep` characters before
+    /// the selection and `keepAfter` after it.
+    public static func preview(_ state: EditState, keep: Int = 36, keepAfter: Int = 14) -> LinePreview {
+        let text = state.text
+        var lineStart = state.startIndex
+        while lineStart > text.startIndex, text[text.index(before: lineStart)] != "\n" {
+            lineStart = text.index(before: lineStart)
+        }
+        var lineEnd = state.endIndex
+        while lineEnd < text.endIndex, text[lineEnd] != "\n" {
+            lineEnd = text.index(after: lineEnd)
+        }
+        let before = text[lineStart..<state.startIndex]
+        let after = text[state.endIndex..<lineEnd]
+        return LinePreview(
+            before: before.count > keep ? "…" + before.suffix(keep) : String(before),
+            selected: String(text[state.startIndex..<state.endIndex]),
+            after: after.count > keepAfter ? after.prefix(keepAfter) + "…" : String(after))
     }
 }
 
@@ -381,6 +423,17 @@ public struct KeysPanelView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .frame(width: Self.rowWidth, alignment: .leading)
+            // The caret's line, as the system keyboard shows the text
+            // it is typing into, so several changes can be made in a
+            // row without looking back at the card.
+            Text(line)
+                .font(.callout)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(width: Self.rowWidth - 16, alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
             ForEach(Array(PanelKey.rows.enumerated()), id: \.offset) { row, keys in
                 HStack(spacing: Self.gap) {
                     ForEach(keys, id: \.self) { key in
@@ -411,6 +464,29 @@ public struct KeysPanelView: View {
                 Task { await model.releaseDraft(held) }
             }
         }
+    }
+
+    /// The caret's line with the caret drawn in, or the selection
+    /// marked, in the panel's text strip.
+    private var line: AttributedString {
+        guard let ref, let field = model.fields[ref], !field.text.isEmpty else {
+            var empty = AttributedString("(empty)")
+            empty.foregroundColor = .secondary
+            return empty
+        }
+        let preview = KeyEdit.preview(field.state)
+        var text = AttributedString(preview.before)
+        if preview.selected.isEmpty {
+            var caret = AttributedString("|")
+            caret.foregroundColor = Color(red: 1.0, green: 0.78, blue: 0.43)
+            text += caret
+        } else {
+            var selected = AttributedString(preview.selected)
+            selected.backgroundColor = Color(red: 1.0, green: 0.78, blue: 0.43).opacity(0.4)
+            text += selected
+        }
+        text += AttributedString(preview.after)
+        return text
     }
 
     private var caption: String {
