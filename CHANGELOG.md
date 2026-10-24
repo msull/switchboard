@@ -8,6 +8,8 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-24
+
 ### Added
 
 - The headset has a keys panel: a small movable window placed where the virtual keyboard goes, showing the caret's line of the prompt, with a microphone, a peek that keeps the whole prompt open above the panel, the AI pass, punctuation, a line break, a paragraph break that closes the sentence, delete and delete word, caret moves and the host's undo and redo, pressed by touch, that edits the prompt of the session being worked on after dictation.
