@@ -11870,6 +11870,64 @@ mod remote {
         assert!(e.is_empty(), "read-only: {e:?}");
     }
 
+    /// The invite is the page's URL with the code, the key and the id
+    /// in the fragment, which no request carries; a Mac-only port names
+    /// the loopback whatever the network address.
+    #[test]
+    fn the_invite_is_a_url_whose_fragment_carries_the_code() {
+        use crate::core::remote::invite_url;
+        use std::net::IpAddr;
+        let mut identity = identity();
+        let window = crate::core::PairingWindow {
+            until: Duration::ZERO,
+            code: "ABCD2345".into(),
+            scope: Scope::Read,
+            failures: 0,
+        };
+        let lan: IpAddr = "192.168.1.9".parse().unwrap();
+        identity.listen.lan = true;
+        let url = invite_url(&identity, &window, Some(lan), 43187);
+        assert_eq!(
+            url,
+            format!(
+                "https://192.168.1.9:43187/#code=ABCD2345&key={}&id={}",
+                identity.spki_sha256, identity.server_id
+            )
+        );
+        assert!(!url.contains('?'), "nothing in the query");
+        let v6: IpAddr = "fe80::1".parse().unwrap();
+        assert!(invite_url(&identity, &window, Some(v6), 1).starts_with("https://[fe80::1]:1/#"));
+        assert!(invite_url(&identity, &window, None, 1).starts_with("https://127.0.0.1:1/#"));
+        identity.listen.lan = false;
+        assert!(
+            invite_url(&identity, &window, Some(lan), 43187)
+                .starts_with("https://127.0.0.1:43187/#code=ABCD2345&"),
+            "a Mac-only port"
+        );
+    }
+
+    /// The dialog's address line and the QR's host come from one rule:
+    /// the network address only while the port listens on the network.
+    #[test]
+    fn the_invite_address_is_the_network_address_only_while_the_port_listens_on_it() {
+        use crate::core::remote::invite_address;
+        use std::net::{IpAddr, SocketAddr};
+        let mut identity = identity();
+        let lan: IpAddr = "192.168.1.9".parse().unwrap();
+        identity.listen.lan = true;
+        assert_eq!(
+            invite_address(&identity, Some(lan), 43187),
+            Some(SocketAddr::new(lan, 43187))
+        );
+        assert_eq!(invite_address(&identity, None, 43187), None, "no network");
+        identity.listen.lan = false;
+        assert_eq!(
+            invite_address(&identity, Some(lan), 43187),
+            None,
+            "Mac only"
+        );
+    }
+
     #[test]
     fn the_pairing_window_opens_with_its_code_closes_on_time_and_after_three_failures() {
         let mut core = loaded_core();

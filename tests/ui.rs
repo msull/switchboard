@@ -7483,13 +7483,20 @@ fn remote_devices_dialog_opens_pairing_and_revokes_a_device() {
             _ => None,
         })
         .expect("the invite went to the clipboard");
-    let invite: serde_json::Value = serde_json::from_str(&invite).unwrap();
-    assert_eq!(invite["code"], code);
-    assert_eq!(
-        invite["spki_sha256"],
-        harness.state().core().identity().unwrap().spki_sha256
+    // The invite is the page's URL, the code and key in its fragment;
+    // the port is Mac-only here, so it names the loopback and says so.
+    let identity = harness.state().core().identity().unwrap().clone();
+    assert!(invite.starts_with("https://127.0.0.1:"), "{invite}");
+    assert!(
+        invite.ends_with(&format!(
+            "/#code={code}&key={}&id={}",
+            identity.spki_sha256, identity.server_id
+        )),
+        "{invite}"
     );
-    assert!(invite["addresses"].is_array());
+    harness.get_by_label(
+        "The port answers this Mac only; allow devices on the local network to pair a phone",
+    );
     harness.run_steps(2);
     click(&mut harness, "Stop pairing");
     assert!(actions(&harness).contains(&AppAction::ClosePairing));

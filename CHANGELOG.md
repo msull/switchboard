@@ -11,6 +11,7 @@ and the versions follow [Semantic Versioning](https://semver.org).
 ### Added
 
 - The headset has a keys panel: a small movable window placed where the virtual keyboard goes, showing the caret's line of the prompt, with a microphone, a peek that keeps the whole prompt open above the panel, the AI pass, punctuation, a line break, a paragraph break that closes the sentence, delete and delete word, caret moves and the host's undo and redo, pressed by touch, that edits the prompt of the session being worked on after dictation.
+- The remote port serves a web page: pair a phone's browser from the pairing window's QR, see the waiting sessions, read the last response or screen and send a reply.
 
 ## [0.4.1] - 2026-10-21
 

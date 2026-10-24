@@ -110,8 +110,32 @@ public struct PairingInvite: Decodable, Sendable, Equatable {
         self.addresses = addresses
     }
 
-    /// The invite from the scanned or pasted text.
+    /// The invite from the scanned or pasted text: the host's page URL,
+    /// `https://<address>/#code=…&key=…&id=…`, or the JSON form an
+    /// older host shows.
     public static func parse(_ text: String) throws -> PairingInvite {
-        try Wire.decode(PairingInvite.self, from: Data(text.utf8))
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.hasPrefix("https://") else {
+            return try Wire.decode(PairingInvite.self, from: Data(text.utf8))
+        }
+        // The authority is read as text so an IPv6 address keeps the
+        // brackets `Address` expects.
+        let afterScheme = text.dropFirst("https://".count)
+        let address = String(afterScheme.prefix { $0 != "/" && $0 != "#" && $0 != "?" })
+        var fields: [String: String] = [:]
+        if let hash = text.firstIndex(of: "#") {
+            for pair in text[text.index(after: hash)...].split(separator: "&") {
+                let parts = pair.split(separator: "=", maxSplits: 1)
+                if parts.count == 2 { fields[String(parts[0])] = String(parts[1]) }
+            }
+        }
+        guard let code = fields["code"], let key = fields["key"], let id = fields["id"],
+            !code.isEmpty, !key.isEmpty, !id.isEmpty, !address.isEmpty
+        else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: [], debugDescription: "the invite URL lacks code, key or id"))
+        }
+        return PairingInvite(
+            serverID: ServerID(id), spkiSha256: key, code: code, addresses: [address])
     }
 }

@@ -25,6 +25,7 @@ pub mod store;
 pub mod tmux;
 pub mod transcript;
 pub mod updates;
+pub mod web;
 
 use std::path::{Path, PathBuf};
 

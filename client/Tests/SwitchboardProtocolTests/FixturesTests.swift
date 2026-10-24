@@ -163,6 +163,17 @@ final class FixturesTests: XCTestCase {
         XCTAssertEqual(invite.serverID.short, "17a9b8")
         XCTAssertEqual(invite.addresses, ["192.168.1.9:43187"])
     }
+
+    func testInviteParsesThePageURL() throws {
+        let url = try PairingInvite.parse(
+            "https://192.168.1.9:43187/#code=ABCD2345&key=ab&id=17A9B824-AC51-47DC-A96A-C2B9E69C85B4")
+        let json = try PairingInvite.parse(
+            #"{"server_id":"17A9B824-AC51-47DC-A96A-C2B9E69C85B4","spki_sha256":"ab","code":"ABCD2345","addresses":["192.168.1.9:43187"]}"#
+        )
+        XCTAssertEqual(url, json)
+        XCTAssertThrowsError(
+            try PairingInvite.parse("https://192.168.1.9:43187/#key=ab&id=17a9b824-ac51-47dc-a96a-c2b9e69c85b4"))
+    }
 }
 
 enum Fixtures {

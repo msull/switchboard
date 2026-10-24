@@ -8,6 +8,7 @@ use egui::{Context, RichText, Ui};
 
 use super::{DrawCtx, GAP, cards::since_text, theme};
 use crate::adapters::remote;
+use crate::core::remote::{invite_address, invite_url};
 use crate::core::{AppAction, AppCore};
 use crate::ports::remote::Scope;
 
@@ -17,7 +18,7 @@ pub struct RemoteDraft {
     pub name: String,
     pub port: String,
     pub scope: Scope,
-    /// The QR texture for the code it was made for.
+    /// The QR texture for the payload it encodes.
     qr: Option<(String, egui::TextureHandle)>,
 }
 
@@ -70,6 +71,13 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
             ui.label(
                 RichText::new(
                     "What a device reads is redacted: the values of a project's secret variables and of its granted sets are replaced by their names. A secret pasted into a prompt, or printed by a tool, that Switchboard never held is not found.",
+                )
+                .small()
+                .color(p.n600),
+            );
+            ui.label(
+                RichText::new(
+                    "A browser cannot pin this Mac's key. It warns about the certificate, and going past the warning is the trust step: do it only if the address is this Mac's, and pair a browser only on a network you trust. The code works once.",
                 )
                 .small()
                 .color(p.n600),
@@ -154,22 +162,13 @@ fn pairing(cx: &mut DrawCtx<'_>, ui: &mut Ui, draft: &mut RemoteDraft) {
     };
     if let Some(window) = cx.core.pairing().cloned() {
         let port = cx.remote_port.unwrap_or(identity.listen.port);
-        let address = remote::local_address()
-            .map(|ip| format!("{ip}:{port}"))
-            .unwrap_or_default();
-        let payload = serde_json::json!({
-            "server_id": identity.server_id,
-            "spki_sha256": identity.spki_sha256,
-            "code": window.code,
-            "addresses": if address.is_empty() { Vec::new() } else { vec![address.clone()] },
-        })
-        .to_string();
-        if draft
-            .qr
-            .as_ref()
-            .is_none_or(|(code, _)| *code != window.code)
-        {
-            draft.qr = qr_texture(ui.ctx(), &payload).map(|t| (window.code.clone(), t));
+        let local = remote::local_address();
+        let address = invite_address(&identity, local, port);
+        let payload = invite_url(&identity, &window, local, port);
+        // The payload, not the code alone: it also names the address,
+        // which changes with the network setting and the Mac's network.
+        if draft.qr.as_ref().is_none_or(|(text, _)| *text != payload) {
+            draft.qr = qr_texture(ui.ctx(), &payload).map(|t| (payload.clone(), t));
         }
         ui.horizontal(|ui| {
             if let Some((_, texture)) = &draft.qr {
@@ -185,9 +184,10 @@ fn pairing(cx: &mut DrawCtx<'_>, ui: &mut Ui, draft: &mut RemoteDraft) {
                     ui,
                     format!("Key {}", short_hash(&identity.spki_sha256)),
                 ));
-                if !address.is_empty() {
-                    ui.label(theme::meta_text(ui, format!("Address {address}")));
-                }
+                ui.label(theme::meta_text(
+                    ui,
+                    reach_text(identity.listen.lan, address),
+                ));
                 ui.label(theme::meta_text(
                     ui,
                     format!(
@@ -273,6 +273,22 @@ fn devices(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
                 ui.end_row();
             }
         });
+}
+
+/// Where the invite reaches: the address a phone opens, or why the
+/// invite names this Mac's loopback and how to change that.
+fn reach_text(lan: bool, address: Option<std::net::SocketAddr>) -> String {
+    match address {
+        Some(address) => format!("Address {address}"),
+        None if !lan => {
+            "The port answers this Mac only; allow devices on the local network to pair a phone"
+                .to_owned()
+        }
+        None => {
+            "No network address found, so the code names this Mac only; join a network to pair a phone"
+                .to_owned()
+        }
+    }
 }
 
 /// The QR code for `payload` as a texture: black modules on white with

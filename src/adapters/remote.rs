@@ -33,6 +33,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::adapters::store::JsonStore;
+use crate::adapters::web;
 use crate::ports::remote::{
     DEVICES_FILE, IDENTITY_FILE, IDENTITY_SCHEMA_VERSION, Identity, Listen, PairedDevice,
     RemoteStore,
@@ -369,6 +370,15 @@ pub struct RemoteRequest {
     /// The `Sec-WebSocket-Key` of a request that asks to upgrade to a
     /// WebSocket; the frame answers [`SUBSCRIBED`] to accept it.
     pub upgrade: Option<String>,
+    /// The `Cookie` header as sent: a browser's credential travels in
+    /// it, so it is kept out of the headers for the same reason.
+    pub cookie: Option<String>,
+    /// The `Origin` header, which a browser sends and a native client
+    /// does not.
+    pub origin: Option<String>,
+    /// The `Host` header: the address the device used to reach this
+    /// port, which a same-origin page's `Origin` must name.
+    pub host: Option<String>,
 }
 
 impl RemoteRequest {
@@ -380,16 +390,46 @@ impl RemoteRequest {
             .find(|(n, _)| n == name)
             .map(|(_, v)| v.as_str())
     }
+
+    /// The value of the cookie with exactly this name, if the request
+    /// carries one; every other cookie is ignored.
+    #[must_use]
+    pub fn cookie(&self, name: &str) -> Option<&str> {
+        self.cookie
+            .as_deref()?
+            .split(';')
+            .filter_map(|pair| pair.trim().split_once('='))
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.trim())
+            .filter(|v| !v.is_empty())
+    }
 }
 
-/// What the frame answers: a status and a JSON body, and whether the
+/// What the frame answers: a status and a JSON body, whether the
 /// request was made by a paired device, which moves the connection
-/// from the unauthenticated pool to the paired one.
+/// from the unauthenticated pool to the paired one, and any headers
+/// beyond the ones every reply carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteReply {
     pub status: u16,
     pub body: Vec<u8>,
     pub authenticated: bool,
+    /// Headers beyond the ones `respond` always writes, such as a
+    /// `Set-Cookie` for a browser that paired.
+    pub headers: Vec<(&'static str, String)>,
+}
+
+impl RemoteReply {
+    /// A reply with no extra headers, which is nearly every reply.
+    #[must_use]
+    pub fn new(status: u16, body: Vec<u8>, authenticated: bool) -> Self {
+        Self {
+            status,
+            body,
+            authenticated,
+            headers: Vec::new(),
+        }
+    }
 }
 
 /// One request off a connection, with the channel its reply goes back
@@ -492,6 +532,9 @@ fn read_request<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<RemoteR
         .filter(|u| u.eq_ignore_ascii_case("websocket"))
         .and_then(|_| header("sec-websocket-key"))
         .map(str::to_owned);
+    let cookie = header("cookie").map(str::to_owned);
+    let origin = header("origin").map(str::to_owned);
+    let host = header("host").map(str::to_owned);
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let query = query
         .split('&')
@@ -510,6 +553,9 @@ fn read_request<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<RemoteR
         body,
         bearer,
         upgrade,
+        cookie,
+        origin,
+        host,
     }))
 }
 
@@ -525,9 +571,46 @@ fn respond_upgrade<W: Write>(w: &mut W, key: &str) -> io::Result<()> {
     w.flush()
 }
 
-/// Write one response. Head and body in one write, so a reply is one
-/// TLS record and one segment.
-fn respond<W: Write>(w: &mut W, status: u16, body: &[u8]) -> io::Result<()> {
+/// Write one JSON response.
+fn respond<W: Write>(
+    w: &mut W,
+    status: u16,
+    body: &[u8],
+    headers: &[(&'static str, String)],
+) -> io::Result<()> {
+    // No client reads `Cache-Control` or `nosniff`; they are there so a
+    // browser neither keeps a reply nor reads it as anything but JSON.
+    let mut lines = String::from("Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n");
+    for (name, value) in headers {
+        let _ = write!(lines, "{name}: {value}\r\n");
+    }
+    lines.push_str("Connection: keep-alive\r\n");
+    write_reply(w, status, "application/json", body, &lines)
+}
+
+/// Write one of the page's files with the headers that hold it to
+/// itself, and close: a browser's page load must not keep a stranger's
+/// slot for the idle timeout.
+fn respond_page<W: Write>(w: &mut W, page: &web::Page) -> io::Result<()> {
+    let mut lines = String::new();
+    for (name, value) in web::PAGE_HEADERS {
+        let _ = write!(lines, "{name}: {value}\r\n");
+    }
+    lines.push_str("Connection: close\r\n");
+    write_reply(w, 200, page.content_type, page.body.as_bytes(), &lines)
+}
+
+/// Write one response: the status line, `Content-Type`,
+/// `Content-Length`, the header lines given (each ending in CRLF), and
+/// the body. Head and body in one write, so a reply is one TLS record
+/// and one segment.
+fn write_reply<W: Write>(
+    w: &mut W,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    headers: &str,
+) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -542,7 +625,7 @@ fn respond<W: Write>(w: &mut W, status: u16, body: &[u8]) -> io::Result<()> {
         _ => "Error",
     };
     let mut out = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{headers}\r\n",
         body.len()
     )
     .into_bytes();
@@ -557,6 +640,11 @@ fn error_body(code: &str, message: &str) -> Vec<u8> {
     serde_json::json!({ "error": { "code": code, "message": message } })
         .to_string()
         .into_bytes()
+}
+
+/// The error body for a request over its window's limit.
+fn rate_limited() -> Vec<u8> {
+    error_body("rate_limited", "too many requests; try again in a minute")
 }
 
 // --- the listener
@@ -582,6 +670,8 @@ const INBOX: usize = 64;
 /// `/pair` and `/info` per minute per listener, answered 429 past it.
 const PAIR_PER_MINUTE: usize = 6;
 const INFO_PER_MINUTE: usize = 60;
+/// The page's files per minute per listener: one load is three.
+const PAGE_PER_MINUTE: usize = 120;
 
 const PAIR_PATH: &str = "/api/v1/pair";
 const INFO_PATH: &str = "/api/v1/info";
@@ -623,17 +713,23 @@ impl RateWindow {
 struct Limits {
     pair: Mutex<RateWindow>,
     info: Mutex<RateWindow>,
+    page: Mutex<RateWindow>,
 }
 
 impl Limits {
-    /// Whether a request for `path` is over its window; a poisoned lock
-    /// counts as over, never as open.
+    /// Whether a request for `path` is over its window. Only `/pair` and
+    /// `/info` have one here; any other path is never over.
     fn limited(&self, path: &str) -> bool {
-        let window = match path {
-            PAIR_PATH => &self.pair,
-            INFO_PATH => &self.info,
-            _ => return false,
-        };
+        match path {
+            PAIR_PATH => Self::over(&self.pair),
+            INFO_PATH => Self::over(&self.info),
+            _ => false,
+        }
+    }
+
+    /// Count one event against `window`; a poisoned lock counts as
+    /// over, never as open.
+    fn over(window: &Mutex<RateWindow>) -> bool {
         !window.lock().map_or(true, |mut w| w.allow(Instant::now()))
     }
 }
@@ -683,6 +779,7 @@ impl RemotePort {
             limits: Limits {
                 pair: Mutex::new(RateWindow::new(PAIR_PER_MINUTE, Duration::from_secs(60))),
                 info: Mutex::new(RateWindow::new(INFO_PER_MINUTE, Duration::from_secs(60))),
+                page: Mutex::new(RateWindow::new(PAGE_PER_MINUTE, Duration::from_secs(60))),
             },
             next_subscriber: AtomicU64::new(1),
         });
@@ -785,12 +882,20 @@ fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::
             reader.get_ref().sock.set_read_timeout(Some(IDLE_TIMEOUT))?;
             first = false;
         }
+        // The page's files are constant bytes, answered here so a load
+        // never waits on a busy frame. A query on them is ignored.
+        if let Some(page) = web::page(&request.method, &request.path) {
+            if Limits::over(&shared.limits.page) {
+                respond(reader.get_mut(), 429, &rate_limited(), &[])?;
+                continue;
+            }
+            let stream = reader.get_mut();
+            respond_page(stream, page)?;
+            stream.conn.send_close_notify();
+            return stream.flush();
+        }
         if shared.limits.limited(&request.path) {
-            respond(
-                reader.get_mut(),
-                429,
-                &error_body("rate_limited", "too many requests; try again in a minute"),
-            )?;
+            respond(reader.get_mut(), 429, &rate_limited(), &[])?;
             continue;
         }
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
@@ -820,17 +925,18 @@ fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::
                 reader.get_mut(),
                 503,
                 &error_body("busy", "the host is busy; try again"),
+                &[],
             )?;
             continue;
         }
         (shared.wake)();
         let reply = match reply_rx.recv_timeout(ANSWER_TIMEOUT) {
             Ok(reply) => reply,
-            Err(_) => RemoteReply {
-                status: 504,
-                body: error_body("no_answer", "the app did not answer in time"),
-                authenticated: false,
-            },
+            Err(_) => RemoteReply::new(
+                504,
+                error_body("no_answer", "the app did not answer in time"),
+                false,
+            ),
         };
         if reply.authenticated && !paired.load(Ordering::SeqCst) {
             // The device moves from the unauthenticated pool to the
@@ -840,6 +946,7 @@ fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::
                     reader.get_mut(),
                     503,
                     &error_body("full", "too many paired connections"),
+                    &[],
                 )?;
                 return Ok(());
             }
@@ -861,7 +968,7 @@ fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::
             }
             return out;
         }
-        respond(reader.get_mut(), reply.status, &reply.body)?;
+        respond(reader.get_mut(), reply.status, &reply.body, &reply.headers)?;
     }
     Ok(())
 }

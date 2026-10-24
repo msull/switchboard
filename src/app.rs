@@ -1661,11 +1661,11 @@ impl SwitchboardApp {
                     let out = self.envelope_at(revision, &body);
                     let out = if out.body.len() > BODY_CAP {
                         log::warn!("remote: {} {} is over the body cap", key.kind(), key.id());
-                        RemoteReply {
-                            status: 500,
-                            body: self.error_json("too_large", "the reply is over the body cap"),
-                            authenticated: true,
-                        }
+                        RemoteReply::new(
+                            500,
+                            self.error_json("too_large", "the reply is over the body cap"),
+                            true,
+                        )
                     } else {
                         out
                     };
@@ -1676,11 +1676,11 @@ impl SwitchboardApp {
                 if let Some(reply) = reply {
                     let (status, code, reason) = error.refusal();
                     log::info!("remote: {} {} refused: {code}", key.kind(), key.id());
-                    let _ = reply.try_send(RemoteReply {
+                    let _ = reply.try_send(RemoteReply::new(
                         status,
-                        body: self.error_json(code, &reason),
-                        authenticated: true,
-                    });
+                        self.error_json(code, &reason),
+                        true,
+                    ));
                 }
             }
         }
@@ -2362,22 +2362,18 @@ impl SwitchboardApp {
                 } else {
                     (400, "failed")
                 };
-                RemoteReply {
-                    status,
-                    body: self.error_json(code, reason),
-                    authenticated: true,
-                }
+                RemoteReply::new(status, self.error_json(code, reason), true)
             }
-            (_, Ok(_)) => RemoteReply {
-                status: 500,
-                body: self.error_json("failed", "Dispatch answered with something else"),
-                authenticated: true,
-            },
-            (_, Err(e)) => RemoteReply {
-                status: 503,
-                body: self.error_json("dispatch_off", &format!("Dispatch did not answer: {e}")),
-                authenticated: true,
-            },
+            (_, Ok(_)) => RemoteReply::new(
+                500,
+                self.error_json("failed", "Dispatch answered with something else"),
+                true,
+            ),
+            (_, Err(e)) => RemoteReply::new(
+                503,
+                self.error_json("dispatch_off", &format!("Dispatch did not answer: {e}")),
+                true,
+            ),
         };
         for r in pending {
             let _ = r.reply.try_send(answer.clone());
@@ -2751,11 +2747,7 @@ impl SwitchboardApp {
             device,
             all: request.param("scope") == Some("all"),
         });
-        RemoteReply {
-            status: remote::SUBSCRIBED,
-            body: Vec::new(),
-            authenticated: true,
-        }
+        RemoteReply::new(remote::SUBSCRIBED, Vec::new(), true)
     }
 
     /// How many devices are subscribed to events.
@@ -3014,6 +3006,10 @@ impl SwitchboardApp {
     /// One HTTP request from a device, answered on the frame: `/info`
     /// and `/pair` to anyone, the allowlisted reads to a paired device,
     /// everything else refused before it is translated to the wire.
+    // The route table alone is about the lint's hundred lines, one line
+    // per short route. It reads best whole: splitting it to get under
+    // would scatter the arms that decide what a device may reach.
+    #[allow(clippy::too_many_lines)]
     fn serve_remote(
         &mut self,
         request: &RemoteRequest,
@@ -3045,6 +3041,7 @@ impl SwitchboardApp {
             ("GET", ["projects"]) => wire::Body::Projects {
                 space: request.param("space").map(str::to_owned),
             },
+            ("GET", ["me"]) => return Served::Now(self.remote_me(&device)),
             ("GET", ["spaces"]) => wire::Body::Spaces,
             ("GET", ["spaces", space, "sets"]) => wire::Body::Sets {
                 space: (*space).to_owned(),
@@ -3122,17 +3119,31 @@ impl SwitchboardApp {
         Served::Now(self.remote_reply(request, &reply, notes_cap))
     }
 
-    /// The paired device behind a request's bearer token, seen now; or
-    /// the refusal, which says nothing of the host.
+    /// The paired device behind a request's bearer token, or else its
+    /// cookie named for this host, seen now; or the refusal, which says
+    /// nothing of the host. A cookie rides any request the browser
+    /// makes to this address, so a cookie-only request that changes
+    /// something (anything but a `GET`, or an upgrade) must also come
+    /// from the page this port served: its `Origin` names the `Host` it
+    /// was sent to. A native client sends a bearer and no `Origin`.
     fn authenticate(&mut self, request: &RemoteRequest) -> Result<PairedDevice, RemoteReply> {
-        let Some(token) = &request.bearer else {
-            return Err(self.refuse(
-                request,
-                401,
-                "unauthorized",
-                "pair this device first",
-                false,
-            ));
+        let cookie_name = self
+            .core
+            .identity()
+            .map(|i| remote_cookie_name(i.server_id));
+        let cookie = cookie_name.as_deref().and_then(|name| request.cookie(name));
+        let (token, by_cookie) = match (&request.bearer, cookie) {
+            (Some(bearer), _) => (bearer.as_str(), false),
+            (None, Some(cookie)) => (cookie, true),
+            (None, None) => {
+                return Err(self.refuse(
+                    request,
+                    401,
+                    "unauthorized",
+                    "pair this device first",
+                    false,
+                ));
+            }
         };
         let Some(device) = self
             .core
@@ -3147,6 +3158,18 @@ impl SwitchboardApp {
                 false,
             ));
         };
+        if by_cookie
+            && (request.method != "GET" || request.upgrade.is_some())
+            && !same_origin(request)
+        {
+            return Err(self.refuse(
+                request,
+                403,
+                "origin",
+                "a browser's request must come from this host's page",
+                false,
+            ));
+        }
         self.dispatch_inner(AppAction::DeviceSeen(device.id));
         Ok(device)
     }
@@ -3567,11 +3590,11 @@ impl SwitchboardApp {
     /// nothing in it is trusted until the key is pinned.
     fn remote_info(&self) -> RemoteReply {
         let Some(identity) = self.core.identity() else {
-            return RemoteReply {
-                status: 503,
-                body: self.error_json("no_identity", "the host has no identity yet"),
-                authenticated: false,
-            };
+            return RemoteReply::new(
+                503,
+                self.error_json("no_identity", "the host has no identity yet"),
+                false,
+            );
         };
         let body = serde_json::json!({
             "server_id": identity.server_id,
@@ -3657,8 +3680,11 @@ impl SwitchboardApp {
         let device = self
             .core
             .new_device(name, remote::token_sha256(&token), now.wall);
-        let reply = serde_json::json!({
-            "token": token,
+        // A browser asks for its token as a cookie its script cannot
+        // read; the body then leaves the token out, so the page never
+        // holds it.
+        let cookie = field("transport") == "cookie";
+        let mut reply = serde_json::json!({
             "scope": device.scope,
             "server_id": identity.server_id,
             "device_id": device.id,
@@ -3669,7 +3695,34 @@ impl SwitchboardApp {
             device.scope.word()
         );
         self.dispatch_inner(AppAction::Paired(device));
-        self.envelope(200, &reply, false)
+        if cookie {
+            let mut out = self.envelope(200, &reply, false);
+            out.headers.push((
+                "Set-Cookie",
+                format!(
+                    "{}={token}; Max-Age={COOKIE_MAX_AGE_SECS}; Path=/; Secure; HttpOnly; SameSite=Strict",
+                    remote_cookie_name(identity.server_id)
+                ),
+            ));
+            out
+        } else {
+            reply["token"] = serde_json::Value::String(token);
+            self.envelope(200, &reply, false)
+        }
+    }
+
+    /// The device asking, as the host knows it: what a browser cannot
+    /// otherwise learn, since its credential is a cookie it cannot read.
+    fn remote_me(&self, device: &PairedDevice) -> RemoteReply {
+        let identity = self.core.identity();
+        let body = serde_json::json!({
+            "device_id": device.id,
+            "name": device.name,
+            "scope": device.scope,
+            "server_id": identity.map(|i| i.server_id),
+            "server_name": identity.map(|i| i.server_name.as_str()),
+        });
+        self.envelope(200, &body, true)
     }
 
     /// One working set with its pins, found across every space.
@@ -3720,11 +3773,7 @@ impl SwitchboardApp {
             "revision": revision,
             "body": body,
         });
-        RemoteReply {
-            status: 200,
-            body: text.to_string().into_bytes(),
-            authenticated: true,
-        }
+        RemoteReply::new(200, text.to_string().into_bytes(), true)
     }
 
     fn envelope(&self, status: u16, body: &serde_json::Value, authenticated: bool) -> RemoteReply {
@@ -3733,11 +3782,7 @@ impl SwitchboardApp {
             "revision": self.revision,
             "body": body,
         });
-        RemoteReply {
-            status,
-            body: text.to_string().into_bytes(),
-            authenticated,
-        }
+        RemoteReply::new(status, text.to_string().into_bytes(), authenticated)
     }
 
     fn error_json(&self, code: &str, message: &str) -> Vec<u8> {
@@ -3764,11 +3809,7 @@ impl SwitchboardApp {
             request.method,
             request.path
         );
-        RemoteReply {
-            status,
-            body: self.error_json(code, message),
-            authenticated,
-        }
+        RemoteReply::new(status, self.error_json(code, message), authenticated)
     }
 
     /// One request, one reply. A query reads; a command runs through the
@@ -4271,6 +4312,28 @@ const FILE_CAP: usize = 256 * 1024;
 /// The most of an evidence image the port serves, as base64 inside the
 /// body cap; a screenshot is well under it.
 const IMAGE_CAP: u64 = 700 * 1024;
+/// How long a browser keeps its pairing cookie: 400 days, the most a
+/// browser honours.
+const COOKIE_MAX_AGE_SECS: u64 = 400 * 24 * 60 * 60;
+
+/// The cookie a browser paired with this host keeps its token in.
+/// Cookies ignore ports, so two hosts on one address share a jar; the
+/// name carries the server id so neither overwrites the other's, and
+/// the id survives a key rotation. `__Host-` has the browser refuse it
+/// unless it is `Secure`, `Path=/` and bound to this host alone.
+fn remote_cookie_name(server_id: uuid::Uuid) -> String {
+    format!("__Host-sb-{server_id}")
+}
+
+/// Whether a browser's `Origin` is the page this port served: `https`
+/// and the `Host` the request was sent to. Without either header it is
+/// not.
+fn same_origin(request: &RemoteRequest) -> bool {
+    match (&request.origin, &request.host) {
+        (Some(origin), Some(host)) => origin.strip_prefix("https://") == Some(host.as_str()),
+        _ => false,
+    }
+}
 
 /// Cut every string in `value` to its cap, `notes` to `notes_cap` and
 /// the rest to `STRING_CAP`, naming each cut field in a `truncated`

@@ -3581,6 +3581,36 @@ Built so far:
   unsigned host freezes on the Keychain prompt while a device asks for
   a draft; the signed bundle never prompts. Remote access off the LAN
   is §9 of the spec, deferred.
+- **A web page on the port (2026-10-23).** The port answers `GET /`,
+  `/app.js` and `/app.css` to anyone from `web/`, built in by
+  `adapters/web.rs` and served on the connection thread with a strict
+  content security policy, `no-store`, `nosniff`, no referrer and
+  `Connection: close`, under a window of 120 a minute; nothing else
+  outside `/api/v1/` changed. The invite the QR and "Copy invite" carry
+  is the page's URL, `https://<address>:<port>/#code=…&key=…&id=…`
+  (`core::remote::invite_url`), the code in the fragment so no request
+  carries it; the address is the loopback when the port is Mac-only,
+  and the dialog says so. The Swift client's `PairingInvite.parse`
+  takes the URL as well as the JSON. The page reads `/info`, compares
+  the key and id with the fragment's, and pairs with
+  `transport: "cookie"`: the token comes back as an `HttpOnly`,
+  `Secure`, `SameSite=Strict` cookie named `__Host-sb-<server_id>`,
+  absent from the body, and the host accepts it beside the bearer. A
+  cookie-only write or upgrade must carry `Origin: https://<Host>`
+  (403 `origin`). `GET /api/v1/me` tells the page its device and
+  scope. The page lists sessions waiting first, reads a Claude Code
+  session's last response and any other's screen, replies under
+  `control` with an op kept across a retry, polls `/waiting` every
+  3 s, and treats the events socket as a hastener; a 401 is told
+  apart through `/info` (same key and id: removed on the host;
+  otherwise: identity changed). Spike 23 says what was measured.
+  Known gaps: no browser was driven, so whether Safari and Chrome keep
+  the cookie from a self-signed IP-literal host, offer a way past the
+  certificate warning (today's certificate has no subject alternative
+  names, and Chrome matches only those) and connect `wss://` are
+  untested; the trusted-certificate path and a token-in-page fallback
+  are the owner's decisions. The card's one-line excerpt is not on
+  the wire, so the page's rows have none.
 
 ## Versioning and updates (2026-10-15)
 
