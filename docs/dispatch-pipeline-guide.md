@@ -12,7 +12,11 @@ repeating it. The key-by-key reference is
 [The pipeline file](dispatch.md#the-pipeline-file).
 
 **Where the file lives.** It is `pipelines/<project>.toml` in
-Dispatch's data directory, never in a repository. A project that also
+Dispatch's data directory; Dispatch reads no other copy. A repository
+may keep the file to install from, as this one does at
+`pipelines/Switchboard.toml`, copied into the data directory on each
+Mac that runs the project (a pipeline that names a client stays in a
+private place). A project that also
 reviews other people's pull requests has a second file,
 `pipelines/<project>.pr.toml` (step 6). When a ticket is taken, it
 keeps a frozen copy of the file and runs from that copy on every pass.

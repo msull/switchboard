@@ -819,8 +819,9 @@ decision's text as a reminder, not verified.
 
 ## The pipeline file
 
-One file per project, TOML, in Dispatch's data directory (never in the
-repository). [Writing a pipeline file](dispatch-pipeline-guide.md)
+One file per project, TOML, in Dispatch's data directory (a repository
+may keep a copy to install from, as this one does at
+`pipelines/Switchboard.toml`; Dispatch reads only the data directory's). [Writing a pipeline file](dispatch-pipeline-guide.md)
 builds one up step by step, with what each key buys and costs.
 
 ```toml
