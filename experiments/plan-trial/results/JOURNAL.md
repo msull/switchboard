@@ -597,3 +597,20 @@ the step ran. Costs are list price from the runs' own reports.
   one opus fix round, and about an hour. The one thing the owner's
   devices did not show, whether the socket opens, stays in the spike
   as the Mac browser steps.
+
+## 2026-10-24: merged and released as 0.5.0
+
+- PR #229 (the keys panel) merged, then #231 rebased onto it (one
+  changelog conflict, both entries kept; cargo gate and 93 Swift tests
+  green; CI green) and merged, closing #230. Released as v0.5.0 with
+  `bump.sh minor` and `release.sh`; the live app runs the 0.5.0 bundle.
+- Follow-ups filed, none labelled `dispatch`: #232 browsers trust the
+  host's certificate; #233 a browser test of the page, and the node
+  tests saying when they did not run; #234 the page's next features;
+  #235 a review round whose prompt never reached the agent stalls
+  forever instead of failing.
+- Cleanup: the 96 stage worktrees under `~/code_repos/plan-trial`
+  removed (their branches stay in that clone, the nine implementations
+  as `stage/sb-230-implement-*`), the trial bundles removed, merged and
+  trial branches deleted from the owner's checkout. Results here are
+  untouched.
