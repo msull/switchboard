@@ -4,6 +4,7 @@
 //! compared and kept, so every transition is a plain function of its
 //! inputs.
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::SystemTime;
 
 use uuid::Uuid;
@@ -173,4 +174,37 @@ impl AppCore {
             last_seen: None,
         }
     }
+}
+
+/// The address a phone on the network reaches the port at: this Mac's
+/// `local` address, only while the port listens on the network. `None`
+/// means the invite names the loopback, which a phone cannot reach.
+#[must_use]
+pub fn invite_address(identity: &Identity, local: Option<IpAddr>, port: u16) -> Option<SocketAddr> {
+    local
+        .filter(|_| identity.listen.lan)
+        .map(|ip| SocketAddr::new(ip, port))
+}
+
+/// The pairing invite the QR code and "Copy invite" carry: the page's
+/// URL at `address`, with the code, the key to compare and the server
+/// id in the fragment. A fragment is never sent in a request, so the
+/// code reaches no server before the page has checked the key. The
+/// address is the one `invite_address` picks; without one, this Mac's
+/// loopback, which no phone can reach, so a caller showing the invite
+/// must also say when `invite_address` found nothing (the pairing
+/// dialog says the port answers this Mac only).
+#[must_use]
+pub fn invite_url(
+    identity: &Identity,
+    window: &PairingWindow,
+    local: Option<IpAddr>,
+    port: u16,
+) -> String {
+    let address = invite_address(identity, local, port)
+        .unwrap_or_else(|| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
+    format!(
+        "https://{}/#code={}&key={}&id={}",
+        address, window.code, identity.spki_sha256, identity.server_id
+    )
 }

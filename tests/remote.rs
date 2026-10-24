@@ -1437,9 +1437,14 @@ fn a_missing_key_at_start_remakes_the_identity_and_clears_the_devices() {
             });
     }
     let secrets = FakeSecrets::default();
-    let port = port_with(FakeHost::default(), secrets.clone(), store.clone());
+    let mut port = port_with(FakeHost::default(), secrets.clone(), store.clone());
     let fresh = store.state().identity.clone().unwrap();
     assert_eq!(fresh.server_id, old.server_id, "the same installation");
+    // What a browser's page compares after a 401: the id it stored
+    // with another key.
+    let (_, info) = get(&mut port, "/api/v1/info", None);
+    assert_eq!(info["body"]["server_id"], old.server_id.to_string());
+    assert_ne!(info["body"]["spki_sha256"], old.spki_sha256);
     assert_eq!(fresh.server_name, "Old");
     assert_ne!(fresh.spki_sha256, old.spki_sha256, "a new key");
     assert!(store.state().devices.is_empty());
@@ -1958,10 +1963,20 @@ fn subscribe(port: &mut Port, token: &str) -> Subscriber {
 
 /// A subscription at `path`, for its query (`?scope=all`).
 fn subscribe_at(port: &mut Port, token: &str, path: &str) -> Subscriber {
+    let bearer = vec![("Authorization".to_owned(), format!("Bearer {token}"))];
+    subscribe_with(port, bearer, path).expect("subscribed")
+}
+
+/// A subscription at `path` with these handshake headers, or why the
+/// upgrade did not give `hello`.
+fn subscribe_with(
+    port: &mut Port,
+    headers: Vec<(String, String)>,
+    path: &str,
+) -> Result<Subscriber, String> {
     let addr = port.addr;
     let url = format!("wss://localhost{path}");
     let config = Arc::clone(&port.client);
-    let token = token.to_owned();
     let (tx, frames) = std::sync::mpsc::channel();
     let (outbox, out_rx) = std::sync::mpsc::channel::<Out>();
     let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1975,9 +1990,10 @@ fn subscribe_at(port: &mut Port, token: &str, path: &str) -> Subscriber {
             s.conn.complete_io(&mut s.sock).expect("handshake");
         }
         let mut request = url.into_client_request().unwrap();
-        request
-            .headers_mut()
-            .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+        for (name, value) in headers {
+            let name = tungstenite::http::HeaderName::from_bytes(name.as_bytes()).unwrap();
+            request.headers_mut().insert(name, value.parse().unwrap());
+        }
         let (mut ws, _) = match tungstenite::client(request, s) {
             Ok(ok) => ok,
             Err(e) => {
@@ -2033,12 +2049,10 @@ fn subscribe_at(port: &mut Port, token: &str, path: &str) -> Subscriber {
         outbox,
         paused,
     };
-    let hello = next_frame(port, &subscriber, 5)
-        .expect("hello")
-        .expect("a frame");
+    let hello = next_frame(port, &subscriber, 5).ok_or("no frame")??;
     let hello: serde_json::Value = serde_json::from_str(&hello).unwrap();
     assert_eq!(hello["type"], "hello", "{hello}");
-    subscriber
+    Ok(subscriber)
 }
 
 /// The next frame within `secs`, the app serving meanwhile.
@@ -3239,6 +3253,11 @@ fn stalled_strangers_fill_their_own_pool_and_never_a_paired_clients() {
     let mut buf = [0u8; 1];
     let closed = matches!(fifth.read(&mut buf), Ok(0) | Err(_));
     assert!(closed, "the fifth stranger was closed at once");
+    // A page load is a stranger too, and gets no slot past the four.
+    assert!(
+        http_head(port.addr, &port.client, "GET", "/", &[], "").is_err(),
+        "a page request past the pool fails at accept"
+    );
 
     let (_, _, session) = seed(&mut port, "");
     let moved = resources(&events(&mut port, &sub));
@@ -3589,4 +3608,450 @@ fn a_runs_output_is_the_logs_masked_tail_and_moves_when_the_log_grows() {
         t,
     );
     assert_eq!(out["body"]["text"], "done");
+}
+
+// --- the web page
+
+/// A reply's status, its headers with lowercased names, and its body.
+type Answer = (u16, Vec<(String, String)>, String);
+
+/// One request over a fresh pinned connection with extra header lines:
+/// the status, the reply's headers with lowercased names, and the body.
+fn http_head(
+    addr: SocketAddr,
+    config: &Arc<ClientConfig>,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> std::io::Result<Answer> {
+    let tcp = TcpStream::connect(addr)?;
+    tcp.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let conn = ClientConnection::new(
+        Arc::clone(config),
+        ServerName::try_from("localhost").unwrap(),
+    )
+    .map_err(std::io::Error::other)?;
+    let mut s = StreamOwned::new(conn, tcp);
+    while s.conn.is_handshaking() {
+        s.conn.complete_io(&mut s.sock)?;
+    }
+    let mut extra = String::new();
+    for (n, v) in headers {
+        for part in [n, ": ", v, "\r\n"] {
+            extra.push_str(part);
+        }
+    }
+    write!(
+        s,
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{extra}Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    )?;
+    s.flush()?;
+    let mut reader = BufReader::new(s);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let status: u16 = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, line.clone()))?;
+    let mut head = Vec::new();
+    loop {
+        let mut h = String::new();
+        reader.read_line(&mut h)?;
+        let h = h.trim_end();
+        if h.is_empty() {
+            break;
+        }
+        if let Some((n, v)) = h.split_once(':') {
+            head.push((n.trim().to_ascii_lowercase(), v.trim().to_owned()));
+        }
+    }
+    let length = header(&head, "content-length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut out = vec![0; length];
+    reader.read_exact(&mut out)?;
+    Ok((status, head, String::from_utf8_lossy(&out).into_owned()))
+}
+
+/// `http_head` from a client thread, served by the app on this thread.
+fn call_head(
+    port: &mut Port,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> (u16, Vec<(String, String)>, String) {
+    let addr = port.addr;
+    let config = Arc::clone(&port.client);
+    let headers: Vec<(String, String)> = headers
+        .iter()
+        .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
+        .collect();
+    let (method, path, body) = (method.to_owned(), path.to_owned(), body.to_owned());
+    let client = std::thread::spawn(move || {
+        let headers: Vec<(&str, &str)> = headers
+            .iter()
+            .map(|(n, v)| (n.as_str(), v.as_str()))
+            .collect();
+        http_head(addr, &config, &method, &path, &headers, &body)
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !client.is_finished() {
+        assert!(std::time::Instant::now() < deadline, "no reply");
+        port.app.serve_pending();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    client.join().unwrap().expect("http")
+}
+
+fn header<'a>(head: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    head.iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, v)| v.as_str())
+}
+
+fn json(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("{e}: {text}"))
+}
+
+/// Open the pairing window with `code` and pair as a browser does,
+/// asking for the cookie: the `Set-Cookie` value and the reply body.
+fn pair_cookie(port: &mut Port, code: &str, scope: Scope) -> (String, serde_json::Value) {
+    port.app.dispatch(AppAction::OpenPairing {
+        code: code.into(),
+        scope,
+    });
+    let spki = port
+        .remote
+        .state()
+        .identity
+        .as_ref()
+        .unwrap()
+        .spki_sha256
+        .clone();
+    let body = serde_json::json!({
+        "code": code,
+        "device_name": "Safari on iPhone",
+        "spki_sha256": spki,
+        "transport": "cookie",
+    });
+    let (status, head, text) = call_head(port, "POST", "/api/v1/pair", &[], &body.to_string());
+    assert_eq!(status, 200, "{text}");
+    let cookie = header(&head, "set-cookie")
+        .expect("a cookie was set")
+        .to_owned();
+    (cookie, json(&text))
+}
+
+/// `name=value` from a `Set-Cookie` value, as a browser sends it back.
+fn cookie_pair(set_cookie: &str) -> String {
+    set_cookie.split(';').next().unwrap().trim().to_owned()
+}
+
+const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/// The page's three files are answered to anyone, with the headers
+/// that hold them to themselves, and the connection closes after each;
+/// anything else outside the API is the JSON 404 as before, and a
+/// query on a page path is never echoed.
+#[test]
+fn the_page_is_served_to_anyone_with_its_headers() {
+    let mut port = port();
+    for (path, kind) in [
+        ("/", "text/html"),
+        ("/app.js", "text/javascript"),
+        ("/app.css", "text/css"),
+    ] {
+        let (status, head, body) = call_head(&mut port, "GET", path, &[], "");
+        assert_eq!(status, 200, "{path}");
+        assert!(
+            header(&head, "content-type").is_some_and(|v| v.starts_with(kind)),
+            "{path}: {head:?}"
+        );
+        assert_eq!(header(&head, "content-security-policy"), Some(CSP));
+        assert_eq!(header(&head, "cache-control"), Some("no-store"));
+        assert_eq!(header(&head, "x-content-type-options"), Some("nosniff"));
+        assert_eq!(header(&head, "referrer-policy"), Some("no-referrer"));
+        assert_eq!(header(&head, "connection"), Some("close"));
+        let page = switchboard::adapters::web::page("GET", path).unwrap();
+        assert_eq!(body, page.body);
+    }
+    let (status, _, body) = call_head(&mut port, "GET", "/?code=QUERY2345", &[], "");
+    assert_eq!(status, 200);
+    assert!(!body.contains("QUERY2345"), "a query is not echoed");
+
+    for (method, path) in [("GET", "/favicon.ico"), ("POST", "/"), ("GET", "/api")] {
+        let (status, head, body) = call_head(&mut port, method, path, &[], "");
+        assert_eq!(status, 404, "{method} {path}");
+        assert_eq!(code(&json(&body)), "not_found");
+        assert_eq!(header(&head, "content-type"), Some("application/json"));
+    }
+    // Every JSON reply tells a browser neither to keep it nor to read
+    // it as anything else.
+    let (_, head, _) = call_head(&mut port, "GET", "/api/v1/info", &[], "");
+    assert_eq!(header(&head, "cache-control"), Some("no-store"));
+    assert_eq!(header(&head, "x-content-type-options"), Some("nosniff"));
+    assert_eq!(header(&head, "connection"), Some("keep-alive"));
+}
+
+/// Every route in the page's table is one the host serves: for a
+/// paired device none answers `not_found`. And no `/api/v1/` string in
+/// the script is outside the table, so the check covers them all.
+#[test]
+fn the_page_calls_only_routes_the_host_serves() {
+    let mut port = port();
+    let (_, project, session) = seed(&mut port, "");
+    let token = pair(&mut port, "ABCD2345", Scope::Control, "Pad");
+    let script = include_str!("../web/app.js");
+    let mut routes = Vec::new();
+    for method in ["GET", "POST"] {
+        let quoted = format!("'{method} /api/v1/");
+        for (at, _) in script.match_indices(&quoted) {
+            let entry = &script[at + 1..];
+            let entry = &entry[..entry.find('\'').unwrap()];
+            let (_, path) = entry.split_once(' ').unwrap();
+            routes.push((method.to_owned(), path.to_owned()));
+        }
+    }
+    assert_eq!(
+        routes.len(),
+        script.matches("/api/v1/").count(),
+        "every API path in app.js is in its table"
+    );
+    assert!(routes.len() >= 10, "{routes:?}");
+    for (method, path) in routes {
+        let id = if path.starts_with("/api/v1/projects/") {
+            &project
+        } else {
+            &session
+        };
+        let path = path.replace("{id}", id);
+        let (status, reply) = call(&mut port, &method, &path, Some(&token), "{}");
+        assert_ne!(
+            code(&reply),
+            "not_found",
+            "{method} {path}: {status} {reply}"
+        );
+    }
+}
+
+/// A browser pairs as the command line does, `/info` then `/pair`, but
+/// asks for a cookie: it gets one named for the host that its script
+/// cannot read, and a body with no token. The cookie alone reads `/me`.
+/// A native pairing is as it was.
+#[test]
+fn a_browser_pairs_into_a_cookie_named_for_the_host() {
+    let mut port = port();
+    let (status, info) = get(&mut port, "/api/v1/info", None);
+    assert_eq!(status, 200);
+    let (set_cookie, reply) = pair_cookie(&mut port, "ABCD2345", Scope::Read);
+    let server_id = reply["body"]["server_id"].as_str().unwrap().to_owned();
+    assert_eq!(info["body"]["server_id"], server_id);
+    assert!(reply["body"].get("token").is_none(), "{reply}");
+    assert_eq!(reply["body"]["scope"], "read");
+    let attributes: Vec<&str> = set_cookie.split(';').map(str::trim).collect();
+    assert!(attributes[0].starts_with(&format!("__Host-sb-{server_id}=")));
+    for attribute in ["HttpOnly", "Secure", "SameSite=Strict", "Path=/"] {
+        assert!(attributes.contains(&attribute), "{set_cookie}");
+    }
+    assert!(!set_cookie.contains("Domain"), "{set_cookie}");
+    assert_eq!(port.app.core().devices()[0].name, "Safari on iPhone");
+
+    let cookie = cookie_pair(&set_cookie);
+    let (status, _, text) = call_head(&mut port, "GET", "/api/v1/me", &[("Cookie", &cookie)], "");
+    assert_eq!(status, 200, "{text}");
+    let me = json(&text);
+    assert_eq!(me["body"]["device_id"], reply["body"]["device_id"]);
+    assert_eq!(me["body"]["name"], "Safari on iPhone");
+    assert_eq!(me["body"]["scope"], "read");
+    assert_eq!(me["body"]["server_id"], server_id);
+    assert_eq!(me["body"]["server_name"], info["body"]["server_name"]);
+    // Among other cookies, it is still found by its exact name.
+    let (status, _, _) = call_head(
+        &mut port,
+        "GET",
+        "/api/v1/waiting",
+        &[("Cookie", &format!("theme=dark; {cookie}; other=1"))],
+        "",
+    );
+    assert_eq!(status, 200);
+
+    // A native client's pairing is unchanged: the token in the body.
+    port.app.dispatch(AppAction::OpenPairing {
+        code: "WXYZ6789".into(),
+        scope: Scope::Read,
+    });
+    let spki = info["body"]["spki_sha256"].as_str().unwrap();
+    let body = serde_json::json!({ "code": "WXYZ6789", "device_name": "Pad", "spki_sha256": spki });
+    let (status, head, text) = call_head(&mut port, "POST", "/api/v1/pair", &[], &body.to_string());
+    assert_eq!(status, 200);
+    assert!(header(&head, "set-cookie").is_none());
+    assert_eq!(
+        json(&text)["body"]["token"].as_str().map(str::len),
+        Some(43)
+    );
+}
+
+/// Two hosts on one address share a browser's cookie jar, since
+/// cookies ignore ports. Each names its cookie for itself, reads only
+/// its own, and a request carrying both is each host's own device; a
+/// cookie under the bare prefix authenticates nothing.
+#[test]
+fn two_hosts_on_one_address_each_read_only_their_own_cookie() {
+    let mut a = port();
+    let mut b = port();
+    let (set_a, reply_a) = pair_cookie(&mut a, "ABCD2345", Scope::Read);
+    let (set_b, reply_b) = pair_cookie(&mut b, "ABCD2345", Scope::Read);
+    let (cookie_a, cookie_b) = (cookie_pair(&set_a), cookie_pair(&set_b));
+    let name = |c: &str| c.split('=').next().unwrap().to_owned();
+    assert_ne!(name(&cookie_a), name(&cookie_b));
+    let both = format!("{cookie_a}; {cookie_b}");
+    for (port, reply) in [(&mut a, &reply_a), (&mut b, &reply_b)] {
+        let (status, _, text) = call_head(port, "GET", "/api/v1/me", &[("Cookie", &both)], "");
+        assert_eq!(status, 200, "{text}");
+        assert_eq!(json(&text)["body"]["device_id"], reply["body"]["device_id"]);
+    }
+    let (status, _, text) = call_head(&mut a, "GET", "/api/v1/me", &[("Cookie", &cookie_b)], "");
+    assert_eq!((status, code(&json(&text))), (401, "unauthorized"));
+    let token_a = cookie_a.split_once('=').unwrap().1;
+    let bare = format!("__Host-sb={token_a}");
+    let (status, _, _) = call_head(&mut a, "GET", "/api/v1/me", &[("Cookie", &bare)], "");
+    assert_eq!(status, 401, "only the host's own name is read");
+}
+
+/// A cookie rides every request a browser makes to the address, so a
+/// cookie-only request that changes something must come from the page
+/// this port served; a bearer request needs no `Origin`.
+#[test]
+fn a_cookie_write_or_upgrade_needs_the_pages_origin() {
+    let mut port = port();
+    let (_, _, session) = seed(&mut port, "");
+    let (set_cookie, _) = pair_cookie(&mut port, "ABCD2345", Scope::Control);
+    let cookie = cookie_pair(&set_cookie);
+    let path = format!("/api/v1/sessions/{session}/send");
+    let body = r#"{"op":"web-1","text":"hello"}"#;
+    for origin in [None, Some("https://evil.example"), Some("http://localhost")] {
+        let mut headers = vec![("Cookie", cookie.as_str())];
+        if let Some(origin) = origin {
+            headers.push(("Origin", origin));
+        }
+        let (status, _, text) = call_head(&mut port, "POST", &path, &headers, body);
+        assert_eq!((status, code(&json(&text))), (403, "origin"), "{origin:?}");
+    }
+    let headers = [("Cookie", cookie.as_str()), ("Origin", "https://localhost")];
+    let (status, _, text) = call_head(&mut port, "POST", &path, &headers, body);
+    assert_ne!(code(&json(&text)), "origin", "{status} {text}");
+    assert_ne!(status, 401);
+    // A read by cookie needs none.
+    let (status, _, _) = call_head(
+        &mut port,
+        "GET",
+        "/api/v1/waiting",
+        &[("Cookie", &cookie)],
+        "",
+    );
+    assert_eq!(status, 200);
+
+    let token = pair(&mut port, "WXYZ6789", Scope::Control, "Pad");
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &path,
+        Some(&token),
+        r#"{"op":"native-1","text":"hi"}"#,
+    );
+    assert_ne!(code(&reply), "origin", "{status} {reply}");
+
+    let with = |origin: &str| {
+        vec![
+            ("Cookie".to_owned(), cookie.clone()),
+            ("Origin".to_owned(), origin.to_owned()),
+        ]
+    };
+    assert!(
+        subscribe_with(&mut port, with("https://evil.example"), "/api/v1/events").is_err(),
+        "a foreign page's upgrade is refused"
+    );
+    assert!(
+        subscribe_with(&mut port, with("https://localhost"), "/api/v1/events").is_ok(),
+        "the page's own upgrade gets hello"
+    );
+}
+
+/// `/me` says the device's scope as the dialog sets it; after a revoke
+/// the cookie is a plain 401 while `/info` still names the same host
+/// and key, which is how the page tells "removed" from "changed".
+#[test]
+fn me_follows_the_dialog_and_a_revoked_cookie_leaves_info_unchanged() {
+    let mut port = port();
+    let (_, before) = get(&mut port, "/api/v1/info", None);
+    let (set_cookie, _) = pair_cookie(&mut port, "ABCD2345", Scope::Read);
+    let cookie = cookie_pair(&set_cookie);
+    let me = |port: &mut Port| {
+        let (status, _, text) = call_head(port, "GET", "/api/v1/me", &[("Cookie", &cookie)], "");
+        (status, json(&text))
+    };
+    assert_eq!(me(&mut port).1["body"]["scope"], "read");
+    let id = port.app.core().devices()[0].id;
+    port.app.dispatch(AppAction::SetDeviceScope {
+        device: id,
+        scope: Scope::Control,
+    });
+    assert_eq!(me(&mut port).1["body"]["scope"], "control");
+    port.app.dispatch(AppAction::RevokeDevice(id));
+    let (status, reply) = me(&mut port);
+    assert_eq!((status, code(&reply)), (401, "unauthorized"));
+    let (_, after) = get(&mut port, "/api/v1/info", None);
+    assert_eq!(after["body"]["server_id"], before["body"]["server_id"]);
+    assert_eq!(after["body"]["spki_sha256"], before["body"]["spki_sha256"]);
+}
+
+/// A page load closes its connection, so it frees its stranger's slot
+/// at once rather than after the idle timeout: four loads whose
+/// clients keep their sockets still leave room for a fifth.
+#[test]
+fn a_page_load_frees_its_slot_at_once() {
+    let port = port();
+    let mut held = Vec::new();
+    for _ in 0..MAX_UNAUTHENTICATED {
+        let tcp = TcpStream::connect(port.addr).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let conn = ClientConnection::new(
+            Arc::clone(&port.client),
+            ServerName::try_from("localhost").unwrap(),
+        )
+        .unwrap();
+        let mut s = StreamOwned::new(conn, tcp);
+        write!(s, "GET /app.css HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        s.flush().unwrap();
+        let mut all = Vec::new();
+        s.read_to_end(&mut all)
+            .expect("the host closed after the page");
+        assert!(String::from_utf8_lossy(&all).starts_with("HTTP/1.1 200"));
+        held.push(s);
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    let (status, _, _) = http_head(port.addr, &port.client, "GET", "/", &[], "").unwrap();
+    assert_eq!(status, 200, "the fifth load found a slot");
+}
+
+/// The page has a window of its own: the 121st file in a minute is
+/// 429, and `/info` and `/pair` keep their own windows.
+#[test]
+fn page_requests_have_their_own_rate_window() {
+    let mut port = port();
+    for i in 0..120 {
+        let (status, _, _) =
+            http_head(port.addr, &port.client, "GET", "/app.css", &[], "").unwrap();
+        assert_eq!(status, 200, "request {i}");
+    }
+    let (status, _, body) = http_head(port.addr, &port.client, "GET", "/", &[], "").unwrap();
+    assert_eq!((status, code(&json(&body))), (429, "rate_limited"));
+    let (status, _) = get(&mut port, "/api/v1/info", None);
+    assert_eq!(status, 200);
+    let (status, reply) = call(&mut port, "POST", "/api/v1/pair", None, "{}");
+    assert_eq!((status, code(&reply)), (403, "pairing_closed"));
 }

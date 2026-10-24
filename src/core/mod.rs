@@ -12,7 +12,7 @@ pub mod file_refs;
 pub mod grid;
 pub mod model;
 pub mod reconcile;
-mod remote;
+pub mod remote;
 pub mod revision;
 mod sessions;
 pub mod tickets;

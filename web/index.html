@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Switchboard</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header id="header" hidden>
+  <h1 id="host-name">Switchboard</h1>
+  <span id="scope" class="meta"></span>
+</header>
+
+<main>
+  <section id="notice" hidden>
+    <h2 id="notice-title"></h2>
+    <p id="notice-text"></p>
+  </section>
+
+  <section id="list" hidden>
+    <p id="list-empty" class="meta" hidden>No sessions.</p>
+    <div id="projects"></div>
+  </section>
+
+  <section id="session" hidden>
+    <button id="back" type="button">Back</button>
+    <h2 id="session-name"></h2>
+    <p id="session-meta" class="meta"></p>
+    <p id="session-waiting" class="waiting" hidden></p>
+    <pre id="session-text"></pre>
+    <p id="session-refusal" class="meta" hidden></p>
+    <div id="reply" hidden>
+      <label for="reply-text">Reply</label>
+      <textarea id="reply-text" rows="4"></textarea>
+      <button id="send" type="button">Send</button>
+      <p id="reply-status" class="meta" role="status"></p>
+    </div>
+  </section>
+</main>
+</body>
+</html>

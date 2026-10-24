@@ -200,7 +200,8 @@ generates and builds, `run` boots the simulator, installs and launches,
 `shot <file>` screenshots it, `log` streams the app's log. The
 simulator shares the Mac's network, so it discovers and pairs with a
 Switchboard running here. A dev aid skips the typing: launched with
-`SWITCHBOARD_INVITE` set to an invite's JSON (the QR code's text) the
+`SWITCHBOARD_INVITE` set to an invite (the QR code's text: the page's
+URL, or an older host's JSON) the
 app pairs with it on start, which `simctl launch` passes as
 `SIMCTL_CHILD_SWITCHBOARD_INVITE`:
 
@@ -255,7 +256,7 @@ project generated without one (as for the simulator) has no team.
 
 ```sh
 switchboard-remote discover [seconds]     what advertises on this network
-switchboard-remote pair '<invite json>'   the text of the host's QR code
+switchboard-remote pair '<invite>'        the text of the host's QR code (its URL, or an older host's JSON)
 switchboard-remote pair "$(pbpaste)"      the same, after "Copy invite" in the host's dialog
 switchboard-remote pair <host:port> <code> <spki_sha256>
 switchboard-remote hosts                  the known hosts and their state
