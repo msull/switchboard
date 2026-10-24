@@ -576,3 +576,24 @@ the step ran. Costs are list price from the runs' own reports.
   of the page. Next: pick sonnet or opus lean-b to finish (rebase,
   second review round, PR), lift fable's spike onto it, and run the
   spike against Chrome and Safari.
+
+## 2026-10-24: the opus lean-b branch finished and in review as PR #231
+
+- The owner chose opus round 1 of the lean-b plan. In the main
+  checkout: branch `web-control-surface` from that worktree's branch,
+  the fixer's `squash!` folded; fable's spike 23 harness lifted onto
+  it (the program, the five steps, opus's five-connection measurement
+  and the owner's device results in one README; the index line
+  updated); a fresh sonnet correctness and style round through the
+  harness with `TREE` pointing at the checkout (two real points: a
+  polling chain duplicated on each tab switch, and the QR cached on
+  the code alone so a network toggle left a stale loopback QR); the
+  opus fixer closed both; the gate green at every step through the
+  pre-commit hook. Squashed to one commit, 5c9b64f, with the two
+  contract lists merged into one; pushed; PR #231 opened against main
+  (still at 7fe8949, so no rebase). The live app is being relaunched
+  on a bundle of that commit.
+- What the finalization cost beyond the branch: two reviews ($0.80),
+  one opus fix round, and about an hour. The one thing the owner's
+  devices did not show, whether the socket opens, stays in the spike
+  as the Mac browser steps.
