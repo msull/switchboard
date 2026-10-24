@@ -1,0 +1,32 @@
+Serve a web control surface from the remote port, paired from a URL whose fragment carries the code
+
+The host serves three embedded files (web/index.html, app.js, app.css)
+from the port it already has, before pairing, on the connection thread
+with Connection: close, under a Content-Security-Policy that admits only
+the page's own files and API, in a window of 120 a minute. The pairing
+invite is now the page's URL with the code, key hash and server id in
+the fragment, which no request carries; the page compares them with
+/info before it sends the code. A browser's token is an HttpOnly cookie
+named for the server, accepted beside the bearer header; a cookie
+write or upgrade must carry the page's own Origin. The page lists the
+sessions with the waiting ones first, shows a Claude Code session's
+last response or any other's screen, sends a reply under control with
+a kept op, polls /waiting and uses the events socket when a browser
+connects it, and reads a 401 off /info as "removed" or "identity
+changed".
+
+Spike 23 could not drive a browser in the implementing session; the
+cookie, two-server and wss: questions rest on the owner's phone, and
+the harness measured four of five parallel page requests served
+against the pool of four.
+
+Contract additions:
+- No new AppAction or Effect variant, no port method.
+- RemoteReply.headers, RemoteReply::new; RemoteRequest.{cookie, origin, host}.
+- core::remote::invite_url.
+- Wire: GET /api/v1/me; /pair request field transport; the
+  __Host-sb-<server_id> cookie accepted as a credential beside the
+  bearer header; the 403 code origin; GET /, /app.js, /app.css before
+  pairing; the invite text is a URL (the JSON still parses in the Swift
+  client).
+- No change to model.rs, control/, or any schema version.

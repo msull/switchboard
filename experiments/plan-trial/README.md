@@ -301,11 +301,12 @@ $5.30 and 21, opus about $9.20 and 27, fable about $20.60 and 38.
 
 ## The implementation test
 
-Two of the revision 5 plans were implemented four times on 2026-10-22,
-by sonnet and haiku each, reviewed and fixed through the harness
-stages below; `results/sb-230/implementations.md` has the table, the
-branches and the reading. Every branch passes the implement gate;
-none has been opened in a browser.
+Two of the revision 5 plans were implemented nine times on 2026-10-22
+to 24: both by sonnet and haiku, then the owner's choice (lean-b) by
+opus and fable and again by sonnet, opus and fable, each reviewed and
+fixed through the harness stages below; `results/sb-230/implementations.md`
+has the tables, the branches and the reading. Every branch passes the
+implement gate; the owner tried six of them on three devices.
 
 ## Testing one stage in isolation
 

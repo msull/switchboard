@@ -23,3 +23,6 @@ plans, and implementation runs on #230 (the `revise` and `implement`
 stages). Counted: every stage run and grader run written after epoch ms
 1792724823766, by file time; the same flat $0.30 for a Codex run.
 `spend.py` prints both budgets.
+
+Closed 2026-10-24 at $98.22: the opus and fable implementations and
+their fix rounds, asked for after the $50 was spent, are the overrun.

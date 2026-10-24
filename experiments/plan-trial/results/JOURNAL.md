@@ -517,3 +517,62 @@ the step ran. Costs are list price from the runs' own reports.
 - Not done: no page was opened in a browser, and no second review
   round. The owner's phone against one of the four worktrees is the
   next test, and the one the whole #230 trial has been pointing at.
+
+## 2026-10-23: the phone test
+
+- The owner's checkout took the sonnet fable-b branch as `web-control`
+  (one commit, the fixup squashed), the gate passed cold, the bundle
+  was built and the live app relaunched on it (listener pid, TERM,
+  open, two seconds each way). The page served with its headers on
+  the first request.
+- The owner paired an iPad, an iPhone and an Android tablet. On every
+  one the click-through covered the page, the cookie was stored and
+  sent back, and the page paired from the URL; a message sent from the
+  iPad's page reached this session through the control socket. The
+  Android camera offered no QR scan; the copied invite URL worked. So
+  the one unresolved fact every plan built a fallback for (the cookie
+  on a clicked-through origin) came out favourable on all three.
+- First bug from use: the reply box on a session card loses focus on
+  every poll's redraw, which makes typing nearly impossible. The
+  lean-b correctness reviewer raised exactly this point on both lean-b
+  branches and their fixers fixed it; the fable-b reviewers did not
+  see it. Also seen in the host's log: a cookie-authenticated request
+  does not update the device's `last_seen`, which the headset's bearer
+  requests do.
+- The owner wants to try all four. The other three are being built as
+  separate bundles under `~/Applications/trial-web/<arm>/` from their
+  worktrees, so a switch is a stop and an open. Within a family the
+  pairing carries over (same server identity, same cookie name);
+  across families (`switchboard_token_<id>` for fable-b,
+  `__Host-sb-<id>` for lean-b) the phone has to pair again.
+
+## 2026-10-23 and 24: the six builds on the phone; opus and fable; a second round ($98.22 of the second $50)
+
+- The owner tried the four builds on an iPad, an iPhone and an
+  Android tablet, swapped by stopping the listener's pid and opening
+  the next bundle. Every build paired and worked on every device; the
+  one bug seen was the sonnet fable-b page losing focus on each poll,
+  which haiku fable-b did not share and the lean-b reviewers had
+  caught. The owner liked the lean-b pair, settled on that plan, and
+  asked for opus and fable implementations of it, then a second round
+  of sonnet, opus and fable to test consistency. Nine implementations
+  of #230 in all; the table and the reading are in
+  `results/sb-230/implementations.md`.
+- Each model is consistent with itself: sizes within ten percent of
+  its own first run, the same tests by name, the same architecture;
+  fable builds the spike as a program both times. The reviewers find
+  the same family of page-script points every round. On the device
+  the owner found sonnet, opus and fable indistinguishable.
+- The second budget closes at $98.22: the four opus and fable
+  implementations and their fix rounds ($59 of it) were the owner's
+  explicit asks after the $50 was spent, and the sonnet and haiku work
+  came to under $20.
+- One Claude Code API outage during the opus and fable bundle builds
+  was recovered without a rerun. Disk was watched: finished worktrees'
+  caches removed before each new pair.
+- The trial's answer on implementation: the plan decides what the
+  feature does, the implementer's model decides how much is built
+  around it and what it costs, and the browser is still the only test
+  of the page. Next: pick sonnet or opus lean-b to finish (rebase,
+  second review round, PR), lift fable's spike onto it, and run the
+  spike against Chrome and Safari.

@@ -66,3 +66,58 @@ a wrapper with one caller, doc rows not updated, a lint silenced.
 - A fix round at haiku costs a tenth of one at sonnet and addressed
   every point the reviewers raised, by the fixer's own account; whether
   it addressed them well is the next review round's question, not run.
+
+## The lean-b plan at opus and fable, and a second round (2026-10-23 and 24)
+
+The owner tried all four on an iPad, an iPhone and an Android tablet,
+preferred the lean-b pair, and asked for opus and fable builds of the
+same revised plan, then a second round of sonnet, opus and fable to see
+whether each is consistent with itself. Same chain each time: sonnet
+correctness and style reviews, a fix round by the arm's own model, the
+implement gate. Every branch green.
+
+| implementer | round | implement $ / min | insertions before fix | correctness / style points | fix $ / min | final insertions | spike as a program |
+|---|---|---|---|---|---|---|---|
+| sonnet | 1 | 2.33 / 18 | 1606 | 3 / 9 | 0.88 / 12 | 1661 | no |
+| sonnet | 2 | 2.34 / 14 | 1704 | 4 / 8 | 0.56 / 12 | 1731 | no |
+| opus | 1 | 6.09 / 20 | 1856 | 3 / 5 | 1.09 / 7 | 1932 | no |
+| opus | 2 | 7.43 / 24 | 2145 | 3 / 8 | 1.10 / 6 | 2167 | no |
+| fable | 1 | 14.63 / 26 | 2984 | 5 / 7 | 7.11 / 14 | 3163 | yes |
+| fable | 2 | 15.63 / 34 | 3104 | 4 / 8 | 5.46 / 16 | 3249 | yes |
+
+**Consistency.** Each model repeated itself. The sizes hold their
+order and stay within ten percent of the model's own first run; the
+integration tests the three add map onto each other by name across
+rounds and across models (the pages served with their headers, the
+embedded page asking only for routes the host serves, a browser
+pairing into a host-named cookie, two hosts keeping cookies apart,
+cookie writes needing the page's origin, `/me` following the scope, a
+page load freeing its pool slot, the page's pure parts under node);
+every branch has `web.rs` as a three-row table with one lookup, the
+cookie `__Host-sb-<server_id>` and the fragment URL. Fable built the
+spike as a program both times, and nobody else did either time. The
+reviewers' correctness points are the same family every round: the
+page reporting "removed on the host" when the browser refused the
+cookie (opus r1, sonnet r2, opus r2), a session going stale under the
+poll, the reply box wiped by a refresh (fable r1 and r2), one
+host-side nit each. None was in the Rust the plan's tests covered.
+
+**On the device** the owner found no difference to speak of between
+sonnet, opus and fable on the lean-b plan, and only one bug across all
+six builds tried: the sonnet fable-b page losing focus on every poll,
+which the haiku fable-b build did not share. The plan fixed every
+behaviour that reached the phone, and all six implemented it.
+
+**Reading.** The implementer's model shows in cost and in how much
+is built around the feature, not in what the feature does: fable
+costs six times sonnet per branch and the fix round alone more than
+opus's whole branch, for a spike program and longer tests. Opus's
+branches have the most unit tests in the adapter and a GET-only page
+lookup in round 1; sonnet's are the tightest. If the question is
+which to finish, opus or sonnet; fable's spike is worth lifting onto
+whichever wins, since it is the two-minute tool that would have
+settled the trial's one open fact.
+
+Branches: `~/code_repos/plan-trial/sb-230-stage-implement-v5rev-<model>-leanb[2]`
+on `stage/sb-230-implement-v5rev-<model>-leanb[2]`; bundles of round 1
+under `~/Applications/trial-web/<model>-leanb/`.
