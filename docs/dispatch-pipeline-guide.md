@@ -613,7 +613,8 @@ it always asks, unless a supervisor's `decides` names `decisions`.
 Every `{decisions.<name>}` must name a decision some gate of the file
 or Dispatch itself asks, or the file is refused. A ticket taken before
 the stage was added gets it only through `dispatch restart <ticket>
-decisions`.
+decisions`, and a project that works in place not at all: that restart
+is ranged and refused there.
 
 **Which context each stage wants.**
 
