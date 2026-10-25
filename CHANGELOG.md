@@ -16,6 +16,7 @@ and the versions follow [Semantic Versioning](https://semver.org).
 ### Fixed
 
 - A review round whose prompt never started a turn in the reviewer now fails after three minutes, so Dispatch offers a rerun, instead of waiting forever.
+- A reply sent from a paired device, by its Send or the web page's, now answers a session's standing ask, as one typed in the app does; a tool's `session.send` still leaves it.
 
 ## [0.5.0] - 2026-10-24
 
