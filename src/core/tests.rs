@@ -84,6 +84,7 @@ fn record(project: ProjectId, kind: SessionKind, order: u32) -> SessionRecord {
         waiting_on: None,
         pending_launch: false,
         last_stop_at: None,
+        last_prompt_at: None,
         pending_at_stop: None,
         env: Vec::new(),
         env_sets: Vec::new(),
@@ -4665,11 +4666,13 @@ fn working_set_loads_and_is_pruned_and_the_view_is_restored() {
 
 mod workflow {
     use super::*;
+    use crate::core::action::Out;
     use crate::core::model::{
-        BUILTIN_WORKFLOW, HandoffMode, RunState, Verdict, WorkflowDefinition, WorkflowId,
+        Ask, AskKind, BUILTIN_WORKFLOW, HandoffMode, RunState, Verdict, WorkflowDefinition,
+        WorkflowId,
     };
     use crate::core::round_paths;
-    use crate::core::workflow::{SETTLE_PROBES, STOP_GRACE, round_status};
+    use crate::core::workflow::{LOST_PROMPT_AFTER, SETTLE_PROBES, STOP_GRACE, round_status};
     use crate::ports::round_files::{FileStamp, Probed};
 
     const PLAN: &str = "/tmp/proj/docs/plan.md";
@@ -4807,7 +4810,7 @@ mod workflow {
     #[test]
     fn the_planner_clone_has_no_sets_and_no_token() {
         let (mut core, source) = resumable_agent();
-        core.edit_session(source, &mut crate::core::action::Out::default(), |s| {
+        core.edit_session(source, &mut Out::default(), |s| {
             s.env_sets = vec!["dev".into()];
             s.token_hash = Some("h".into());
         });
@@ -5354,6 +5357,239 @@ mod workflow {
         stop(&mut core, reviewer, 110_000);
         missing(&mut core, run, past_grace(110_000));
         assert!(matches!(run_of(&core).state, RunState::Failed(_)));
+    }
+
+    /// Milliseconds after the ask at `asked_ms` when a missing prompt
+    /// fails the run.
+    fn past_lost(asked_ms: u64) -> u64 {
+        asked_ms + u64::try_from(LOST_PROMPT_AFTER.as_millis()).unwrap()
+    }
+
+    fn make_claude(core: &mut AppCore, id: RecordId) {
+        core.edit_session(id, &mut Out::default(), |s| {
+            s.kind = SessionKind::Agent(AgentKind::ClaudeCode);
+        });
+    }
+
+    /// A run in its second round, asked at 502, whose Claude Code
+    /// reviewer ended round 1's turn (`stopped`) or reported nothing.
+    fn claude_round_two(stopped: bool) -> (AppCore, WorkflowId, RecordId) {
+        let (mut core, run, _, reviewer, _) = started();
+        make_claude(&mut core, reviewer);
+        if stopped {
+            stop(&mut core, reviewer, 300);
+        }
+        settle(&mut core, run, "- item", 400);
+        let effects = settle(&mut core, run, "accepted", 500);
+        assert_eq!(sent(&effects).len(), 1);
+        let r = run_of(&core);
+        assert_eq!(r.rounds[1].feedback_asked, Some(Clock::at(502).wall));
+        (core, run, reviewer)
+    }
+
+    fn failed_unprompted(core: &AppCore, file: &str) -> bool {
+        matches!(&run_of(core).state, RunState::Failed(why)
+            if why.contains("never started a turn") && why.contains(file))
+    }
+
+    #[test]
+    fn a_claude_reviewer_that_never_starts_a_turn_fails_the_run_after_the_bound() {
+        let (mut core, run, reviewer) = claude_round_two(true);
+        assert_eq!(core.session(reviewer).unwrap().activity, Activity::Idle);
+        missing(&mut core, run, past_lost(502) - 1_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+        let effects = missing(&mut core, run, past_lost(502));
+        assert!(
+            failed_unprompted(&core, "plan.feedback-2.md"),
+            "{:?}",
+            run_of(&core).state
+        );
+        assert!(saves(&effects) > 0);
+    }
+
+    #[test]
+    fn a_claude_planner_that_never_starts_a_turn_fails_the_run() {
+        let (mut core, run, _, _, planner) = started();
+        make_claude(&mut core, planner);
+        core.dispatch(
+            AppAction::HostListed(vec![running(planner)]),
+            Clock::at(250),
+        );
+        stop(&mut core, planner, 300);
+        settle(&mut core, run, "- item", 400);
+        assert_eq!(
+            run_of(&core).rounds[0].response_asked,
+            Some(Clock::at(402).wall)
+        );
+        missing(&mut core, run, past_lost(402) - 1_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingResponse);
+        missing(&mut core, run, past_lost(402));
+        assert!(
+            failed_unprompted(&core, "plan.response-1.md"),
+            "{:?}",
+            run_of(&core).state
+        );
+    }
+
+    #[test]
+    fn a_typed_prompt_after_the_ask_keeps_the_run_waiting() {
+        let (mut core, run, reviewer) = claude_round_two(true);
+        hook(&mut core, reviewer, EventKind::PromptSubmitted, 1_000);
+        assert_eq!(
+            core.session(reviewer).unwrap().last_prompt_at,
+            Some(Clock::at(1_000).wall)
+        );
+        // Idle again, so only the prompt stamp holds the run.
+        core.edit_session(reviewer, &mut Out::default(), |s| {
+            s.activity = Activity::Idle;
+        });
+        missing(&mut core, run, past_lost(502) + 60_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+    }
+
+    #[test]
+    fn an_injected_prompt_does_not_show_the_ask_was_taken() {
+        let (mut core, run, reviewer) = claude_round_two(true);
+        hook(&mut core, reviewer, EventKind::PromptInjected, 1_000);
+        assert_eq!(core.session(reviewer).unwrap().last_prompt_at, None);
+        core.edit_session(reviewer, &mut Out::default(), |s| {
+            s.activity = Activity::Idle;
+        });
+        missing(&mut core, run, past_lost(502) + 60_000);
+        assert!(failed_unprompted(&core, "plan.feedback-2.md"));
+    }
+
+    #[test]
+    fn a_permission_dialog_holds_a_queued_ask() {
+        let (mut core, run, reviewer) = claude_round_two(true);
+        let tool = Some("Bash".into());
+        hook(
+            &mut core,
+            reviewer,
+            EventKind::PermissionRequested { tool },
+            1_000,
+        );
+        missing(&mut core, run, past_lost(502) + 60_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+    }
+
+    #[test]
+    fn a_dead_pane_is_not_blamed_for_a_lost_prompt() {
+        let (mut core, run, reviewer) = claude_round_two(true);
+        core.dispatch(AppAction::HostListed(vec![]), Clock::at(600));
+        assert!(!core.is_running(reviewer));
+        missing(&mut core, run, past_lost(502) + 60_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+    }
+
+    #[test]
+    fn a_working_card_a_codex_reviewer_or_silent_hooks_never_fail_unprompted() {
+        let (mut core, run, reviewer) = claude_round_two(true);
+        core.edit_session(reviewer, &mut Out::default(), |s| {
+            s.activity = Activity::Working;
+        });
+        missing(&mut core, run, past_lost(502) + 60_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback, "working");
+
+        let (mut core, run, _, reviewer, _) = started();
+        stop(&mut core, reviewer, 300);
+        settle(&mut core, run, "- item", 400);
+        settle(&mut core, run, "accepted", 500);
+        assert_eq!(run_of(&core).rounds.len(), 2);
+        missing(&mut core, run, past_lost(502) + 60_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback, "codex");
+
+        let (mut core, run, reviewer) = claude_round_two(false);
+        assert!(core.session(reviewer).unwrap().last_event_at.is_none());
+        missing(&mut core, run, past_lost(502) + 60_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback, "no hooks");
+    }
+
+    /// The run failed for a lost prompt, then Continue at 200 s.
+    fn continued_after_a_lost_prompt() -> (AppCore, WorkflowId, RecordId) {
+        let (mut core, run, reviewer) = claude_round_two(true);
+        missing(&mut core, run, past_lost(502));
+        assert!(failed_unprompted(&core, "plan.feedback-2.md"));
+        let effects = core.dispatch(AppAction::ContinueWorkflow(run), Clock::at(200_000));
+        let r = run_of(&core);
+        assert_eq!(r.state, RunState::AwaitingFeedback);
+        assert_eq!(r.rounds[1].feedback_asked, Some(Clock::at(200_000).wall));
+        let sent = sent(&effects);
+        assert_eq!(sent.len(), 1, "the reviewer is asked once more");
+        assert_eq!(sent[0].0, HostId(reviewer.host_name()));
+        assert!(sent[0].1.contains("plan.feedback-2.md"), "{}", sent[0].1);
+        (core, run, reviewer)
+    }
+
+    #[test]
+    fn continue_after_a_lost_prompt_re_prompts_and_the_bound_starts_again() {
+        let (mut core, run, reviewer) = continued_after_a_lost_prompt();
+        hook(&mut core, reviewer, EventKind::PromptSubmitted, 201_000);
+        missing(&mut core, run, past_lost(200_000) + 1_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+
+        let (mut core, run, _) = continued_after_a_lost_prompt();
+        missing(&mut core, run, past_lost(200_000) - 1_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+        missing(&mut core, run, past_lost(200_000));
+        assert!(failed_unprompted(&core, "plan.feedback-2.md"));
+    }
+
+    #[test]
+    fn round_one_waits_while_the_owner_has_something_to_clear() {
+        /// A fresh Claude reviewer whose `SessionStart` came, then `edit`.
+        fn fresh(edit: impl FnOnce(&mut AppCore, RecordId)) -> (AppCore, WorkflowId) {
+            let (mut core, run, _, reviewer, _) = started();
+            make_claude(&mut core, reviewer);
+            hook(&mut core, reviewer, EventKind::SessionStart, 1_000);
+            edit(&mut core, reviewer);
+            (core, run)
+        }
+        let late = past_lost(100) + 60_000;
+        let (mut core, run) = fresh(|core, id| {
+            core.dispatch(AppAction::PromptSeen { id, seen: true }, Clock::at(2_000));
+        });
+        missing(&mut core, run, late);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback, "trust");
+        let reviewer = run_of(&core).reviewer;
+        core.dispatch(
+            AppAction::PromptSeen {
+                id: reviewer,
+                seen: false,
+            },
+            Clock::at(late + 1_000),
+        );
+        missing(&mut core, run, late + 2_000);
+        assert!(
+            failed_unprompted(&core, "plan.feedback-1.md"),
+            "{:?}",
+            run_of(&core).state
+        );
+
+        let (mut core, run) = fresh(|core, id| {
+            core.edit_session(id, &mut Out::default(), |s| {
+                s.waiting_on = Some("finalize?".into());
+            });
+        });
+        missing(&mut core, run, late);
+        assert_eq!(
+            run_of(&core).state,
+            RunState::AwaitingFeedback,
+            "waiting on"
+        );
+
+        let (mut core, run) = fresh(|core, id| {
+            core.edit_session(id, &mut Out::default(), |s| {
+                s.asking = Some(Ask {
+                    message: "which?".into(),
+                    at: Clock::at(1_500).wall,
+                    kind: AskKind::default(),
+                    answer: None,
+                });
+            });
+        });
+        missing(&mut core, run, late);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback, "asking");
     }
 
     #[test]

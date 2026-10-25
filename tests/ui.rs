@@ -100,6 +100,7 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, order: u32) -> Sess
         waiting_on: None,
         pending_launch: false,
         last_stop_at: None,
+        last_prompt_at: None,
         pending_at_stop: None,
         env: Vec::new(),
         env_sets: Vec::new(),

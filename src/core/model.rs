@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 16;
+pub const SCHEMA_VERSION: u32 = 17;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1142,6 +1142,12 @@ pub struct SessionRecord {
     /// `last_event_at` moves on every event; this one only on a stop.
     #[serde(default)]
     pub last_stop_at: Option<SystemTime>,
+    /// When a prompt last began one of the agent's turns (the
+    /// `UserPromptSubmit` hook, typed; an injected notification does not
+    /// count). A review ask with no
+    /// prompt since it never reached the agent.
+    #[serde(default)]
+    pub last_prompt_at: Option<SystemTime>,
     /// What the agent's last Stop said was still in flight. Replaced on
     /// every Stop, cleared on `SessionStart`, `StopFailure` and
     /// `SessionEnd` and on a new spawn. `None` is "not reported" (an

@@ -8,6 +8,8 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+- A review round whose prompt never started a turn in the reviewer now fails after three minutes, so Dispatch offers a rerun, instead of waiting forever.
+
 ## [0.5.0] - 2026-10-24
 
 ### Added

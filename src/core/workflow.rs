@@ -29,6 +29,11 @@ pub const STALL_AFTER: Duration = Duration::from_secs(120);
 /// alone is not enough. Dispatch's `STOP_IDLE_POLLS` is the same wait
 /// for a stage agent.
 pub const STOP_GRACE: Duration = Duration::from_secs(30);
+/// How long a Claude Code agent's ask may go without a prompt starting
+/// a turn before the run fails: a dialog in the pane can swallow the
+/// prompt, and nothing else would ever end the wait. It covers launch
+/// time and the hook's 5 s timeout, not a turn.
+pub const LOST_PROMPT_AFTER: Duration = Duration::from_secs(180);
 
 /// How long a run's awaited file has looked the same.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,6 +438,7 @@ impl AppCore {
             waiting_on: None,
             pending_launch: false,
             last_stop_at: None,
+            last_prompt_at: None,
             pending_at_stop: None,
             env: Vec::new(),
             // A planner is no Dispatch stage and is granted nothing.
@@ -548,6 +554,7 @@ impl AppCore {
         let Some(found) = found else {
             self.probes.retain(|p| p.run != id);
             self.fail_if_stopped(id, path, now, out);
+            self.fail_if_unprompted(id, path, now, out);
             return;
         };
         let streak = match self.probes.iter_mut().find(|p| p.run == id) {
@@ -605,6 +612,64 @@ impl AppCore {
                 out,
             );
         }
+    }
+
+    /// The awaited file is missing: fail the run when its Claude Code
+    /// agent has started no turn since it was asked, for
+    /// [`LOST_PROMPT_AFTER`] (`prompt_missing`). Like the stop check, a
+    /// round with no asked time never fails here.
+    fn fail_if_unprompted(&mut self, id: WorkflowId, path: &Path, now: Clock, out: &mut Out) {
+        let Some(run) = self.workflow(id) else {
+            return;
+        };
+        if !run.state.waiting() {
+            return;
+        }
+        let (Some(agent), Some(asked)) = (run.awaiting(), asked_at(run)) else {
+            return;
+        };
+        let overdue = now
+            .wall
+            .duration_since(asked)
+            .is_ok_and(|waited| waited >= LOST_PROMPT_AFTER);
+        if overdue && self.prompt_missing(agent, asked) {
+            let name = self.session_name(agent);
+            let file = path.display().to_string();
+            self.fail_workflow(
+                id,
+                &format!(
+                    "{name} never started a turn on the round's prompt; the file {file} was not written"
+                ),
+                now,
+                out,
+            );
+        }
+    }
+
+    /// No prompt began a turn in the Claude Code `agent` since `asked`,
+    /// although its hooks report and its pane runs (a dead pane is the
+    /// re-prompt path's, not a lost prompt). A `Working` card may hold
+    /// the prompt queued (its hook can fire late); `started` marks a
+    /// card `SessionStart` set `Working` rather than a prompt, which is
+    /// why `Working` is not trusted there. A permission dialog
+    /// (`WaitingOnYou`) may likewise hold it queued behind the open
+    /// turn. Claude's trust question, an outside wait or the agent's
+    /// own ask are the owner's to clear first. Those marks are read
+    /// directly: the card state also reads the stall mark, which a lost
+    /// prompt itself sets.
+    fn prompt_missing(&self, agent: RecordId, asked: SystemTime) -> bool {
+        let Some(session) = self.session(agent) else {
+            return false;
+        };
+        session.kind == SessionKind::Agent(AgentKind::ClaudeCode)
+            && self.is_running(agent)
+            && session.last_event_at.is_some()
+            && session.last_prompt_at.is_none_or(|at| at <= asked)
+            && session.activity != Activity::WaitingOnYou
+            && (session.activity != Activity::Working || self.started.contains(&agent))
+            && !self.prompted.contains(&agent)
+            && session.waiting_on.is_none()
+            && session.asking.is_none()
     }
 
     /// The agent's pane runs and its last Stop listed background work or
@@ -828,8 +893,9 @@ impl AppCore {
                     }
                 };
                 let asked = round.asked(&state).unwrap_or(SystemTime::UNIX_EPOCH);
-                let reprompt =
-                    !self.is_running(agent) || self.stopped_since(agent, asked).is_some();
+                let reprompt = !self.is_running(agent)
+                    || self.stopped_since(agent, asked).is_some()
+                    || self.prompt_missing(agent, asked);
                 self.edit_run(id, now, out, |r| {
                     if reprompt && let Some(round) = r.rounds.last_mut() {
                         round.set_asked(&state, now.wall);
