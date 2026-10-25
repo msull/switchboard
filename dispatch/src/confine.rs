@@ -205,7 +205,9 @@ fn worktree_git_dir(dir: &Path) -> Option<PathBuf> {
     if !dir.is_dir() {
         return None;
     }
-    let out = std::process::Command::new("git")
+    // Named in full: this is the only caller and it is macOS-only, so a
+    // `use` at the top of the file would be unused on Linux.
+    let out = crate::child::command("git")
         .arg("-C")
         .arg(dir)
         .args(["rev-parse", "--absolute-git-dir"])

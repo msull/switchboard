@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use switchboard_control::RECORD_TOKEN_ENV;
 
+use crate::child::{child_command, command};
 use crate::history::{self, Commit, Group};
 use crate::ticket::CheckGroup;
 
@@ -364,7 +364,7 @@ pub struct GitCli {
 /// `kill` succeeds only if some process in the group could be signalled.
 /// A command, not a syscall, since the crate forbids `unsafe`.
 fn group_alive(pgid: u32) -> bool {
-    Command::new("kill")
+    command("kill")
         .args(["-0", "--", &format!("-{pgid}")])
         .stderr(std::process::Stdio::null())
         .status()
@@ -376,7 +376,7 @@ fn group_alive(pgid: u32) -> bool {
 /// the same process; `None` if there is no such process or `ps` could
 /// not say.
 fn leader_started(pid: u32) -> Option<String> {
-    let out = Command::new("ps")
+    let out = command("ps")
         .args(["-o", "lstart=", "-p", &pid.to_string()])
         .env("LC_ALL", "C")
         .env("TZ", "UTC")
@@ -476,19 +476,6 @@ impl GitCli {
     }
 }
 
-/// A child's `Command` for `program` with `env` set, without the
-/// runner's launch token unless `env` gives it back: the runner's own
-/// environment is inherited, and the token in it would let any command
-/// resolve the runner's environment sets.
-fn child_command(program: impl AsRef<std::ffi::OsStr>, env: &[(String, String)]) -> Command {
-    let mut cmd = Command::new(program);
-    cmd.env_remove(RECORD_TOKEN_ENV);
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    cmd
-}
-
 /// `argv` as it is spawned under `confine`, its header line written to
 /// `to` first; `argv` unchanged when there is no `confine`.
 fn with_header(
@@ -508,7 +495,7 @@ fn with_header(
 /// A `git` command with the caller's own `GIT_*` variables removed: run
 /// from a hook, those point at the hook's repository, not ours.
 fn git() -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = command("git");
     for (k, _) in std::env::vars_os() {
         if k.to_string_lossy().starts_with("GIT_") {
             cmd.env_remove(k);
@@ -861,7 +848,7 @@ impl Repo for GitCli {
     fn free_bytes(&self, dir: &Path) -> Result<u64> {
         // `df -k` is on every macOS and Linux; its last line is the
         // volume, and the fourth column is 1K blocks available.
-        let out = output(Command::new("df").arg("-k").arg(dir))?;
+        let out = output(command("df").arg("-k").arg(dir))?;
         let line = out.lines().last().context("df printed nothing")?;
         let avail: u64 = line
             .split_whitespace()
@@ -1111,7 +1098,7 @@ impl Repo for GitCli {
             // reaches its descendants; the leader itself is killed and
             // reaped outright so no zombie keeps its pid.
             let pgid = child.id();
-            let _ = Command::new("kill")
+            let _ = command("kill")
                 .args(["-TERM", "--", &format!("-{pgid}")])
                 .output();
             let _ = child.kill();
@@ -1159,7 +1146,7 @@ impl Repo for GitCli {
         if let Some(pgid) = self.killed.remove(key)
             && group_alive(pgid)
         {
-            let _ = Command::new("kill")
+            let _ = command("kill")
                 .args(["-KILL", "--", &format!("-{pgid}")])
                 .output();
         }
@@ -1222,7 +1209,7 @@ impl Repo for GitCli {
             );
             return Adopted::Gone;
         }
-        let _ = Command::new("kill")
+        let _ = command("kill")
             .args(["-TERM", "--", &format!("-{}", group.pgid)])
             .output();
         self.killed.insert(key.to_owned(), group.pgid);
@@ -2736,24 +2723,33 @@ pub fn branch_name(number: u64, title: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use switchboard_control::RECORD_TOKEN_ENV;
+
     use super::*;
 
     #[test]
+    fn git_children_lose_the_record_token_and_the_callers_git_variables() {
+        // `git()` removes only the `GIT_*` this process carries, and setting
+        // one here would need `unsafe`, so check whichever it has (a run
+        // from the pre-commit hook has some).
+        let carried: Vec<_> = std::env::vars_os()
+            .filter(|(k, _)| k.to_string_lossy().starts_with("GIT_"))
+            .map(|(k, _)| k)
+            .collect();
+        for cmd in [git(), git_in("/")] {
+            let envs: Vec<_> = cmd.get_envs().collect();
+            assert!(
+                envs.iter()
+                    .any(|(k, v)| *k == RECORD_TOKEN_ENV && v.is_none())
+            );
+            for k in &carried {
+                assert!(envs.iter().any(|(e, v)| e == k && v.is_none()));
+            }
+        }
+    }
+
+    #[test]
     fn a_child_never_inherits_the_record_token_unless_its_env_gives_it() {
-        // Read from the `Command`, not the process environment, which
-        // other tests share.
-        let bare = child_command("sh", &[]);
-        assert!(
-            bare.get_envs()
-                .any(|(k, v)| k == RECORD_TOKEN_ENV && v.is_none()),
-            "removed from a child without it in env"
-        );
-        let given = child_command("sh", &[(RECORD_TOKEN_ENV.into(), "t0k".into())]);
-        assert!(
-            given
-                .get_envs()
-                .any(|(k, v)| k == RECORD_TOKEN_ENV && v == Some("t0k".as_ref()))
-        );
         let dir = tempfile::tempdir().unwrap();
         let echo: Vec<String> = vec![
             "sh".into(),

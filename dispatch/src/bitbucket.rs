@@ -8,11 +8,12 @@
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::child::command;
 use crate::github::{Checks, PullRequest, PullRequests};
 
 const API_ROOT: &str = "https://api.bitbucket.org/2.0";
@@ -90,7 +91,7 @@ impl Bitbucket {
     /// GET a URL as the account; the response body.
     fn get(&self, url: &str) -> Result<Vec<u8>> {
         let (email, token) = self.credentials()?;
-        let mut child = Command::new("curl")
+        let mut child = command("curl")
             .args([
                 "-sS",
                 "--fail-with-body",

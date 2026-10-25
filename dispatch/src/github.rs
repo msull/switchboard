@@ -1,12 +1,12 @@
 //! Issues and pull requests, through the `gh` CLI. Only reads: Dispatch
 //! never comments on, labels or closes an issue, and never merges.
 
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::child::command;
 use crate::ticket::SourceSnapshot;
 
 pub trait Issues: Send {
@@ -197,7 +197,7 @@ struct CheckRow {
 
 impl PullRequests for Gh {
     fn find(&self, repo: &str, branch: &str) -> Result<Option<PullRequest>> {
-        let out = Command::new("gh")
+        let out = command("gh")
             .args([
                 "pr", "list", "--repo", repo, "--head", branch, "--state", "all",
             ])
@@ -220,7 +220,7 @@ impl PullRequests for Gh {
     }
 
     fn by_number(&self, repo: &str, number: u64) -> Result<PullRequest> {
-        let out = Command::new("gh")
+        let out = command("gh")
             .args(["pr", "view", &number.to_string(), "--repo", repo])
             .args(["--json", PR_FIELDS])
             .output()
@@ -236,7 +236,7 @@ impl PullRequests for Gh {
     }
 
     fn checks(&self, repo: &str, number: u64) -> Result<Checks> {
-        let out = Command::new("gh")
+        let out = command("gh")
             .args(["pr", "checks", &number.to_string(), "--repo", repo])
             .args(["--json", "name,bucket"])
             .output()
@@ -272,7 +272,7 @@ impl PullRequests for Gh {
     }
 
     fn commit_run(&self, repo: &str, commit: &str, step: Option<&str>) -> Result<Checks> {
-        let out = Command::new("gh")
+        let out = command("gh")
             .args([
                 "api",
                 &format!("repos/{repo}/commits/{commit}/check-runs?per_page=100"),
@@ -396,7 +396,7 @@ struct Label {
 
 impl Issues for Gh {
     fn fetch(&self, repo: &str, number: u64, now_ms: u64) -> Result<SourceSnapshot> {
-        let out = Command::new("gh")
+        let out = command("gh")
             .args(["issue", "view", &number.to_string(), "--repo", repo])
             .args(["--json", "number,title,body,url,labels"])
             .output()

@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::child::command;
 use crate::store::{DataDir, atomic_write, read_ticket};
 use crate::ticket::Attempt;
 
@@ -222,7 +223,7 @@ pub struct Checked {
 /// the crate allows no `unsafe`.
 #[must_use]
 pub fn alive(pid: u32) -> bool {
-    std::process::Command::new("ps")
+    command("ps")
         .args(["-p", &pid.to_string()])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
