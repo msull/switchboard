@@ -3229,9 +3229,7 @@ impl Runner {
         ask: Ask<'_>,
         now_ms: u64,
     ) -> Result<()> {
-        if t.decisions.iter().any(|d| {
-            d.pending() && d.stage == ask.stage && d.name == ask.name && d.attempt == ask.attempt
-        }) {
+        if pending_decision(t, ask.stage, ask.name, ask.attempt.as_ref()) {
             return Ok(());
         }
         let d = new_decision(t, ask, now_ms);
@@ -4716,8 +4714,9 @@ impl Runner {
     /// nearest earlier agent stage, `park` stops. A `confirm` gate is
     /// "you did this": its answer is `done`, and one inside its agent
     /// stage's hold run also takes `rerun` (see [`confirm_rerun`]).
-    /// The gate's own `question`, if it has one, is asked in place of
-    /// the default, rendered like a prompt for the context.
+    /// The gate's own `question`, if it has one, follows the default
+    /// after a blank line, rendered like a prompt for the context, so
+    /// it is asked about what the default shows.
     #[allow(clippy::too_many_arguments)]
     fn human_gate(
         &mut self,
@@ -4747,10 +4746,18 @@ impl Runner {
                 continue;
             };
             all_complete = false;
-            let question = match own_question {
-                Some(q) => vars_for(t, p, lane.as_deref()).render(q),
-                None => self.human_question(t, p, stage, &attempt, &cwd, lane.as_deref())?,
-            };
+            let key = (attempt.stage.clone(), attempt.n);
+            // The question is built only for a decision that is not
+            // already waiting, so a gate that waits for days does not
+            // read git or log on every pass.
+            if pending_decision(t, &stage.name, decision, Some(&key)) {
+                continue;
+            }
+            let mut question = self.human_question(t, p, stage, &attempt, &cwd, lane.as_deref());
+            if let Some(q) = own_question {
+                question.push_str("\n\n");
+                question.push_str(&vars_for(t, p, lane.as_deref()).render(q));
+            }
             let (kind, options): (DecisionKind, &[&str]) = if confirm {
                 (
                     DecisionKind::Confirmation,
@@ -4773,7 +4780,7 @@ impl Runner {
                     question,
                     options,
                     recommendation: None,
-                    attempt: Some((attempt.stage.clone(), attempt.n)),
+                    attempt: Some(key),
                 },
                 now_ms,
             )?;
@@ -4854,7 +4861,10 @@ impl Runner {
     }
 
     /// What a human gate shows: the branch and its head, what it adds
-    /// over its base, the tree to open, and the latest notes.
+    /// over its base, the tree to open, the latest notes, and what is
+    /// deployed. A gate's own question is appended by the caller. A git
+    /// read that fails leaves its line out and is logged, so the owner
+    /// is still asked.
     fn human_question(
         &self,
         t: &Ticket,
@@ -4863,13 +4873,12 @@ impl Runner {
         a: &Attempt,
         cwd: &Path,
         lane: Option<&str>,
-    ) -> Result<String> {
+    ) -> String {
         let mut q = format!("{} ({}):", stage.name, a.context);
         let lane_record = lane.and_then(|l| t.lanes.iter().find(|x| x.name == l));
         if let Some(l) = lane_record
             && p.cuts_worktrees()
         {
-            let head = self.git.head(cwd)?;
             let pr = t.source.pull_requests.iter().find(|pr| pr.lane == l.name);
             let base = match pr {
                 Some(pr) if !pr.base.is_empty() => format!("{}/{}", pr.remote, pr.base),
@@ -4878,12 +4887,17 @@ impl Runner {
                     |lane| format!("{}/{}", p.lane_remote(lane), p.lane_base(lane)),
                 ),
             };
-            let short: String = head.chars().take(8).collect();
-            let _ = write!(q, " branch {} at {short} over {base}.", l.branch);
-            let summary = self.git.summary(cwd, &base)?;
-            if !summary.trim().is_empty() {
-                q.push_str("\n\n");
-                q.push_str(&short_summary(summary.trim(), STAT_ROWS));
+            let at = |what: &str| format!("ticket {} lane {}: {what}", t.id, l.name);
+            if let Some(head) = left_out(self.git.head(cwd), &at("the branch")) {
+                let short: String = head.chars().take(8).collect();
+                let _ = write!(q, " branch {} at {short} over {base}.", l.branch);
+                let diff = at(&format!("the diff over {base}"));
+                if let Some(summary) = left_out(self.git.summary(cwd, &base), &diff)
+                    && !summary.trim().is_empty()
+                {
+                    q.push_str("\n\n");
+                    q.push_str(&short_summary(summary.trim(), STAT_ROWS));
+                }
             }
         }
         let _ = write!(q, "\n\nTree: {}", cwd.display());
@@ -4906,7 +4920,7 @@ impl Runner {
             }
         }
         q.push_str(&deployed_and_served(t, p));
-        Ok(q)
+        q
     }
 
     /// The gate's attempt completes, bound to the tree's head.
@@ -11393,6 +11407,20 @@ pub fn apply_reply(t: &mut Ticket, ps: &mut ProjectState, intent: &str, reply: &
             }
         }
     }
+}
+
+/// Whether a decision of this stage, name and attempt is waiting.
+fn pending_decision(t: &Ticket, stage: &str, name: &str, attempt: Option<&(String, u32)>) -> bool {
+    t.decisions
+        .iter()
+        .any(|d| d.pending() && d.stage == stage && d.name == name && d.attempt.as_ref() == attempt)
+}
+
+/// A read that failed becomes `None` and a warning naming what is left
+/// out of the question.
+fn left_out<T>(read: Result<T>, what: &str) -> Option<T> {
+    read.map_err(|err| log::warn!("{what} is left out of the question: {err:#}"))
+        .ok()
 }
 
 #[cfg(test)]

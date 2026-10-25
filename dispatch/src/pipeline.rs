@@ -493,9 +493,10 @@ pub enum Gate {
         decision: String,
         #[serde(default)]
         confirm: bool,
-        /// The question asked in place of the default one (the branch,
-        /// its diff, the tree and the notes), rendered as a prompt when
-        /// the gate asks.
+        /// The question asked after the default one (the branch, its
+        /// diff, the tree, the notes and what is deployed), rendered as
+        /// a prompt when the gate asks. Refused on the `lanes` gate,
+        /// which asks its own.
         #[serde(default)]
         question: Option<String>,
     },
@@ -1075,6 +1076,20 @@ impl Pipeline {
 
     /// A gate names a check Dispatch knows and one the project can answer.
     fn validate_gate(stage: &Stage) -> Result<()> {
+        // The lanes gate builds its own question from the lanes, so a
+        // `question` there would be silently ignored.
+        if let Some(Gate::Human {
+            decision,
+            question: Some(_),
+            ..
+        }) = &stage.gate
+            && decision == "lanes"
+        {
+            bail!(
+                "stage {:?}: the lanes gate asks its own question; remove question",
+                stage.name
+            );
+        }
         if let Some(Gate::External { check, checks, .. }) = &stage.gate {
             if !matches!(
                 check.as_str(),
@@ -3752,6 +3767,22 @@ without_lane = "base"
             &p.stages.last().unwrap().gate,
             Some(Gate::Human { question: None, .. })
         ));
+    }
+
+    #[test]
+    fn a_question_on_the_lanes_gate_is_refused() {
+        let gate = "gate = { kind = \"human\", decision = \"lanes\" }";
+        assert!(SWITCHBOARD.contains(gate));
+        let asked = SWITCHBOARD.replace(
+            gate,
+            "gate = { kind = \"human\", decision = \"lanes\", question = \"Which?\" }",
+        );
+        let err = Pipeline::parse(&asked).unwrap_err().to_string();
+        assert!(
+            err.contains("the lanes gate asks its own question; remove question"),
+            "{err}"
+        );
+        Pipeline::parse(SWITCHBOARD).unwrap();
     }
 
     #[test]

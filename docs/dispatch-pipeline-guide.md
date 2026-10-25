@@ -600,9 +600,12 @@ question, and an issue with no hinted label is still asked. Without
 
 **The `decisions` gate** puts the open decisions in front of you
 before anything is planned, so the plan is written to your answers
-rather than revised to them. Its `question` replaces the default
-question (the branch, its diff and the notes), which is why it names
-`{inputs.notes}` itself. Answer `proceed` with a note holding your
+rather than revised to them. Its `question` follows the default
+question (the tree, the notes with their first lines, and the branch,
+its diff and what is deployed where there are any) after a blank line,
+so it is asked about what that shows; naming `{inputs.notes}` in it
+repeats the notes path, which is harmless. A `question` on the `lanes`
+gate is refused: that gate asks its own. Answer `proceed` with a note holding your
 answers. The planner reads them as `{decisions.decisions.note}`, and
 the answer itself as `{decisions.decisions}`. A gate answered with no
 note, or not yet asked, renders both as empty text. `rerun` with a
