@@ -136,6 +136,9 @@ impl AppCore {
                 EventKind::SessionStart
                 | EventKind::StopFailed { .. }
                 | EventKind::SessionEnded { .. } => s.pending_at_stop = None,
+                // Injected prompts are notifications and wakeups, which
+                // arrive whether or not the round's ask was taken.
+                EventKind::PromptSubmitted => s.last_prompt_at = Some(event.at),
                 _ => {}
             }
             if let Some((activity, reason)) = change {

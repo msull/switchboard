@@ -12,6 +12,10 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 - Dispatch hands a human gate's answer and note to later prompts as `{decisions.<name>}` and `{decisions.<name>.note}`, empty while unanswered, and a human gate can carry its own `question` in place of the default one, so a `decisions` stage after `lanes` puts the lead's answers in the planner's first prompt.
 
+### Fixed
+
+- A review round whose prompt never started a turn in the reviewer now fails after three minutes, so Dispatch offers a rerun, instead of waiting forever.
+
 ## [0.5.0] - 2026-10-24
 
 ### Added
