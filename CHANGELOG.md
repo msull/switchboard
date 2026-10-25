@@ -8,6 +8,8 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-24
+
 ### Added
 
 - Dispatch hands a human gate's answer and note to later prompts as `{decisions.<name>}` and `{decisions.<name>.note}`, empty while unanswered, and a human gate can carry its own `question` in place of the default one, so a `decisions` stage after `lanes` puts the lead's answers in the planner's first prompt.
