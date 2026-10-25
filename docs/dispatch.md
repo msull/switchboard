@@ -1785,7 +1785,9 @@ tree still dirty when the response settles is waited on for five
 minutes from the first dirty pass while the session lives
 (`DIRTY_WAIT_MS`, measured from the round's `dirty_since_ms`, so a
 restart keeps the clock), because a commit
-whose pre-commit hook runs the test suite lands that late; dirty past
+whose pre-commit hook runs the test suite lands that late (a lane runs
+the project's `.githooks` because Dispatch sets `core.hooksPath` on
+the clone; design choice 23); dirty past
 that, the implementer is nudged in its session (up to the stage's
 `on_dirty`), and its next stop gets the wait afresh; dirty past the
 wait with the nudges spent or the last one unanswered, or with the
@@ -3141,7 +3143,7 @@ and one against the real one:
 | A decision marked a session that is no longer the ticket's newest (the `lanes` question's investigator, another lane's planner) | Answering clears every session the ledger still marks, so an agent held by the mark is given up on after the grace; a lost `waiting off` is sent again; a waiting request replaced by a later one is never sent after it (`an_answer_clears_every_mark_so_a_marked_agent_is_still_given_up_on`, `a_lost_unmark_is_sent_again_until_it_lands`, `a_replaced_waiting_request_is_never_sent_after_the_one_that_replaced_it`) |
 | A command reviewer exits 1 with nothing on stdout | A failed reviewer (`a_command_reviewers_exit_codes_are_read_as_the_protocol_says`) |
 | The tree is dirty when reviewers finish; the implementer leaves it dirty | The round's evidence is void, a `rerun` question naming the change; the fixer is nudged once past the commit wait, and a second dirty stop fails the round with `after 1 nudge` (`a_changed_tree_voids_the_round_and_a_dirty_implementer_fails_it`) |
-| The implementer's response settles while its commit's hook still runs | The round waits for the tree while the session lives, then goes on from the committed head (`a_commit_that_lands_after_the_response_settles_is_not_a_dirty_tree`) |
+| The implementer's response settles while its commit's hook still runs (the project's `.githooks`, which a lane runs through the clone's `core.hooksPath`) | The round waits for the tree while the session lives, then goes on from the committed head (`a_commit_that_lands_after_the_response_settles_is_not_a_dirty_tree`) |
 | The head moved while `review-code` was pending | The answer is stale: the ticket parks with both heads named and nothing launches (`an_answer_for_a_moved_head_is_stale_and_parks_the_ticket`) |
 | The runner lost a running command reviewer | Failed on the next pass, not started again (`a_lost_command_reviewer_is_failed_not_started_again`) |
 | The socket fails mid-pass (Switchboard quit or restarted under the runner) | Nothing is parked; the pass ends with a log line and the next one goes on; the port remakes its connection and sends the request again, which the operations log makes safe |
@@ -3298,3 +3300,19 @@ dial.
 22. **A service is started only for a lane that was cut**, on a port
     Dispatch allocated and tested, and counts as up only when its
     readiness probe answers.
+23. **A lane runs the project's own `.githooks`.** When a clone's
+    checkout has a `.githooks` directory and the clone has no
+    `core.hooksPath` of its own, Dispatch stores
+    `core.hooksPath=.githooks` in it, after the clone and never on the
+    clone's command line, so nothing from the fetched tree runs while
+    cloning. The setting is per clone, so every lane worktree reads it,
+    and relative, so each lane runs its own checked-out hooks; a PR
+    lane runs whatever `.githooks` its branch carries, which the
+    pipeline builds and tests anyway. A clone made earlier is repaired
+    the next time a ticket or lane on it goes through `prepare`. The
+    agent's and the owner's commits run the hooks, and a failing hook
+    blocks them. Dispatch's own git calls (worktree adds, checkouts,
+    rebases, ref moves, pushes) pass `-c core.hooksPath` to a missing
+    directory and run none. The supervisor's default clone gets the
+    setting; a custom `setup` is the owner's own and does not.
+    Evidence: `spikes/25-hooks-path`.

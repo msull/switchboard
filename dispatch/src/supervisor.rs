@@ -950,9 +950,10 @@ impl Runner {
         std::fs::create_dir_all(workspace)
             .with_context(|| format!("create {}", workspace.display()))?;
         let mut argvs = sup.setup.argvs();
-        if argvs.is_empty()
-            && let Some(repo) = &p.project.repo
-        {
+        // Only the default clone is known to be a clone; a custom `setup`
+        // is the owner's own and its hooks are left to them.
+        let default_repo = p.project.repo.as_ref().filter(|_| argvs.is_empty());
+        if let Some(repo) = default_repo {
             argvs.push(vec!["git".into(), "clone".into(), repo.clone(), ".".into()]);
         }
         for argv in argvs {
@@ -962,6 +963,14 @@ impl Runner {
                 }
                 bail!("supervisor setup `{}` failed: {e:#}", argv.join(" "));
             }
+        }
+        if default_repo.is_some()
+            && let Err(e) = self.git.enable_hooks(workspace)
+        {
+            if created {
+                let _ = std::fs::remove_dir_all(workspace);
+            }
+            return Err(e.context("supervisor setup: set the clone's hooks path"));
         }
         Ok(())
     }

@@ -380,6 +380,38 @@ fn assert_started_name(name: &str) {
 }
 
 #[test]
+fn only_the_default_clone_gets_the_projects_hooks_path() {
+    let mut env = Env::new();
+    env.fresh().unwrap();
+    assert_eq!(env.repo.lock().unwrap().hooks_enabled, [env.workspace()]);
+
+    // A custom setup is the owner's own: Dispatch cannot tell it made a
+    // clone, so it leaves its hooks alone.
+    let mut env = Env::new();
+    let text = format!(
+        "{}setup = [\"make\", \"deps\"]\n",
+        pipeline(ORCHARD, &["finalize"])
+    );
+    std::fs::write(env.data.pipeline(ORCHARD), text).unwrap();
+    env.fresh().unwrap();
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(
+        repo.ran,
+        [(env.workspace(), vec!["make".to_owned(), "deps".into()])]
+    );
+    assert!(repo.hooks_enabled.is_empty(), "{:?}", repo.hooks_enabled);
+}
+
+#[test]
+fn a_failed_hooks_path_removes_the_workspace_it_made() {
+    let mut env = Env::new();
+    env.repo.lock().unwrap().fail_hooks = Some("read-only config".into());
+    let e = env.fresh().unwrap_err();
+    assert!(format!("{e:#}").contains("read-only config"), "{e:#}");
+    assert!(!env.workspace().exists());
+}
+
+#[test]
 fn a_failed_setup_makes_no_session_and_removes_the_workspace_it_made() {
     let mut env = Env::new();
     env.repo.lock().unwrap().fail_run = Some("remote not found".into());
