@@ -1,0 +1,1 @@
+Changed: A pipeline file that sets a decisions dial other than ask for a human gate's decision is now refused at take and restart, naming the stage; a human gate always asks, and a supervisor's decides is how to automate it.

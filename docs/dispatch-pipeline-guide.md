@@ -613,6 +613,9 @@ note sends the ticket back to `investigate` instead, with the note in
 its prompt, and the gate asks again after it. A human gate has no
 dial: `decisions = "auto"` under `[policy]` does nothing for it, and
 it always asks, unless a supervisor's `decides` names `decisions`.
+A file that sets a dial other than `ask` for a human gate's decision is
+refused at take and at restart, naming the stage; `lanes` is the one
+exception.
 Every `{decisions.<name>}` must name a decision some gate of the file
 or Dispatch itself asks, or the file is refused. A ticket taken before
 the stage was added gets it only through `dispatch restart <ticket>
@@ -1310,6 +1313,7 @@ with step 6 merged in and every policy key below set.
   `auto`. Unset is `ask`, and `recommend` is not built yet, so it
   behaves as `ask`. Use `auto` only where the answer is never in
   doubt: `lanes` with one lane, `review-code` with `style_rounds`.
+  A human gate's decision takes no dial; see the human gate section.
 - **`max_reruns`** (default 3) is the number of failed attempts a stage
   may collect in one context before the ticket parks instead of asking
   again. It stops a broken gate from spending all night.
