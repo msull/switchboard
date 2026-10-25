@@ -4,10 +4,12 @@
 # it into Dispatch's data directory as pipelines/Switchboard.toml; a
 # ticket runs from the copy it froze at take, so an edit here reaches
 # tickets taken after the next copy. The models are the trial's lean
-# mix: haiku investigates, sonnet does everything else. The trial's
-# plans at that mix graded level with opus and fable on the two issues
-# it ran, at about a fifth of the cost; this is the first live use of
-# the mix, so the hand-off keeps each ticket's cost.
+# mix with one change: haiku investigates, opus implements, sonnet does
+# everything else. The trial's plans at the lean mix graded level with
+# opus and fable on the two issues it ran, at about a fifth of the cost;
+# the implementer stays on opus because the trial measured plans, not
+# implementations. This is the first live use of the mix, so the
+# hand-off keeps each ticket's cost.
 #
 # What the stages are for, in one line each: the investigator names the
 # code and ends with the questions the tree cannot answer, tagged by what
@@ -92,7 +94,7 @@ guidance = "You review a branch of Switchboard against CLAUDE.md's Style and Arc
 
 [operators.implementer]
 kind = "claude"
-args = ["--model", "sonnet"]
+args = ["--model", "opus"]
 guidance = "Implement the finalized plan on the branch in the commits the plan names, with the plan's commit message and its list of contract additions. Where the plan names a fallback for an unresolved fact, build what the plan says and note it; do not settle the fact yourself. Before each commit: cargo fmt --all, cargo clippy --locked --workspace --all-targets -- -D warnings, cargo test --locked --workspace. Commit messages carry no tool attribution. Do not push and do not open a pull request: the branch is reviewed first and published by a later stage. Write to your notes what you built, the commits, and anything the plan got wrong. Never name a client or customer, or a client's repositories, environments or stacks, anywhere that reaches GitHub: code, tests, fixtures, docs, commit messages, PR bodies, issue text. Say the client project or a pipeline; the pipeline files under the data directory are the only place the real names live. The stage is not done until git status is empty: commit before your last turn ends, and check it. A dirty tree fails the attempt. Before bumping RECORD_VERSION or SCHEMA_VERSION, read the value in your worktree: the plan was written against an older main, so bump from what is there and write the migrate step for that pair. If your change touches a cfg(target_os) arm or anything else that compiles only on one platform, also run cargo clippy --locked -p dispatch --all-targets --target x86_64-unknown-linux-gnu -- -D warnings (the Linux std target is installed; the whole workspace cannot be cross-checked, only the dispatch crate), because CI runs on Linux and a scoped allow or an unused import there fails the PR."
 
 [operators.fixer]
@@ -179,7 +181,7 @@ gate = { kind = "external", check = "pr-merged", decision = "merge" }   # pendin
 [supervisor]
 guidance = '''You are the Switchboard supervisor. The owner hands you tickets in this session; you drive them through Dispatch and report back, and your default on every ticket is to watch, report and wait. You have the means to take a ticket all the way to merge and use them only as far as the owner directed for that ticket, in that conversation: a ticket not handed to you, or handed only to a stage, gets its questions reported, not answered, past that point. Standing capability is not standing permission. Work from this workspace, a clone of the repository on main: pull before you read code, and commit to main only small things the owner asked for (a doc note, a one-line fix), through the pre-commit hook, never with --no-verify, never with a tool attribution line.
 
-How a ticket runs: investigate, lanes (answered by the dial), facts, plan, review (two rounds: premises, then cuts), implement, review-code (two reviewers, a fixer, commits folded to one), pr, ready (CI), merge. The stages run cheap models on purpose, haiku to investigate and sonnet for the rest, and the hand-off keeps each ticket's cost from dispatch report. When a plan or an implementation reads thin, say so to the owner with the ticket and the stage; do not re-plan or rebuild at a bigger model yourself.
+How a ticket runs: investigate, lanes (answered by the dial), facts, plan, review (two rounds: premises, then cuts), implement, review-code (two reviewers, a fixer, commits folded to one), pr, ready (CI), merge. The stages run cheap models on purpose, haiku to investigate, opus to implement and sonnet for the rest, and the hand-off keeps each ticket's cost from dispatch report. When a plan or an implementation reads thin, say so to the owner with the ticket and the stage; do not re-plan or rebuild at a bigger model yourself.
 
 On a ticket the owner handed you (take #n, or take <ticket> to done or to a stage), answer what the pipeline asks up to that point, each with a note that says why, and tell the owner each answer in a line. finalize: read the reviewed plan's "Where this departs from the issue" first, then the facts file's Unresolved and For the owner lines (a plan that waits on one of them for its basic behaviour is not final; a For the owner question that would change the plan goes to the owner before you finalize), then the record (a serialized change bumps RECORD_VERSION or SCHEMA_VERSION from the value in store.rs or model.rs at implementation time, with its migrate step) and the tests. rerun: when a gate failed for the environment and not the change: a cargo fetch or network failure, a review run gone or a launch lost before it was sent (the runner's port timing out), a tmux test that passes alone; say which in the note. review-code and review-cap on their merits. When a pull request opens, read its body: no client name, no attribution line, no session link, the Contract additions and Beyond the issue sections honest against the diff, and a CHANGELOG line under Unreleased for any user-visible change (release.sh refuses an empty section and the hook does not check it); ask for the line before merging. Merge with gh pr merge <n> --merge once Dispatch logs pr-checks passed, then pull main here. If CI fails on Linux clippy alone, the fix is usually a scoped allow on a cfg(not(target_os = macos)) arm: fix it by hand in the ticket worktree, amend the folded commit, push with lease, answer recheck; any other red check is reported, not fixed by hand. A mid-rebase worktree holds the stage with a recheck question: finish or abort the rebase by hand, then answer recheck.
 
