@@ -3923,6 +3923,273 @@ fn a_run_switchboard_no_longer_has_fails_the_attempt() {
     assert_eq!(pending[0].name, "rerun");
 }
 
+/// The `workflow.start` requests sent, in order: source, copy, owner
+/// round.
+fn starts(env: &Env) -> Vec<(String, PathBuf, Option<String>)> {
+    env.sb()
+        .calls
+        .iter()
+        .filter_map(|r| match &r.body {
+            Body::WorkflowStart {
+                source,
+                plan,
+                owner_round,
+                ..
+            } => Some((source.clone(), plan.clone(), owner_round.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The app loses the review's run; returns the rerun question.
+fn review_run_gone(env: &mut Env, id: &str) -> Decision {
+    env.sb().runs.clear();
+    env.steps_until(id, "the review failing", |t, _| {
+        t.attempts_of("review")
+            .last()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    let pending = env.pending(id);
+    assert_eq!(pending.len(), 1, "{pending:#?}");
+    assert_eq!(pending[0].name, "rerun");
+    pending[0].clone()
+}
+
+/// Answer `rerun`, with `note`, and wait for attempt `n`'s run.
+fn rerun_review(env: &mut Env, id: &str, d: &Decision, note: Option<&str>, n: u32) {
+    let now = env.tick();
+    env.runner.decide(id, &d.id, "rerun", note, now).unwrap();
+    env.steps_until(id, "the rerun's review run", |t, _| {
+        t.attempts_of("review")
+            .last()
+            .is_some_and(|a| a.n == n && a.run.is_some())
+    });
+}
+
+/// A revise answered, the planner's edit in the copy, then the run
+/// lost: returns the ticket, the failed copy and the planner session.
+fn revised_then_gone(env: &mut Env, revise_note: &str) -> (String, PathBuf, String, Decision) {
+    env.with_transcripts();
+    let id = at_finalize(env);
+    revise(env, &id, revise_note);
+    env.step();
+    let copy = artifact_of(&env.ticket(&id), "review", "plan");
+    std::fs::write(&copy, "# plan, as the planner revised it").unwrap();
+    let planner = env
+        .ticket(&id)
+        .attempts_of("review")
+        .last()
+        .unwrap()
+        .run_sessions["planner"]
+        .session
+        .clone();
+    let d = review_run_gone(env, &id);
+    (id, copy, planner, d)
+}
+
+/// A rerun after the owner's `revise` reviews the revised copy, opens
+/// with the owner's text as round 1, and clones the failed run's
+/// planner; the question and `show` name the copy.
+#[test]
+fn a_review_rerun_after_a_revise_starts_from_the_revised_copy() {
+    let mut env = Env::new();
+    let (id, failed_copy, planner, d) = revised_then_gone(&mut env, "Step 3 deletes data.");
+    assert!(
+        d.question.contains(&format!(
+            "the revised copy from attempt 1 by the owner ({})",
+            failed_copy.display()
+        )),
+        "{}",
+        d.question
+    );
+    let paths = dispatch::serve::ticket_paths(&env.ticket(&id), None);
+    assert_eq!(paths.plan.as_ref(), Some(&failed_copy));
+    let revised = paths.plan_revised.expect("named as revised");
+    assert_eq!((revised.attempt, revised.path), (1, failed_copy.clone()));
+    rerun_review(&mut env, &id, &d, None, 2);
+    let t = env.ticket(&id);
+    let a = t.attempts_of("review").last().unwrap();
+    let copy = a.artifacts["plan"].clone();
+    assert_eq!(
+        std::fs::read_to_string(&copy).unwrap(),
+        "# plan, as the planner revised it"
+    );
+    let sent = starts(&env);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(
+        sent[1],
+        (planner, copy.clone(), Some("Step 3 deletes data.".into()))
+    );
+    let round = std::fs::read_to_string(dispatch::report::round_file(&copy, 1)).unwrap();
+    assert_eq!(
+        round,
+        format!(
+            "{}\n\nStep 3 deletes data.\n",
+            dispatch::OWNER_ROUND_HEADING
+        )
+    );
+    assert_eq!(
+        a.revisions
+            .iter()
+            .map(|r| (r.round, r.by.as_str()))
+            .collect::<Vec<_>>(),
+        [(1, "you")]
+    );
+    assert_eq!(a.carried_from, Some(("review".into(), 1)));
+    let paths = dispatch::serve::ticket_paths(&t, None);
+    assert_eq!(paths.plan.as_ref(), Some(&copy));
+    assert_eq!(
+        paths.plan_revised.map(|r| (r.attempt, r.path)),
+        Some((1, failed_copy))
+    );
+}
+
+/// A note with the rerun of an unrevised review goes to its first
+/// round; the copy is the plan stage's.
+#[test]
+fn a_review_rerun_note_opens_the_rerun_from_the_plan() {
+    let mut env = Env::new();
+    let id = at_review_run(&mut env);
+    let plan = artifact_of(&env.ticket(&id), "plan", "plan");
+    let d = review_run_gone(&mut env, &id);
+    assert!(
+        d.question.contains(
+            "A rerun reviews the plan stage's output again; a note goes to its first round."
+        ),
+        "{}",
+        d.question
+    );
+    rerun_review(&mut env, &id, &d, Some("Mind the migration."), 2);
+    let t = env.ticket(&id);
+    let a = t.attempts_of("review").last().unwrap();
+    let copy = &a.artifacts["plan"];
+    assert_eq!(
+        std::fs::read_to_string(copy).unwrap(),
+        std::fs::read_to_string(&plan).unwrap()
+    );
+    let sent = starts(&env);
+    assert_eq!(sent[1].0, session_of(&t, "plan"));
+    assert_eq!(sent[1].2.as_deref(), Some("Mind the migration."));
+    assert_eq!(a.carried_from, None);
+    assert_eq!(a.revisions.len(), 1);
+    assert!(dispatch::report::round_file(copy, 1).is_file());
+    // That rerun failing too is not a revised copy: the next starts
+    // from the plan again, with no owner round.
+    let d = review_run_gone(&mut env, &id);
+    assert!(!d.question.contains("revised copy"), "{}", d.question);
+    assert_eq!(
+        dispatch::serve::ticket_paths(&env.ticket(&id), None).plan_revised,
+        None
+    );
+    rerun_review(&mut env, &id, &d, None, 3);
+    let t = env.ticket(&id);
+    let a = t.attempts_of("review").last().unwrap();
+    assert_eq!(a.carried_from, None);
+    assert!(a.revisions.is_empty());
+    let sent = starts(&env);
+    assert_eq!(sent[2].2, None);
+    assert_eq!(
+        std::fs::read_to_string(&a.artifacts["plan"]).unwrap(),
+        std::fs::read_to_string(&plan).unwrap()
+    );
+}
+
+/// A revise and a rerun note make one round with both texts; a second
+/// failure carries it on from the rerun's own copy.
+#[test]
+fn a_revise_and_a_rerun_note_make_one_round_carried_again_on_a_second_rerun() {
+    let mut env = Env::new();
+    let (id, _, _, d) = revised_then_gone(&mut env, "Step 3 deletes data.");
+    rerun_review(&mut env, &id, &d, Some("Mind the migration."), 2);
+    let both = "Step 3 deletes data.\n\nNote with the rerun:\nMind the migration.";
+    assert_eq!(starts(&env)[1].2.as_deref(), Some(both));
+    let second = artifact_of(&env.ticket(&id), "review", "plan");
+    std::fs::write(&second, "# plan, revised again").unwrap();
+    let d = review_run_gone(&mut env, &id);
+    assert!(
+        d.question.contains(&format!(
+            "the revised copy from attempt 1 by the owner ({})",
+            second.display()
+        )),
+        "{}",
+        d.question
+    );
+    rerun_review(&mut env, &id, &d, None, 3);
+    let t = env.ticket(&id);
+    let a = t.attempts_of("review").last().unwrap();
+    assert_eq!(a.carried_from, Some(("review".into(), 2)));
+    assert_eq!(
+        std::fs::read_to_string(&a.artifacts["plan"]).unwrap(),
+        "# plan, revised again"
+    );
+    assert_eq!(starts(&env)[2].2.as_deref(), Some(both));
+    let revised = dispatch::serve::ticket_paths(&t, None)
+        .plan_revised
+        .unwrap();
+    assert_eq!((revised.attempt, revised.path), (2, second));
+}
+
+/// A failed planner that can no longer be cloned leaves the plan
+/// stage's session to plan; the owner's round still goes.
+#[test]
+fn a_rerun_whose_failed_planner_cannot_be_cloned_plans_from_the_plan_session() {
+    let mut env = Env::new();
+    let id = at_finalize(&mut env);
+    revise(&mut env, &id, "Step 3 deletes data.");
+    env.step();
+    let d = review_run_gone(&mut env, &id);
+    rerun_review(&mut env, &id, &d, None, 2);
+    let t = env.ticket(&id);
+    let sent = starts(&env);
+    assert_eq!(sent[1].0, session_of(&t, "plan"), "no transcript to clone");
+    assert_eq!(sent[1].2.as_deref(), Some("Step 3 deletes data."));
+    assert_eq!(
+        t.attempts_of("review").last().unwrap().carried_from,
+        Some(("review".into(), 1))
+    );
+}
+
+/// A revise Switchboard refused or never confirmed left no round file,
+/// and a copy gone is no copy: each reruns from the plan, and the
+/// question and `show` agree.
+#[test]
+fn a_revise_with_no_round_file_or_no_copy_reruns_from_the_plan() {
+    for case in ["refused", "lost", "no copy"] {
+        let mut env = Env::new();
+        let id = at_finalize(&mut env);
+        revise(&mut env, &id, "Step 3 deletes data.");
+        env.step();
+        let mut t = env.ticket(&id);
+        let plan = artifact_of(&t, "plan", "plan");
+        let copy = artifact_of(&t, "review", "plan");
+        match case {
+            "refused" => {
+                std::fs::remove_file(dispatch::report::round_file(&copy, 2)).unwrap();
+                t.attempts.last_mut().unwrap().revisions.pop();
+                let now = env.tick();
+                env.runner.save_ticket(&mut t, now).unwrap();
+            }
+            "lost" => std::fs::remove_file(dispatch::report::round_file(&copy, 2)).unwrap(),
+            _ => std::fs::remove_file(&copy).unwrap(),
+        }
+        let d = review_run_gone(&mut env, &id);
+        assert!(
+            !d.question.contains("revised copy"),
+            "{case}: {}",
+            d.question
+        );
+        let paths = dispatch::serve::ticket_paths(&env.ticket(&id), None);
+        assert_eq!(paths.plan.as_ref(), Some(&plan), "{case}");
+        assert_eq!(paths.plan_revised, None, "{case}");
+        rerun_review(&mut env, &id, &d, None, 2);
+        let t = env.ticket(&id);
+        let a = t.attempts_of("review").last().unwrap();
+        assert_eq!(a.carried_from, None, "{case}");
+        assert_eq!(starts(&env)[1].2, None, "{case}");
+        assert_eq!(starts(&env)[1].0, session_of(&t, "plan"), "{case}");
+    }
+}
+
 /// A park waits while the app cannot say the run paused: the attempt is
 /// written cancelled only once the run is confirmed stopped.
 #[test]

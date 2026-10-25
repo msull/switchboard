@@ -908,6 +908,18 @@ fn print_lane_files(name: &str, files: &[dispatch_control::LaneFile]) -> Result<
     Ok(())
 }
 
+/// Under the plan line: the owner's revised copy the plan is, or a
+/// rerun started from, so the reader knows which file to open and
+/// which to diff against.
+fn plan_revised_line(r: &dispatch_control::PlanRevision) -> String {
+    format!(
+        "    (revised copy from attempt {}, by {}: {})",
+        r.attempt,
+        r.by,
+        r.path.display()
+    )
+}
+
 fn show(args: &[&str]) -> Result<()> {
     let f = Flags::parse(args, &[], &["--json"]);
     let runner = offline_runner()?;
@@ -980,6 +992,9 @@ fn show(args: &[&str]) -> Result<()> {
     let p = &view.paths;
     say!("files:");
     print_lane_files("plan", &p.plan_files)?;
+    if let Some(r) = &p.plan_revised {
+        say!("{}", plan_revised_line(r));
+    }
     for (name, path) in [
         ("round", &p.round_file),
         ("review summary", &p.review_summary),

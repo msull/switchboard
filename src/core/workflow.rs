@@ -67,6 +67,14 @@ fn round_count(run: &WorkflowRun) -> u32 {
     u32::try_from(run.rounds.len()).unwrap_or(u32::MAX)
 }
 
+/// Whether the reviewer was asked for a round before round `n`: every
+/// round that is not the owner's is one it wrote.
+fn reviewer_asked_before(run: &WorkflowRun, n: u32) -> bool {
+    run.rounds
+        .iter()
+        .any(|r| r.n < n && r.user_feedback.is_none())
+}
+
 /// Round file names beside the plan: `<stem>.feedback-<n>.md` and
 /// `<stem>.response-<n>.md`.
 #[must_use]
@@ -164,7 +172,7 @@ impl AppCore {
                 source,
                 plan,
                 definition,
-            } => self.start_workflow(source, &plan, &definition, None, Vec::new(), now, out),
+            } => self.start_workflow(source, &plan, &definition, None, Vec::new(), None, now, out),
             AppAction::ShowWorkflow(id) => {
                 if self.workflow(id).is_some() {
                     self.show(View::Workflow(id), now, out);
@@ -290,6 +298,10 @@ impl AppCore {
     /// source's directory: Codex writes only inside its own, and a
     /// review whose files live elsewhere names that place.
     /// `reviewer_args` are extra flags for the reviewer's command line.
+    /// `owner_round` is the owner's objection the run opens with: round
+    /// 1 is then the owner's, the planner answers it first, and the
+    /// reviewer launches idle and reads the plan only after that answer,
+    /// since it would otherwise review a plan about to change.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn start_workflow(
         &mut self,
@@ -298,6 +310,7 @@ impl AppCore {
         definition: &str,
         reviewer_cwd: Option<PathBuf>,
         reviewer_args: Vec<String>,
+        owner_round: Option<String>,
         now: Clock,
         out: &mut Out,
     ) {
@@ -345,9 +358,20 @@ impl AppCore {
             return;
         };
         let cap = def.cap.unwrap_or(self.settings.workflow_round_cap).max(1);
-        let round = Round {
-            feedback_asked: Some(now.wall),
-            ..fresh_round(plan, 1)
+        let owner_round = owner_round
+            .map(|text| text.trim().to_owned())
+            .filter(|text| !text.is_empty());
+        let round = match &owner_round {
+            Some(text) => Round {
+                verdict: Some(Verdict::Changes),
+                user_feedback: Some(text.clone()),
+                objection: true,
+                ..fresh_round(plan, 1)
+            },
+            None => Round {
+                feedback_asked: Some(now.wall),
+                ..fresh_round(plan, 1)
+            },
         };
         let id = WorkflowId::new();
         let run = WorkflowRun {
@@ -366,7 +390,6 @@ impl AppCore {
             updated: now.wall,
             op: self.quiet_op.clone(),
         };
-        let prompt = def.render(&def.review_first, &round, plan, cap);
         if let Some(w) = self
             .workspaces
             .iter_mut()
@@ -374,7 +397,10 @@ impl AppCore {
         {
             w.workflows.push(run);
         }
-        self.first_prompts.push((reviewer, prompt));
+        if owner_round.is_none() {
+            let prompt = def.render(&def.review_first, &round, plan, cap);
+            self.first_prompts.push((reviewer, prompt));
+        }
         self.launch_fresh(reviewer, now, out);
         out.push(Effect::CloneAllTranscript { run: id, handle });
         self.show(View::Workflow(id), now, out);
@@ -447,12 +473,27 @@ impl AppCore {
             asking: None,
             ..source
         });
+        // A run that opens with the owner's round waits on the planner's
+        // answer to it, not on the reviewer.
+        let owner_first = run.state == RunState::Starting
+            && run
+                .current()
+                .is_some_and(|r| r.objection && r.user_feedback.is_some() && !r.responded);
         self.edit_run(id, now, out, |r| {
             r.planner = Some(planner);
             if r.state == RunState::Starting {
-                r.state = RunState::AwaitingFeedback;
+                r.state = if owner_first {
+                    RunState::AwaitingResponse
+                } else {
+                    RunState::AwaitingFeedback
+                };
             }
         });
+        if owner_first && let Some(round) = run.current() {
+            let def = self.definition_of(&run);
+            let prompt = respond_prompt(&def, round, &run.plan, run.cap);
+            self.prompt_planner(id, &prompt, now, out);
+        }
     }
 
     // --- waiting
@@ -774,8 +815,10 @@ impl AppCore {
         };
         // `{response}` in the reviewer's round prompt is the previous
         // round's, the one it is asked to read; `{feedback}` is the new
-        // file to write.
+        // file to write. A reviewer that has only seen owner rounds has
+        // never read the plan, so it gets the first round's prompt.
         let template = match run.current() {
+            _ if !reviewer_asked_before(&run, n) => def.review_first.clone(),
             Some(prev) => def
                 .review_round
                 .replace("{response}", &prev.response.display().to_string()),
@@ -871,10 +914,10 @@ impl AppCore {
                 }
                 let (state, agent, prompt) = match round.verdict {
                     None => {
-                        let template = if round.n == 1 {
-                            &def.review_first
-                        } else {
+                        let template = if reviewer_asked_before(&run, round.n) {
                             &def.review_round
+                        } else {
+                            &def.review_first
                         };
                         (
                             RunState::AwaitingFeedback,

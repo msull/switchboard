@@ -5980,6 +5980,94 @@ mod workflow {
         assert_eq!(run_of(&core).state, RunState::Converged);
     }
 
+    /// A rerun carrying the owner's `revise` opens with it: the planner
+    /// answers round 1 before the reviewer reads anything, and the
+    /// reviewer's first prompt is the first-round one, at round 2.
+    #[test]
+    fn a_run_that_opens_with_the_owners_round_asks_the_planner_first() {
+        let (mut core, source) = resumable_agent();
+        core.dispatch(
+            AppAction::Control {
+                op: "run".into(),
+                action: crate::core::ControlAction::StartWorkflow {
+                    source,
+                    plan: PLAN.into(),
+                    definition: BUILTIN_WORKFLOW.into(),
+                    reviewer_cwd: None,
+                    reviewer_args: Vec::new(),
+                    owner_round: Some("  Step 3 deletes data.  ".into()),
+                },
+            },
+            Clock::at(100),
+        );
+        let r = run_of(&core).clone();
+        let (run, reviewer) = (r.id, r.reviewer);
+        assert_eq!(r.state, RunState::Starting);
+        assert_eq!(r.rounds.len(), 1);
+        assert!(r.rounds[0].objection);
+        assert_eq!(r.rounds[0].verdict, Some(Verdict::Changes));
+        assert_eq!(
+            r.rounds[0].user_feedback.as_deref(),
+            Some("Step 3 deletes data.")
+        );
+        assert_eq!(r.rounds[0].feedback_asked, None);
+        assert!(
+            !core.first_prompts.iter().any(|(id, _)| *id == reviewer),
+            "the reviewer launches idle"
+        );
+        core.dispatch(
+            AppAction::WorkflowCloned {
+                run,
+                result: Ok(claude_handle()),
+            },
+            Clock::at(130),
+        );
+        let r = run_of(&core).clone();
+        let planner = r.planner.expect("planner");
+        assert_eq!(r.state, RunState::AwaitingResponse);
+        assert!(r.rounds[0].response_asked.is_some());
+        let (_, prompt) = core
+            .first_prompts
+            .iter()
+            .find(|(id, _)| *id == planner)
+            .expect("the planner is asked");
+        assert!(prompt.contains("Step 3 deletes data."), "{prompt}");
+        assert!(prompt.contains("plan.response-1.md"), "{prompt}");
+        assert_eq!(r.awaited_file(), Some(&r.rounds[0].response));
+        // A pause and a continue with the planner's pane gone asks it
+        // again.
+        core.dispatch(AppAction::PauseWorkflow(run), Clock::at(140));
+        core.first_prompts.clear();
+        core.dispatch(AppAction::ContinueWorkflow(run), Clock::at(150));
+        assert_eq!(run_of(&core).state, RunState::AwaitingResponse);
+        assert!(
+            core.first_prompts
+                .iter()
+                .any(|(id, p)| *id == planner && p.contains("Step 3 deletes data.")),
+            "{:?}",
+            core.first_prompts
+        );
+        core.dispatch(
+            AppAction::HostListed(vec![running(reviewer), running(planner)]),
+            Clock::at(160),
+        );
+        let effects = settle(&mut core, run, "ok", 200);
+        let r = run_of(&core);
+        assert_eq!(r.state, RunState::AwaitingFeedback);
+        assert_eq!(r.rounds.len(), 2);
+        let sent_now = sent(&effects);
+        assert_eq!(sent_now.len(), 1);
+        assert_eq!(sent_now[0].0, HostId(reviewer.host_name()));
+        assert!(
+            sent_now[0].1.starts_with("Review the plan at"),
+            "{}",
+            sent_now[0].1
+        );
+        assert!(sent_now[0].1.contains("plan.feedback-2.md"));
+        settle(&mut core, run, "No further feedback.", 300);
+        assert_eq!(run_of(&core).state, RunState::Converged);
+    }
+
     #[test]
     fn an_objection_is_refused_unless_the_review_finished_and_names_the_next_round() {
         let (mut core, run, _, _, planner) = started();
@@ -8132,6 +8220,7 @@ mod control {
                 definition: "Dispatch: reviewer@abc".into(),
                 reviewer_cwd: Some("/dispatch/t1/review/1/repo".into()),
                 reviewer_args: vec!["--allowedTools".into(), "Edit(//dispatch/**)".into()],
+                owner_round: None,
             },
             4,
         );
@@ -8182,6 +8271,7 @@ mod control {
                 definition: "Dispatch: reviewer@abc".into(),
                 reviewer_cwd: None,
                 reviewer_args: Vec::new(),
+                owner_round: None,
             },
             7,
         );

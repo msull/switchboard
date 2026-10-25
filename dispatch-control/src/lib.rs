@@ -578,6 +578,22 @@ pub struct PathsView {
     pub plan_files: Vec<LaneFile>,
     /// The notes, the same way.
     pub notes_files: Vec<LaneFile>,
+    /// `plan` is, or a rerun started from, a failed plan review's copy
+    /// the owner had revised; none from an older runner.
+    pub plan_revised: Option<PlanRevision>,
+}
+
+/// The failed plan review attempt whose revised copy the shown plan is
+/// or was started from.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlanRevision {
+    /// That attempt's number.
+    pub attempt: u32,
+    /// Who answered `revise` (`you` or `supervisor`).
+    pub by: String,
+    /// That attempt's copy.
+    pub path: PathBuf,
 }
 
 /// One lane's copy of a ticket's document, or the ticket's only one.

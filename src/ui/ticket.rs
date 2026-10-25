@@ -423,13 +423,21 @@ fn details<'a>(cx: &DrawCtx<'a>, ui: &mut Ui, t: &TicketView) -> Option<&'a Tick
 
 /// Where the plan shown came from: a review's copy and its round, or
 /// the stage that wrote it; nothing from a runner that does not say.
+/// A copy the owner revised says which attempt's revision it is.
 fn plan_label(p: &dispatch_control::PathsView) -> Option<String> {
-    match (p.plan_reviewing, p.plan_reviewed, p.plan_round) {
-        (true, _, Some(n)) => Some(format!("Reviewed copy, round {n}: review open")),
-        (true, _, None) => Some("Reviewed copy: review open".to_owned()),
-        (false, true, _) => Some("Reviewed copy".to_owned()),
-        _ => p.plan_stage.as_ref().map(|s| format!("From stage {s}")),
-    }
+    let label = match (p.plan_reviewing, p.plan_reviewed, p.plan_round) {
+        (true, _, Some(n)) => format!("Reviewed copy, round {n}: review open"),
+        (true, _, None) => "Reviewed copy: review open".to_owned(),
+        (false, true, _) => "Reviewed copy".to_owned(),
+        _ => return p.plan_stage.as_ref().map(|s| format!("From stage {s}")),
+    };
+    Some(match &p.plan_revised {
+        Some(r) => format!(
+            "{label}. Revised copy from attempt {} ({})",
+            r.attempt, r.by
+        ),
+        None => label,
+    })
 }
 
 /// The plan, then each round of its review, folded.

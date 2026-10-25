@@ -227,6 +227,12 @@ pub enum Body {
         /// the review.
         #[serde(default)]
         reviewer_args: Vec<String>,
+        /// The owner's objection the run opens with as its first round,
+        /// for the planner to answer before the reviewer reads the
+        /// plan: a rerun carrying the owner's `revise`. Absent, the
+        /// reviewer starts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner_round: Option<String>,
     },
 
     // --- commands: idempotent state
@@ -1038,6 +1044,15 @@ mod tests {
                 definition: "d".into(),
                 reviewer_cwd: Some("/att".into()),
                 reviewer_args: vec!["--model".into(), "haiku".into()],
+                owner_round: None,
+            },
+            Body::WorkflowStart {
+                source: "s".into(),
+                plan: "/p.md".into(),
+                definition: "d".into(),
+                reviewer_cwd: None,
+                reviewer_args: Vec::new(),
+                owner_round: Some("objection".into()),
             },
             Body::ProjectRemove {
                 project: "p".into(),
@@ -1321,6 +1336,23 @@ mod tests {
         };
         assert_eq!(ask_kind, None);
         assert_eq!(choices, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_workflow_start_line_without_an_owner_round_still_reads() {
+        let req = Request::parse(
+            r#"{"op":"r","kind":"workflow.start","source":"s","plan":"/p.md","definition":"d"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            req.body,
+            Body::WorkflowStart {
+                owner_round: None,
+                ..
+            }
+        ));
+        let line = serde_json::to_string(&req).unwrap();
+        assert!(!line.contains("owner_round"), "{line}");
     }
 
     #[test]

@@ -394,6 +394,7 @@ impl FakeSwitchboard {
                 definition,
                 reviewer_cwd,
                 reviewer_args: _,
+                owner_round: _,
             } => {
                 let Some(src) = self.sessions.iter().find(|s| &s.id == source).cloned() else {
                     return Reply::failed("no such session");

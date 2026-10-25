@@ -7496,14 +7496,30 @@ impl Runner {
                 now_ms,
             );
         };
-        let (source_path, source_session) = match review_subject(t, &subject) {
+        let source = match review_source(t, &stage.name, ctx, &subject, &|p| p.is_file()) {
             Ok(found) => found,
             Err(why) => return self.park(t, ps, &format!("stage {}: {why}", stage.name), now_ms),
         };
+        let planner = self.clonable_planner(t, &stage.name, source.planner.as_deref())?;
+        let Some(source_session) = planner.or_else(|| source.session.clone()) else {
+            let why = format!("{subject} was not written by a session");
+            return self.park(t, ps, &format!("stage {}: {why}", stage.name), now_ms);
+        };
         let dir = self.attempt_dir(t, &stage.name, n, ctx)?;
         let copy = dir.join(format!("{subject}.md"));
-        std::fs::copy(&source_path, &copy)
-            .with_context(|| format!("copy {} to {}", source_path.display(), copy.display()))?;
+        std::fs::copy(&source.path, &copy)
+            .with_context(|| format!("copy {} to {}", source.path.display(), copy.display()))?;
+        // The owner's round is on disk before the send, as a `revise`
+        // writes its round, so a reader finds it whatever the reply.
+        let owner_file = crate::report::round_file(&copy, 1);
+        if let Some(owner) = &source.owner {
+            let body = format!(
+                "{}\n\n{}\n",
+                crate::OWNER_ROUND_HEADING,
+                owner.text.trim_end()
+            );
+            crate::store::atomic_write(&owner_file, body.as_bytes())?;
+        }
         // The reviewer's feedback lives beside the copy, in Dispatch's
         // directory. A reviewer that can be told to write there runs in
         // the ticket's tree, with the code and the trust the earlier
@@ -7518,13 +7534,12 @@ impl Runner {
             _ => dir.clone(),
         };
         let definition = definition_of(&reviewer_name, review, &vars_for(t, p, lane));
-        t.attempts.push(new_attempt(
+        t.attempts.push(review_attempt(
             &stage.name,
             n,
             ctx,
-            AttemptKind::Workflow,
-            AttemptState::Starting,
-            BTreeMap::from([(subject.clone(), copy.clone())]),
+            (&subject, &copy),
+            &source,
             now_ms,
         ));
         let name = definition.name.clone();
@@ -7547,10 +7562,20 @@ impl Runner {
                 definition: name,
                 reviewer_cwd: Some(reviewer_cwd),
                 reviewer_args,
+                owner_round: source.owner.as_ref().map(|o| o.text.clone()),
             },
             now_ms,
         )?;
+        let lost = reply.is_no_answer();
         if let Reply::Failed { reason } = reply {
+            // A refusal opened no round, so its file goes; a lost reply
+            // may have, so it stays.
+            if source.owner.is_some()
+                && !lost
+                && let Err(e) = std::fs::remove_file(&owner_file)
+            {
+                log::warn!("{}: {e}", owner_file.display());
+            }
             self.fail_attempt(
                 t,
                 ps,
@@ -7561,6 +7586,37 @@ impl Runner {
             )?;
         }
         Ok(())
+    }
+
+    /// A rerun of a revised copy continues the failed run's planner,
+    /// which has already read the owner's objection, when its
+    /// conversation can still be cloned: the app has it as a Claude
+    /// Code session whose transcript reads. `None` leaves the plan
+    /// stage's session to plan.
+    fn clonable_planner(
+        &mut self,
+        t: &Ticket,
+        stage: &str,
+        planner: Option<&str>,
+    ) -> Result<Option<String>> {
+        let Some(id) = planner else {
+            return Ok(None);
+        };
+        Ok(match self.session_view(id)? {
+            Ok(view)
+                if view.kind == wire::SessionKind::Claude
+                    && view.transcript.as_deref().is_some_and(Path::is_file) =>
+            {
+                Some(id.to_owned())
+            }
+            other => {
+                log::info!(
+                    "ticket {} {stage}: the failed review's planner {id} cannot be cloned ({other:?}); the plan stage's session plans",
+                    t.id
+                );
+                None
+            }
+        })
     }
 
     /// A pending finalize decision for a run that is working again is
@@ -9413,16 +9469,32 @@ fn rerun_ask(t: &Ticket, a: &Attempt) -> Option<(String, &'static [&'static str]
     Some((question, options))
 }
 
-/// What a rerun question adds about a code review attempt: the next
-/// attempt carries its points unless the note says "start over". A
-/// resolution review carries nothing.
-fn rerun_carries(t: &Ticket, stage: &str, n: u32) -> &'static str {
+/// What a rerun question adds about a review attempt: a code review's
+/// next attempt carries its points unless the note says "start over";
+/// a plan review's reviews the copy the owner revised, when they did,
+/// else the plan stage's output. A resolution review carries nothing.
+fn rerun_carries(t: &Ticket, stage: &str, n: u32) -> String {
+    const RESOLUTION_AGAIN: &str =
+        " A rerun reviews the same resolution again with a fresh reviewer.";
+    const CODE_CARRIES: &str = " The next attempt carries this one's settled and open points; a note saying \"start over\" reviews the whole branch again.";
+    const PLAN_AGAIN: &str =
+        " A rerun reviews the plan stage's output again; a note goes to its first round.";
+    let a = find_attempt(t, stage, n);
     if stage == RESOLUTION {
-        " A rerun reviews the same resolution again with a fresh reviewer."
-    } else if find_attempt(t, stage, n).is_some_and(|a| a.kind == AttemptKind::Review) {
-        " The next attempt carries this one's settled and open points; a note saying \"start over\" reviews the whole branch again."
+        RESOLUTION_AGAIN.into()
+    } else if a.is_some_and(|a| a.kind == AttemptKind::Review) {
+        CODE_CARRIES.into()
+    } else if let Some(a) = a.filter(|a| a.kind == AttemptKind::Workflow) {
+        match t.revised_copy(a, &|p| p.is_file()) {
+            Some(r) => format!(
+                " A rerun reviews this attempt's copy, the revised copy from attempt {} by the owner ({}), not the plan stage's original; a note goes to its first round.",
+                r.from,
+                r.copy.display()
+            ),
+            None => PLAN_AGAIN.into(),
+        }
     } else {
-        ""
+        String::new()
     }
 }
 
@@ -10565,23 +10637,184 @@ fn definition_of(
     }
 }
 
-/// The subject of a review and the session that wrote it, from the
-/// latest complete attempt: the review clones that session's
-/// conversation for the planner.
-fn review_subject(t: &Ticket, subject: &str) -> Result<(PathBuf, String), String> {
-    let (path, session) = t
+/// A plan review's new attempt on `copy` of `subject`: one that opens
+/// with the owner's round records it as round 1's revision, and one
+/// that copied a revised copy names the attempt it came from.
+fn review_attempt(
+    stage: &str,
+    n: u32,
+    ctx: &str,
+    (subject, copy): (&str, &Path),
+    source: &ReviewSource,
+    now_ms: u64,
+) -> Attempt {
+    let mut attempt = new_attempt(
+        stage,
+        n,
+        ctx,
+        AttemptKind::Workflow,
+        AttemptState::Starting,
+        BTreeMap::from([(subject.to_owned(), copy.to_path_buf())]),
+        now_ms,
+    );
+    attempt.carried_from = source.from.map(|from| (stage.to_owned(), from));
+    if let Some(owner) = &source.owner {
+        attempt.revisions.push(crate::ticket::Revision {
+            round: 1,
+            by: owner.by.clone(),
+            at_ms: now_ms,
+        });
+    }
+    attempt
+}
+
+/// Where a plan review starts, as `review_source` finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewSource {
+    /// The file the review copies.
+    path: PathBuf,
+    /// The session that wrote the newest complete one, whose
+    /// conversation the planner clones unless `planner` can be.
+    session: Option<String>,
+    /// The failed attempt of this stage whose revised copy `path` is:
+    /// the one copied, which may itself have carried the revise from an
+    /// earlier one.
+    from: Option<u32>,
+    /// That attempt's planner session.
+    planner: Option<String>,
+    /// The owner's round the review opens with; `None` opens with the
+    /// reviewer.
+    owner: Option<OwnerRound>,
+}
+
+/// The owner's round a plan review opens with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnerRound {
+    /// The revise's text, the rerun's note, or both.
+    text: String,
+    /// Who answered: the `revise`, else the `rerun`.
+    by: String,
+}
+
+/// The text of `text` without surrounding blanks, when any is left.
+fn non_blank(text: &str) -> Option<String> {
+    Some(text.trim().to_owned()).filter(|s| !s.is_empty())
+}
+
+/// The note and the answerer of the newest `name` decision of attempt
+/// `n` of `stage` answered `answer`.
+fn answered(
+    t: &Ticket,
+    stage: &str,
+    (name, answer): (&str, &str),
+    n: u32,
+) -> Option<(Option<String>, String)> {
+    t.decisions.iter().rev().find_map(|d| match &d.state {
+        DecisionState::Answered {
+            answer: given,
+            note,
+            by,
+            ..
+        } if d.name == name
+            && given == answer
+            && d.attempt.as_ref() == Some(&(stage.to_owned(), n)) =>
+        {
+            Some((note.clone(), by.clone()))
+        }
+        _ => None,
+    })
+}
+
+/// The owner's `revise` text in `r`: its round file, else the note the
+/// answer carried when the file cannot be read.
+fn revise_round(t: &Ticket, stage: &str, r: &crate::ticket::RevisedCopy) -> Option<OwnerRound> {
+    let from_file = std::fs::read_to_string(&r.text_file).ok().and_then(|body| {
+        let body = body.trim_start();
+        non_blank(
+            body.strip_prefix(crate::OWNER_ROUND_HEADING)
+                .unwrap_or(body),
+        )
+    });
+    let text = from_file.or_else(|| {
+        let (note, _) = answered(t, stage, ("finalize", "revise"), r.from)?;
+        non_blank(&note?)
+    })?;
+    Some(OwnerRound {
+        text,
+        by: r.by.clone(),
+    })
+}
+
+/// The note given with the `rerun` that replaced this context's last
+/// attempt of `stage`.
+fn rerun_round(t: &Ticket, stage: &str, ctx: &str) -> Option<OwnerRound> {
+    let last = t
         .attempts
         .iter()
         .rev()
-        .filter(|a| a.state == AttemptState::Complete)
-        .find_map(|a| {
-            a.artifacts
-                .get(subject)
-                .map(|path| (path.clone(), a.session.clone()))
-        })
-        .ok_or_else(|| format!("nothing wrote {subject}"))?;
-    let session = session.ok_or_else(|| format!("{subject} was not written by a session"))?;
-    Ok((path, session))
+        .find(|a| a.stage == stage && a.context == ctx)?;
+    if !matches!(
+        last.state,
+        AttemptState::Failed { .. } | AttemptState::Cancelled { .. }
+    ) {
+        return None;
+    }
+    let (note, by) = answered(t, stage, ("rerun", "rerun"), last.n)?;
+    Some(OwnerRound {
+        text: non_blank(&note?)?,
+        by,
+    })
+}
+
+/// What a plan review in `ctx` reviews: the newer of the latest
+/// complete attempt that wrote `subject` and a failed or cancelled
+/// attempt of this stage in `ctx` the owner revised
+/// (`Ticket::revised_copy`). The revised copy wins when no complete
+/// attempt came after it, so a plan stage rerun after the failure wins
+/// over it. A revised copy carries the owner's text as the first round,
+/// and a note given with the `rerun` answer joins it.
+fn review_source(
+    t: &Ticket,
+    stage: &str,
+    ctx: &str,
+    subject: &str,
+    exists: &dyn Fn(&Path) -> bool,
+) -> Result<ReviewSource, String> {
+    let complete =
+        |a: &Attempt| a.state == AttemptState::Complete && a.artifacts.contains_key(subject);
+    let newest = t.attempts.iter().rev().find(|a| complete(a));
+    let revised = t
+        .attempts
+        .iter()
+        .rev()
+        .take_while(|a| !complete(a))
+        .filter(|a| a.stage == stage && a.context == ctx && a.artifacts.contains_key(subject))
+        .find_map(|a| t.revised_copy(a, exists).map(|r| (a, r)));
+    let path = match (&revised, newest) {
+        (Some((_, r)), _) => r.copy.clone(),
+        (None, Some(a)) => a.artifacts[subject].clone(),
+        (None, None) => return Err(format!("nothing wrote {subject}")),
+    };
+    let revise = revised
+        .as_ref()
+        .and_then(|(_, r)| revise_round(t, stage, r));
+    let owner = match (revise, rerun_round(t, stage, ctx)) {
+        (Some(revise), Some(rerun)) => Some(OwnerRound {
+            text: format!("{}\n\nNote with the rerun:\n{}", revise.text, rerun.text),
+            by: revise.by,
+        }),
+        (revise, rerun) => revise.or(rerun),
+    };
+    Ok(ReviewSource {
+        path,
+        session: newest.and_then(|a| a.session.clone()),
+        from: revised.as_ref().map(|(a, _)| a.n),
+        planner: revised
+            .as_ref()
+            .and_then(|(a, _)| a.run_sessions.get("planner"))
+            .map(|s| s.session.clone()),
+        owner,
+    })
 }
 
 /// The kind of session an operator runs in.

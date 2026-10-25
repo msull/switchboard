@@ -558,7 +558,18 @@ interrupted attempt.
   auditable snapshot. The planner clone's history names the original
   file, so every prompt sent to it names the copy and says to edit
   only that. The copy after finalization is the review stage's `plan`
-  artifact.
+  artifact. A rerun after a failed or cancelled attempt copies that
+  attempt's copy when an owner `revise` is recorded on it (the answer,
+  its `Revision`, and its round file still beside the copy), else the
+  plan stage's output; a plan stage rerun since the failure is newer
+  and wins. The owner's revise text, and any note given with the
+  `rerun` answer, become the rerun's round 1 (`plan.feedback-1.md`,
+  sent as `workflow.start`'s `owner_round`): the planner answers it
+  before the reviewer reads the plan, so the objection reaches the
+  reviewer whether or not the failed run's edit landed in the copy. The
+  rerun clones the failed run's planner while its transcript reads,
+  else the plan stage's session, and records the copied attempt in
+  `carried_from`.
 - **Completion is evidence, recorded.** An agent attempt is complete
   when Switchboard has reported the session's Stop event (or a zero
   exit) *and* the artifact exists and has settled; both facts are
@@ -2584,8 +2595,10 @@ Commands:
   set's workspace fails the whole request without changing anything.
   Idempotent, so it is also how the queue view is redrawn.
 - `workflow.definitions.install [definition]`;
-  `workflow.start {source, plan, definition}` → `run` with its
-  reviewer session, and the planner clone once made;
+  `workflow.start {source, plan, definition, owner_round?}` → `run`
+  with its reviewer session, and the planner clone once made; with
+  `owner_round`, round 1 is that owner's objection, which the planner
+  answers before the reviewer is first asked;
   `workflow.pause {run}`; `workflow.continue {run}`;
   `workflow.object {run, round, text}` (the owner's objection to a
   converged or capped run, as round `round`, which must be the run's
