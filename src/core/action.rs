@@ -1085,6 +1085,11 @@ pub struct AppCore {
     /// The next hook event that sets an activity drops the mark.
     /// Transient; a restart loses it.
     pub(super) started: Vec<RecordId>,
+    /// When each session's pane was last spawned by this process, by
+    /// wall clock: the record's event stamps belong to the previous
+    /// process until the new one reports. Transient; a restart loses
+    /// it, and an adopted pane has none.
+    pub(super) spawned_at: Vec<(RecordId, SystemTime)>,
     /// When the owner last typed into each session's embedded terminal,
     /// or a `session.prompt` typed into it, by wall clock, and whether
     /// it was the prompt: the input box may hold text until `TYPED_HOLD`
@@ -2298,6 +2303,7 @@ impl AppCore {
         self.prompted.retain(|r| !gone(*r));
         self.relayed.retain(|r| !gone(*r));
         self.started.retain(|r| !gone(*r));
+        self.spawned_at.retain(|(r, _)| !gone(*r));
         self.typed.retain(|(r, ..)| !gone(*r));
         if self.codex_pending.is_some_and(gone) {
             self.codex_pending = None;

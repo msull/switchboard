@@ -5403,6 +5403,14 @@ mod workflow {
     fn claude_round_two(stopped: bool) -> (AppCore, WorkflowId, RecordId) {
         let (mut core, run, _, reviewer, _) = started();
         make_claude(&mut core, reviewer);
+        // The wall clock has whole-second resolution, so the spawn and
+        // the Stop would compare equal and fail the strict `>` in
+        // `reported_since_spawn`; move the spawn a second back.
+        for (r, at) in &mut core.spawned_at {
+            if *r == reviewer {
+                *at -= Duration::from_secs(1);
+            }
+        }
         if stopped {
             stop(&mut core, reviewer, 300);
         }
@@ -5560,6 +5568,155 @@ mod workflow {
         assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
         missing(&mut core, run, past_lost(200_000));
         assert!(failed_unprompted(&core, "plan.feedback-2.md"));
+    }
+
+    /// The run failed for a lost prompt with the reviewer's pane gone,
+    /// then Continue at 200 s relaunched it, spawned at 200.1 s. The old
+    /// process's Stop at 300 (and `ended`, a `SessionEnded` at 350)
+    /// stays stamped on the record.
+    fn relaunched_after_a_lost_prompt(ended: bool) -> (AppCore, WorkflowId, RecordId) {
+        let (mut core, run, reviewer) = claude_round_two(true);
+        if ended {
+            hook(
+                &mut core,
+                reviewer,
+                EventKind::SessionEnded { reason: None },
+                350,
+            );
+        }
+        missing(&mut core, run, past_lost(502));
+        assert!(failed_unprompted(&core, "plan.feedback-2.md"));
+        core.dispatch(AppAction::HostListed(vec![]), Clock::at(199_000));
+        let effects = core.dispatch(AppAction::ContinueWorkflow(run), Clock::at(200_000));
+        assert!(
+            sent(&effects).is_empty(),
+            "the ask goes on the command line"
+        );
+        assert_eq!(
+            run_of(&core).rounds[1].feedback_asked,
+            Some(Clock::at(200_000).wall)
+        );
+        if effects
+            .iter()
+            .any(|e| matches!(e, Effect::PrepareLaunch { id, .. } if *id == reviewer))
+        {
+            core.dispatch(
+                AppAction::LaunchPrepared {
+                    id: reviewer,
+                    result: Ok(AgentLaunch {
+                        argv: vec!["claude".into()],
+                        env: vec![],
+                        resume: None,
+                    }),
+                },
+                Clock::at(200_050),
+            );
+        }
+        core.dispatch(
+            AppAction::Spawned {
+                id: reviewer,
+                result: Ok(()),
+            },
+            Clock::at(200_100),
+        );
+        core.dispatch(
+            AppAction::HostListed(vec![running(reviewer)]),
+            Clock::at(200_200),
+        );
+        assert!(core.is_running(reviewer));
+        (core, run, reviewer)
+    }
+
+    #[test]
+    fn a_relaunched_reviewer_is_not_blamed_for_the_old_process_stamps() {
+        for ended in [false, true] {
+            let (mut core, run, reviewer) = relaunched_after_a_lost_prompt(ended);
+            assert!(core.session(reviewer).unwrap().last_event_at.is_some());
+            missing(&mut core, run, past_lost(200_000) + 60_000);
+            assert_eq!(
+                run_of(&core).state,
+                RunState::AwaitingFeedback,
+                "ended: {ended}"
+            );
+            // Once the new process reports and takes nothing, the check
+            // applies again.
+            hook(&mut core, reviewer, EventKind::SessionStart, 300_000);
+            core.edit_session(reviewer, &mut Out::default(), |s| {
+                s.activity = Activity::Idle;
+            });
+            missing(&mut core, run, past_lost(200_000) + 70_000);
+            assert!(
+                failed_unprompted(&core, "plan.feedback-2.md"),
+                "ended: {ended}: {:?}",
+                run_of(&core).state
+            );
+        }
+    }
+
+    #[test]
+    fn only_an_event_after_the_spawn_counts_as_the_new_process() {
+        let (mut core, run, reviewer) = relaunched_after_a_lost_prompt(false);
+        let start = |core: &mut AppCore, at_ms: u64| {
+            hook(core, reviewer, EventKind::SessionStart, at_ms);
+            core.edit_session(reviewer, &mut Out::default(), |s| {
+                s.activity = Activity::Idle;
+            });
+        };
+        start(&mut core, 200_100);
+        missing(&mut core, run, past_lost(200_000) + 60_000);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback);
+        // The next whole second on this clock's wall.
+        start(&mut core, 201_100);
+        missing(&mut core, run, past_lost(200_000) + 61_000);
+        assert!(failed_unprompted(&core, "plan.feedback-2.md"));
+    }
+
+    #[test]
+    fn an_adopted_pane_keeps_the_plain_has_reported_rule() {
+        let (mut core, run, reviewer) = claude_round_two(true);
+        assert!(core.spawned_at.iter().any(|(r, _)| *r == reviewer));
+        // A restart loses the spawn time.
+        core.spawned_at.clear();
+        missing(&mut core, run, past_lost(502));
+        assert!(failed_unprompted(&core, "plan.feedback-2.md"));
+    }
+
+    #[test]
+    fn continue_sends_nothing_into_a_relaunched_pane_that_has_not_reported() {
+        let (mut core, run, reviewer) = relaunched_after_a_lost_prompt(false);
+        core.workspaces[0].workflows[0].state = RunState::Failed("stuck".into());
+        let effects = core.dispatch(AppAction::ContinueWorkflow(run), Clock::at(250_000));
+        assert!(sent(&effects).is_empty(), "{effects:?}");
+        let r = run_of(&core);
+        assert_eq!(r.state, RunState::AwaitingFeedback);
+        assert_eq!(r.rounds[1].feedback_asked, Some(Clock::at(200_000).wall));
+
+        hook(&mut core, reviewer, EventKind::SessionStart, 260_000);
+        core.edit_session(reviewer, &mut Out::default(), |s| {
+            s.activity = Activity::Idle;
+        });
+        core.workspaces[0].workflows[0].state = RunState::Failed("stuck".into());
+        let effects = core.dispatch(AppAction::ContinueWorkflow(run), Clock::at(270_000));
+        assert_eq!(sent(&effects).len(), 1, "the reviewer is asked once more");
+        assert_eq!(
+            run_of(&core).rounds[1].feedback_asked,
+            Some(Clock::at(270_000).wall)
+        );
+    }
+
+    #[test]
+    fn the_spawn_time_follows_the_record() {
+        let (mut core, _, reviewer) = relaunched_after_a_lost_prompt(false);
+        let marks: Vec<_> = core
+            .spawned_at
+            .iter()
+            .filter(|(r, _)| *r == reviewer)
+            .collect();
+        // The relaunch's spawn replaced the first one's.
+        assert_eq!(marks, [&(reviewer, Clock::at(200_100).wall)]);
+        let project = core.workspaces[0].project.id;
+        core.dispatch(AppAction::RemoveProject(project), Clock::at(400_000));
+        assert!(core.spawned_at.iter().all(|(r, _)| *r != reviewer));
     }
 
     #[test]

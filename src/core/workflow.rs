@@ -656,20 +656,36 @@ impl AppCore {
     /// turn. Claude's trust question, an outside wait or the agent's
     /// own ask are the owner's to clear first. Those marks are read
     /// directly: the card state also reads the stall mark, which a lost
-    /// prompt itself sets.
+    /// prompt itself sets. The agent must have reported since its pane
+    /// was spawned: a relaunched pane keeps the previous process's
+    /// stamps until the new one reports, and a pane still starting up
+    /// has not been given the prompt yet.
     fn prompt_missing(&self, agent: RecordId, asked: SystemTime) -> bool {
         let Some(session) = self.session(agent) else {
             return false;
         };
         session.kind == SessionKind::Agent(AgentKind::ClaudeCode)
             && self.is_running(agent)
-            && session.last_event_at.is_some()
+            && self.reported_since_spawn(agent)
             && session.last_prompt_at.is_none_or(|at| at <= asked)
             && session.activity != Activity::WaitingOnYou
             && (session.activity != Activity::Working || self.started.contains(&agent))
             && !self.prompted.contains(&agent)
             && session.waiting_on.is_none()
             && session.asking.is_none()
+    }
+
+    /// False before any event. When this process spawned the pane, the
+    /// event must also be later than the spawn; an adopted pane has no
+    /// spawn time, so any event counts.
+    fn reported_since_spawn(&self, agent: RecordId) -> bool {
+        let Some(last) = self.session(agent).and_then(|s| s.last_event_at) else {
+            return false;
+        };
+        self.spawned_at
+            .iter()
+            .find(|(r, _)| *r == agent)
+            .is_none_or(|(_, at)| last > *at)
     }
 
     /// The agent's pane runs and its last Stop listed background work or

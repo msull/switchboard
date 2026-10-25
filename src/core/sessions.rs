@@ -893,6 +893,8 @@ impl AppCore {
                 });
                 // Nor been sent anything for an ask it no longer has.
                 self.relayed.retain(|r| *r != id);
+                self.spawned_at.retain(|(r, _)| *r != id);
+                self.spawned_at.push((id, now.wall));
                 // Until the next host poll, treat the session as running so
                 // a "return" in that window attaches instead of spawning
                 // again. The poll replaces this placeholder.

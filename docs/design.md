@@ -1058,7 +1058,8 @@ has no Stop hook, so a Codex reviewer that sits idle without its file
 still only gets the stall notice below; the planner is always a Claude
 Code clone, so its half is always covered. A round saved before the
 asked times were kept never fails on a stop (the stop may be the
-previous round's). A Claude Code agent whose hooks report, that has
+previous round's). A Claude Code agent whose hooks have reported since its
+pane was spawned (see Known gaps), that has
 started no turn since it was asked (no typed `UserPromptSubmit` after
 the ask: `SessionRecord::last_prompt_at`; an injected notification does
 not show the ask was taken), whose pane runs, whose card is not on an
@@ -3831,11 +3832,30 @@ Dispatch reads as a failed review and offers to rerun. Continue
 re-sends the ask once when no turn began. Nothing re-sends on its own,
 since a re-send into a pane still at the dialog is lost the same way.
 
+A pane this process spawned must report an event later than its spawn
+before the check may blame it (`AppCore::spawned_at`, transient): the
+record's `last_event_at` is the previous process's until then, so a
+reviewer relaunched on Continue and still starting up used to fail the
+round as "never started a turn" once the bound passed. Continue sends
+nothing into such a pane either; once it reports and has still taken
+no prompt, Continue re-sends as before. A restart loses the spawn time,
+so an adopted pane keeps the plain "has reported" rule.
+
 Known gaps: Codex agents report no hooks and keep the stall notice
 only, which includes the built-in definition's reviewer. Whether the
 dialog or its Esc writes any hook line is not settled; if a lost prompt
 turns out to fire `UserPromptSubmit`, the check needs a turn count
-rather than a timestamp.
+rather than a timestamp. No event carries a process identity, so a
+late event from the old process stamped after the spawn counts as the
+new one's (Continue relaunches only a gone pane, whose `SessionEnd` has
+already fired). Between the new process's `SessionStart` and its
+`UserPromptSubmit`, milliseconds apart, the prompt reads as not yet
+taken, the same window the `started` mark already has. A spawned pane
+that never reports any event is no longer blamed by this check.
+`PromptSubmitted` can be lost if Claude Code cancels the hook helper at
+its 5 s timeout (whether the log line was already appended is not
+documented), and a turn that then uses no tool for `LOST_PROMPT_AFTER`
+fails as unprompted; any tool use or Stop covers it.
 
 ## A human gate's own question (2026-10-25)
 
