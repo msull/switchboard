@@ -78,13 +78,29 @@ pub fn commit_stages(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// Each decision `text` names, as `{decisions.X}` (its answer) or
+/// `{decisions.X.note}` (the note given with it).
+#[must_use]
+pub fn decision_names(text: &str) -> BTreeSet<String> {
+    fields(text, "{decisions.")
+        .map(|field| field.strip_suffix(".note").unwrap_or(field))
+        .filter(|name| !name.is_empty() && !name.contains('.'))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// What follows `inputs.` in each well-formed `{inputs.…}` field.
 fn input_fields(text: &str) -> impl Iterator<Item = &str> {
+    fields(text, "{inputs.")
+}
+
+/// What follows `open` in each well-formed field that starts with it.
+fn fields<'a>(text: &'a str, open: &'static str) -> impl Iterator<Item = &'a str> {
     let mut rest = text;
     std::iter::from_fn(move || {
         loop {
-            let start = rest.find("{inputs.")?;
-            let after = &rest[start + "{inputs.".len()..];
+            let start = rest.find(open)?;
+            let after = &rest[start + open.len()..];
             let end = after.find('}')?;
             let field = &after[..end];
             rest = &after[end..];
@@ -124,6 +140,16 @@ mod tests {
                 (None, "personas".to_owned()),
                 (Some("try-setup".to_owned()), "personas".to_owned()),
             ])
+        );
+    }
+
+    #[test]
+    fn decision_names_finds_answers_and_notes() {
+        assert_eq!(
+            decision_names(
+                "{decisions.a} and {decisions.a-b.note}; {inputs.x} {decisions.} {decisions..note} {decisions.c.d} {decisions.bad name} {decisions.e"
+            ),
+            BTreeSet::from(["a".to_owned(), "a-b".to_owned()])
         );
     }
 

@@ -527,11 +527,15 @@ name = "lanes"
 gate = { kind = "human", decision = "lanes" }
 
 [[stages]]
+name = "decisions"
+gate = { kind = "human", decision = "decisions", question = "Open decisions are in {inputs.notes}. Answer each in the note, or proceed with none to take the recommendations." }
+
+[[stages]]
 name = "plan"
 operator = "planner"
 context = "joined"
 writes = ["plan"]
-prompt = "Using {inputs.investigate.notes}, write one plan covering the lanes {lanes} of issue #{issue.number} to {plan}."
+prompt = "Using {inputs.investigate.notes}, write one plan covering the lanes {lanes} of issue #{issue.number} to {plan}. The lead has decided: {decisions.decisions.note}"
 
 [[stages]]
 name = "review"
@@ -593,6 +597,23 @@ answer, shown with the investigator's notes. With the `lanes` dial at
 `ask`, the hint is only a suggestion. At `auto`, a hint answers the
 question, and an issue with no hinted label is still asked. Without
 `lane_hints`, every multi-lane ticket asks with no suggestion.
+
+**The `decisions` gate** puts the open decisions in front of you
+before anything is planned, so the plan is written to your answers
+rather than revised to them. Its `question` replaces the default
+question (the branch, its diff and the notes), which is why it names
+`{inputs.notes}` itself. Answer `proceed` with a note holding your
+answers. The planner reads them as `{decisions.decisions.note}`, and
+the answer itself as `{decisions.decisions}`. A gate answered with no
+note, or not yet asked, renders both as empty text. `rerun` with a
+note sends the ticket back to `investigate` instead, with the note in
+its prompt, and the gate asks again after it. A human gate has no
+dial: `decisions = "auto"` under `[policy]` does nothing for it, and
+it always asks, unless a supervisor's `decides` names `decisions`.
+Every `{decisions.<name>}` must name a decision some gate of the file
+or Dispatch itself asks, or the file is refused. A ticket taken before
+the stage was added gets it only through `dispatch restart <ticket>
+decisions`.
 
 **Which context each stage wants.**
 
@@ -781,11 +802,15 @@ name = "lanes"
 gate = { kind = "human", decision = "lanes" }
 
 [[stages]]
+name = "decisions"
+gate = { kind = "human", decision = "decisions", question = "Open decisions are in {inputs.notes}. Answer each in the note, or proceed with none to take the recommendations." }
+
+[[stages]]
 name = "plan"
 operator = "planner"
 context = "joined"
 writes = ["plan"]
-prompt = "Using {inputs.investigate.notes}, write one plan covering the lanes {lanes} of issue #{issue.number} to {plan}."
+prompt = "Using {inputs.investigate.notes}, write one plan covering the lanes {lanes} of issue #{issue.number} to {plan}. The lead has decided: {decisions.decisions.note}"
 
 [[stages]]
 name = "review"
@@ -1029,11 +1054,15 @@ name = "lanes"
 gate = { kind = "human", decision = "lanes" }
 
 [[stages]]
+name = "decisions"
+gate = { kind = "human", decision = "decisions", question = "Open decisions are in {inputs.notes}. Answer each in the note, or proceed with none to take the recommendations." }
+
+[[stages]]
 name = "plan"
 operator = "planner"
 context = "joined"
 writes = ["plan"]
-prompt = "Using {inputs.investigate.notes}, write one plan covering the lanes {lanes} of issue #{issue.number} to {plan}."
+prompt = "Using {inputs.investigate.notes}, write one plan covering the lanes {lanes} of issue #{issue.number} to {plan}. The lead has decided: {decisions.decisions.note}"
 
 [[stages]]
 name = "review"
@@ -1426,11 +1455,15 @@ name = "lanes"
 gate = { kind = "human", decision = "lanes" }
 
 [[stages]]
+name = "decisions"
+gate = { kind = "human", decision = "decisions", question = "Open decisions are in {inputs.notes}. Answer each in the note, or proceed with none to take the recommendations." }
+
+[[stages]]
 name = "plan"
 operator = "planner"
 context = "joined"
 writes = ["plan"]
-prompt = "Using {inputs.investigate.notes}, write one plan covering the lanes {lanes} of issue #{issue.number} to {plan}."
+prompt = "Using {inputs.investigate.notes}, write one plan covering the lanes {lanes} of issue #{issue.number} to {plan}. The lead has decided: {decisions.decisions.note}"
 
 [[stages]]
 name = "review"
@@ -1737,6 +1770,7 @@ Each row is a key from the steps above, and what goes wrong without it.
 |---|---|
 | `[project] base`, a lane's `base` | the lane branches from `main` (or the project's `base`), which may not be its integration branch |
 | `[source] lane_hints` | every multi-lane ticket asks which lanes, with no suggestion |
+| `{decisions.<name>.note}` in a prompt | the answers typed at a human gate never reach the next agent, and the plan is revised to them afterwards |
 | a lane's `setup` | the first agent installs dependencies itself, and gates fail on a cold tree |
 | a lane's `serve` | a stage cannot serve that lane; `services` naming it is refused |
 | a lane's `writable` | under `confine`, the lane's tools fail writing their caches |

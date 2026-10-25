@@ -20,10 +20,11 @@
 # is two rounds, premises then cuts; implementation, code review and the
 # pull request are the shape every Dispatch pipeline has.
 #
-# When Dispatch can hand a human gate's note to a later prompt (issue
-# #236), a `decisions` stage goes between `lanes` and `plan`: the owner
+# A human gate's note reaches later prompts as `{decisions.<name>.note}`,
+# so a `decisions` stage can go between `lanes` and `plan`: the owner
 # answers the investigator's open decisions there and the planner writes
-# them as settled.
+# them as settled. It is not added here yet; a ticket already taken gets
+# it only through `dispatch restart <ticket> decisions`.
 version = 1
 
 [project]
