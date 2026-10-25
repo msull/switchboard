@@ -8,6 +8,8 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-25
+
 ### Changed
 
 - A human gate's own question now follows the branch, diff, tree, notes and deployed lines instead of replacing them, a branch or diff line git cannot read is left out instead of failing the gate, and a `question` on the `lanes` gate is refused when the pipeline file loads.
