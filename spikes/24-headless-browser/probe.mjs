@@ -1,0 +1,21 @@
+// Drives spike 23's server in headless Chromium with HTTPS errors ignored.
+import { chromium } from 'playwright';
+const url = process.argv[2] ?? 'https://127.0.0.1:43187/';
+const browser = await chromium.launch();
+const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
+const page = await ctx.newPage();
+page.on('requestfailed', r => console.log('requestfailed', r.url(), r.failure()?.errorText));
+page.on('console', m => console.log('console', m.text()));
+await page.goto(url);
+console.log('title:', await page.title());
+await page.click('#pair', { timeout: 5000 });
+await page.waitForTimeout(500);
+console.log('after pair :', await page.textContent('#cookie'));
+await page.reload();
+await page.waitForTimeout(500);
+console.log('on reload  :', await page.textContent('#reload'));
+await page.click('#ws');
+await page.waitForTimeout(1000);
+console.log('socket     :', await page.textContent('#socket'));
+console.log('cookies    :', JSON.stringify((await ctx.cookies()).map(c => [c.name, c.secure, c.httpOnly, c.sameSite])));
+await browser.close();

@@ -3627,13 +3627,14 @@ Built so far:
   3 s, and treats the events socket as a hastener; a 401 is told
   apart through `/info` (same key and id: removed on the host;
   otherwise: identity changed). Spike 23 says what was measured.
-  Known gaps: no browser was driven, so whether Safari and Chrome keep
-  the cookie from a self-signed IP-literal host, offer a way past the
-  certificate warning (today's certificate has no subject alternative
-  names, and Chrome matches only those) and connect `wss://` are
-  untested; the trusted-certificate path and a token-in-page fallback
-  are the owner's decisions. The card's one-line excerpt is not on
-  the wire, so the page's rows have none.
+  Known gaps: headless Chromium keeps the cookie from the self-signed
+  IP-literal host and connects `wss://` past the `Origin` gate (the
+  browser test below), but Safari is a hand check, and whether a
+  browser a person drives offers a way past the certificate warning
+  (today's certificate has no subject alternative names, and Chrome
+  matches only those) is untested; the trusted-certificate path and a
+  token-in-page fallback are the owner's decisions. The card's one-line
+  excerpt is not on the wire, so the page's rows have none.
 - **The conversation on the web page (2026-10-24).** A Claude Code
   session opens as its conversation rather than its last response:
   `conversation?from=last&limit=20`, then `before=<lowest held
@@ -3651,7 +3652,8 @@ Built so far:
   hook's `last_stop_at_ms`, and `last_activity_ms` as the pane
   prints), not checked against a live session. No host code changed;
   the route-table test now fails on a path placeholder it does not
-  fill. Known gaps: no browser was driven. A step's tool input and
+  fill. Known gaps: Safari was not driven (headless Chromium is, by
+  the browser test below). A step's tool input and
   result are not shown (a page carries 512 bytes of each; reading a
   turn whole through `conversation/{n}` is a later increment). The
   next features, each its own issue, in order: Dispatch tickets and
@@ -3685,11 +3687,30 @@ Built so far:
   odd into the defaults. `SessionView` gains an additive
   `last_seen_ms` (the record's `last_seen`, for every liveness), so
   an ended session has an age; recency is the latest of it,
-  `last_activity_ms` and `last_stop_at_ms`. Known gaps: no browser was
-  driven, so the layout at 375 and 390 px and whether the choices
-  survive a reload on the self-signed origin are unchecked; the
-  Swift client does not read `last_seen_ms`; the search text is not
-  remembered.
+  `last_activity_ms` and `last_stop_at_ms`. Known gaps: the layout is
+  checked at 390 px in headless Chromium only (the browser test
+  below), not at 375 px or in Safari; the Swift client does not read
+  `last_seen_ms`; the search text is not remembered.
+- **The web page in a browser (2026-10-25).** `tests/remote.rs`'s
+  `the_page_works_in_a_real_browser` drives the page in headless
+  Chromium (Playwright, pinned under `tests/browser/`) against the test
+  host, which the test pumps while `page.mjs` asks for each step: a
+  browser that refuses the cookie is told so and remembers no host;
+  pairing from the invite clears the fragment, keeps the host and a
+  `Secure`, `HttpOnly`, `SameSite=Strict` cookie script cannot read,
+  and draws the list with no horizontal scroll at 390 px; a chosen
+  sort survives a reload; a conversation opens; a poll that redraws
+  the list and the open session leaves the reply box's text alone;
+  five tab switches leave one polling chain; a send is typed once and
+  says "Sent."; and a 401 says "Identity changed" or "removed" as
+  `/info` decides. It is `#[ignore]`d, so neither the hook nor CI runs
+  it; the doc comment has the commands. Layout is checked at 390 px
+  only, and Safari stays a hand check. The page's node tests now fail
+  on CI without node, which CI installs, and print `SKIPPED:`
+  elsewhere. Known gaps: text typed into the reply box while a send is
+  in flight is cleared when it succeeds (the run prints `midflight
+  text:`, with `socket:` and `polls in 9 s:`, as measurements rather
+  than checks); what the box should do with it is the owner's call.
 
 ## Versioning and updates (2026-10-15)
 

@@ -1,0 +1,6 @@
+console Failed to load resource: the server responded with a status of 401 (X)
+title: Spike 23
+after pair : 200 then /me: 200 {"cookie":"__Host-sb-a"}
+on reload  : 200 {"cookie":"__Host-sb-a"}
+socket     : frame: hello; closed 1005
+cookies    : [["__Host-sb-a",true,true,"Strict"]]

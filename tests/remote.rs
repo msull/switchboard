@@ -4168,3 +4168,147 @@ fn page_requests_have_their_own_rate_window() {
     let (status, reply) = call(&mut port, "POST", "/api/v1/pair", None, "{}");
     assert_eq!((status, code(&reply)), (403, "pairing_closed"));
 }
+
+/// The page in headless Chromium against this host: a browser that
+/// refuses the cookie, pairing from the invite, the list and a session
+/// at phone width, a reply kept across a poll, one polling chain across
+/// tab switches, a send typed once, and the identity-changed and
+/// removed notices. `tests/browser/page.mjs` is the browser half; this
+/// side pumps the host and does each step's part when the script asks.
+/// Not run by `cargo test`: it needs node and a Chromium download.
+///
+/// ```sh
+/// cd tests/browser && npm ci && npx playwright install chromium
+/// cargo test --locked --test remote -- --ignored the_page_works_in_a_real_browser --nocapture
+/// ```
+#[test]
+#[ignore = "drives headless Chromium; see the doc comment"]
+fn the_page_works_in_a_real_browser() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/browser");
+    assert!(
+        dir.join("node_modules").is_dir(),
+        "the browser test needs its driver installed:\n  \
+         cd tests/browser && npm ci && npx playwright install chromium\n  \
+         cargo test --locked --test remote -- --ignored the_page_works_in_a_real_browser --nocapture"
+    );
+    let mut port = port();
+    port.transcripts.set(Some(conversation(3)));
+    let (_, _, session) = seed(&mut port, "");
+    let record = launched(&mut port, &session);
+    running(&mut port, &session, "\u{276f} ");
+    // A session that has reported no turn refuses a reply.
+    hook(&mut port, record, stopped());
+
+    let mut child = Browser(
+        std::process::Command::new("node")
+            .arg("page.mjs")
+            .current_dir(&dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("node"),
+    );
+    let mut stdin = child.0.stdin.take().unwrap();
+    let stdout = child.0.stdout.take().unwrap();
+    let mut stderr = child.0.stderr.take().unwrap();
+    let (tx, lines) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let errors = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let mut done = false;
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the browser ran out of time"
+        );
+        port.app.serve_pending();
+        let line = match lines.recv_timeout(Duration::from_millis(2)) {
+            Ok(line) => line,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        let Some(step) = line.strip_prefix("STEP ") else {
+            if line == "DONE" {
+                done = true;
+            }
+            println!("{line}");
+            continue;
+        };
+        let answer = browser_step(&mut port, step, record);
+        writeln!(stdin, "{answer}").unwrap();
+        stdin.flush().unwrap();
+    }
+    let status = child.0.wait().unwrap();
+    let errors = errors.join().unwrap();
+    assert!(status.success() && done, "{status}: {errors}");
+}
+
+/// The node child, killed if the test panics first.
+struct Browser(std::process::Child);
+
+impl Drop for Browser {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The host's part of one step of `tests/browser/page.mjs`: its answer.
+fn browser_step(port: &mut Port, step: &str, record: RecordId) -> String {
+    let invite = |port: &mut Port, code: &str| {
+        port.app.dispatch(AppAction::OpenPairing {
+            code: code.into(),
+            scope: Scope::Control,
+        });
+        let identity = port.remote.state().identity.clone().unwrap();
+        let window = port.app.core().pairing().unwrap().clone();
+        let url = switchboard::core::remote::invite_url(&identity, &window, None, port.addr.port());
+        format!("invite {url}")
+    };
+    let revoke_all = |port: &mut Port| {
+        let ids: Vec<_> = port.app.core().devices().iter().map(|d| d.id).collect();
+        for id in ids {
+            port.app.dispatch(AppAction::RevokeDevice(id));
+        }
+    };
+    match step {
+        "refused-cookie" => invite(port, "WXYZ2345"),
+        "pair" => {
+            // The device the refusing browser paired as holds no cookie.
+            assert_eq!(port.app.core().devices().len(), 1, "the refused pairing");
+            revoke_all(port);
+            invite(port, "ABCD2345")
+        }
+        "poll-keeps-reply" => {
+            port.app
+                .dispatch(AppAction::RenameSession(record, "investigator 2".into()));
+            port.transcripts.set(Some(conversation(4)));
+            port.app.poll_now();
+            "go".into()
+        }
+        "sent" => {
+            let written = port.host.state().written.clone();
+            let sent = written.iter().filter(|(_, text)| text == "second").count();
+            assert_eq!(sent, 1, "{written:?}");
+            "go".into()
+        }
+        "changed-and-removed" => {
+            revoke_all(port);
+            "go".into()
+        }
+        _ => "go".into(),
+    }
+}

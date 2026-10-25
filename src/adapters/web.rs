@@ -132,8 +132,8 @@ mod tests {
         }
     }
 
-    /// The page's pure parts under `node --test`, skipped where node is
-    /// not installed, as the tmux tests skip without tmux.
+    /// The page's pure parts under `node --test`. Without node the test
+    /// fails on CI, which installs it, and elsewhere says it skipped.
     #[test]
     fn the_pages_logic_passes_its_node_tests() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web");
@@ -145,7 +145,14 @@ mod tests {
         {
             Ok(output) => output,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!("skipping the page's node tests: node is not installed");
+                let on_ci = std::env::var("CI").is_ok_and(|v| !v.is_empty());
+                assert!(!on_ci, "node is required on CI to run `web/app.test.js`");
+                // libtest captures the print macros of a passing test,
+                // not a direct write, so the skip reaches the terminal.
+                let _ = std::io::Write::write_all(
+                    &mut std::io::stderr(),
+                    b"SKIPPED: the page's node tests did not run: node is not installed\n",
+                );
                 return;
             }
             Err(e) => panic!("node: {e}"),
