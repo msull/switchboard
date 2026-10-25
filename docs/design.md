@@ -3580,9 +3580,12 @@ Built so far:
   injectable for the tests). Pasting the invite's text stays as the
   fallback.
 - **Known gaps at the first merge.** Milestone D, the iPad shell, is
-  not started. The Codex transcript parser, so a Codex session's
-  conversation is empty on a device. The Dispatch ticket view
-  (`scope=all` is served; no view asks for it). Removing dead sessions
+  not started. The Codex transcript parser: a Codex session's
+  conversation is refused with `400 no_conversation`, since only a
+  Claude Code session with a resume handle is served. The Dispatch
+  ticket view; tickets and a ticket's worker session (read by id) are
+  not gated on `scope`, which filters only the projects, sessions and
+  waiting lists. Removing dead sessions
   from a device. The Recent sessions set counts worker sessions. The
   screen and run-output modes follow the end without the
   conversation's end marker. The draft path makes the editor on the
@@ -3620,6 +3623,37 @@ Built so far:
   untested; the trusted-certificate path and a token-in-page fallback
   are the owner's decisions. The card's one-line excerpt is not on
   the wire, so the page's rows have none.
+- **The conversation on the web page (2026-10-24).** A Claude Code
+  session opens as its conversation rather than its last response:
+  `conversation?from=last&limit=20`, then `before=<lowest held
+  turn>` for "Earlier turns", merged by turn number in memory only
+  (`mergeTurns`; a page that starts past the turn after the last held
+  one replaces them, and turns past `total` or under another
+  `resume_id` are dropped). Each turn shows its prompt, its steps'
+  one-line summaries folded under "N steps" (errors marked), and its
+  answer. Any other kind keeps the screen, and `400 no_conversation`
+  says the host's message in the block. The page's requests go one at
+  a time through one queue, the list's, `/waiting`'s and the
+  conversation's alike. The open conversation is refetched when the
+  list is, which the `/waiting` mark decides: by reading the revision
+  fingerprint, a turn moves it (the card on the prompt, the Stop
+  hook's `last_stop_at_ms`, and `last_activity_ms` as the pane
+  prints), not checked against a live session. No host code changed;
+  the route-table test now fails on a path placeholder it does not
+  fill. Known gaps: no browser was driven. A step's tool input and
+  result are not shown (a page carries 512 bytes of each; reading a
+  turn whole through `conversation/{n}` is a later increment). The
+  next features, each its own issue, in order: Dispatch tickets and
+  decisions (needs the socket frame's kind read before refetching,
+  since the revision moves for tickets, a ticket fill rule in the
+  route-table test, and a "no runner connected" state); a session's
+  runs and their output (artifacts by name only, having no content
+  route); the draft as a text area with `replace` and `send` (after
+  the owner decides whether the draft read is masked or refused to
+  `read` scope, since it is sent as typed today); pinned files
+  (through `spaces/{space}/sets` and `sets/{id}`, as no route lists
+  pins); and dictation last, behind `isSecureContext` and the
+  recognizer check on each device.
 
 ## Versioning and updates (2026-10-15)
 

@@ -11,6 +11,7 @@ and the versions follow [Semantic Versioning](https://semver.org).
 ### Added
 
 - Dispatch hands a human gate's answer and note to later prompts as `{decisions.<name>}` and `{decisions.<name>.note}`, empty while unanswered, and a human gate can carry its own `question` in place of the default one, so a `decisions` stage after `lanes` puts the lead's answers in the planner's first prompt.
+- The web page shows a Claude Code session's conversation, turn by turn with each turn's steps folded under it, and loads earlier turns on request; on a tablet the page reads in a centred column.
 
 ### Fixed
 

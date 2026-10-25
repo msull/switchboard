@@ -3407,6 +3407,7 @@ fn a_conversation_pages_by_turn_and_its_last_response_shares_the_revision() {
         t,
     );
     assert_eq!(last_page["body"]["from"], 3);
+    assert_eq!(last_page["body"]["turns"][0]["n"], 3, "{last_page}");
 
     let (status, last) = get(
         &mut port,
@@ -3442,13 +3443,11 @@ fn a_conversation_pages_by_turn_and_its_last_response_shares_the_revision() {
         ),
     );
     let shell = made_id(&reply, RecordKind::Session);
-    let (status, reply) = get(
-        &mut port,
-        &format!("/api/v1/sessions/{shell}/last-response"),
-        t,
-    );
-    assert_eq!(status, 400);
-    assert_eq!(code(&reply), "no_conversation");
+    for route in ["last-response", "conversation?from=last&limit=20"] {
+        let (status, reply) = get(&mut port, &format!("/api/v1/sessions/{shell}/{route}"), t);
+        assert_eq!(status, 400, "{route}");
+        assert_eq!(code(&reply), "no_conversation", "{route}");
+    }
 }
 
 /// A watched conversation moves when the transcript grows, with one
@@ -3829,6 +3828,10 @@ fn the_page_calls_only_routes_the_host_serves() {
             &session
         };
         let path = path.replace("{id}", id);
+        assert!(
+            !path.contains('{'),
+            "{path}: a placeholder this test does not fill"
+        );
         let (status, reply) = call(&mut port, &method, &path, Some(&token), "{}");
         assert_ne!(
             code(&reply),

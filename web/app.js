@@ -1,5 +1,7 @@
 // Switchboard's web page: pair a browser from the pairing window's QR,
-// list the sessions with the waiting ones first, read one, and reply.
+// list the sessions with the waiting ones first, read one (a Claude
+// Code session as its conversation, anything else as its screen), and
+// reply.
 // It speaks the remote port's /api/v1 as a native client does, with
 // two differences: the token is a cookie this script never sees, and
 // changes arrive by polling, the events socket only hastening them.
@@ -15,7 +17,7 @@ const API = {
   projects: 'GET /api/v1/projects',
   sessions: 'GET /api/v1/projects/{id}/sessions',
   waiting: 'GET /api/v1/waiting',
-  lastResponse: 'GET /api/v1/sessions/{id}/last-response',
+  conversation: 'GET /api/v1/sessions/{id}/conversation',
   screen: 'GET /api/v1/sessions/{id}/screen',
   send: 'POST /api/v1/sessions/{id}/send',
   events: 'GET /api/v1/events',
@@ -26,6 +28,9 @@ const POLL_FAST_MS = 3000;
 const POLL_SLOW_MS = 20000;
 const SOCKET_RETRY_MS = 5000;
 const SOCKET_RETRY_MAX_MS = 60000;
+// Turns per conversation page: the host's default, small enough for a
+// phone, where a page at the host's cap could be 640 KiB.
+const TURNS_PER_PAGE = 20;
 
 // --- pure parts, tested with node --test
 
@@ -125,8 +130,46 @@ function route(entry, id) {
   return { method, path: path.replace('{id}', encodeURIComponent(id || '')) };
 }
 
+/**
+ * The query for a conversation page: the last turns, or those ending
+ * before turn `before`.
+ */
+function conversationQuery(before) {
+  const anchor = before ? `before=${before}` : 'from=last';
+  return `?${anchor}&limit=${TURNS_PER_PAGE}`;
+}
+
+/**
+ * The turns held after a page arrives, ordered by number `n`. A page's
+ * turn replaces a held one of the same number; held turns past the
+ * conversation's `total` are gone; a page that starts past the turn
+ * after the last held one replaces them all, since keeping them would
+ * show a stale middle as if nothing were missing.
+ */
+function mergeTurns(held, page) {
+  const turns = page.turns || [];
+  let kept = (held || []).filter((t) => page.total == null || t.n <= page.total);
+  if (turns.length === 0) return kept;
+  const highest = kept.length ? kept[kept.length - 1].n : 0;
+  if (turns[0].n > highest + 1) kept = [];
+  const byNumber = new Map(kept.map((t) => [t.n, t]));
+  for (const t of turns) byNumber.set(t.n, t);
+  return [...byNumber.values()].sort((a, b) => a.n - b.n);
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { API, parseFragment, deviceName, inferUnauthorized, isCurrent, orderSessions, sinceText, route };
+  module.exports = {
+    API,
+    parseFragment,
+    deviceName,
+    inferUnauthorized,
+    isCurrent,
+    orderSessions,
+    sinceText,
+    route,
+    conversationQuery,
+    mergeTurns,
+  };
 }
 
 // --- the page
@@ -139,7 +182,12 @@ if (typeof document !== 'undefined') {
     open: null,
     sessions: {},
     held: {},
+    // The open conversation's turns, kept in memory only.
+    turns: [],
+    resumeId: null,
+    scrollToEnd: false,
     pending: null,
+    chain: Promise.resolve(),
     socket: null,
     socketRetry: SOCKET_RETRY_MS,
     pollMs: POLL_FAST_MS,
@@ -154,14 +202,14 @@ if (typeof document !== 'undefined') {
     }
   }
 
-  async function call(entry, id, body) {
+  async function call(entry, id, body, query) {
     const { method, path } = route(entry, id);
     const init = { method, credentials: 'same-origin', cache: 'no-store', headers: {} };
     if (body !== undefined) {
       init.headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(body);
     }
-    const response = await fetch(path, init);
+    const response = await fetch(path + (query || ''), init);
     let json = null;
     try { json = await response.json(); } catch (_) { json = null; }
     if (!response.ok) {
@@ -225,6 +273,19 @@ if (typeof document !== 'undefined') {
     return null;
   }
 
+  /**
+   * Run `work` after every request queued before it: one at a time, on
+   * the one kept connection, since requests in parallel would open new
+   * connections and the host holds four that have not yet
+   * authenticated before it refuses a fifth. Work already in the queue
+   * calls the inner functions directly, never `serial` again.
+   */
+  function serial(work) {
+    const run = state.chain.then(() => work());
+    state.chain = run.catch(() => null);
+    return run;
+  }
+
   /** The section the signed-in page is on: the open session or the list. */
   function showCurrent() {
     show(state.open ? 'session' : 'list');
@@ -282,7 +343,11 @@ if (typeof document !== 'undefined') {
     return null;
   }
 
-  async function refreshList() {
+  function refreshList() {
+    return serial(loadList);
+  }
+
+  async function loadList() {
     let projects;
     const sessionsByProject = {};
     let mark;
@@ -290,9 +355,6 @@ if (typeof document !== 'undefined') {
       const reply = await call(API.projects);
       mark = { epoch: reply.epoch, revision: reply.revision };
       projects = reply.body.projects || [];
-      // One at a time, on the one kept connection: requests in
-      // parallel would open new connections, and the host holds four
-      // that have not yet authenticated before it refuses a fifth.
       for (const p of projects) {
         const r = await call(API.sessions, p.id);
         sessionsByProject[p.id] = r.body.sessions || [];
@@ -308,7 +370,7 @@ if (typeof document !== 'undefined') {
     }
     drawList(orderSessions(projects, sessionsByProject));
     if (state.open) {
-      if (state.sessions[state.open]) await refreshSession();
+      if (state.sessions[state.open]) await loadSession();
       else closeSession();
     }
     return null;
@@ -353,10 +415,14 @@ if (typeof document !== 'undefined') {
       $('reply-status').textContent = '';
       $('session-text').textContent = '';
       state.pending = null;
+      state.turns = [];
+      state.resumeId = null;
+      $('turn-list').replaceChildren();
+      state.scrollToEnd = true;
     }
     state.open = id;
     show('session');
-    refreshSession();
+    serial(loadSession);
   }
 
   function closeSession() {
@@ -364,7 +430,7 @@ if (typeof document !== 'undefined') {
     show('list');
   }
 
-  async function refreshSession() {
+  async function loadSession() {
     const id = state.open;
     const s = state.sessions[id];
     if (!s) return null;
@@ -376,21 +442,135 @@ if (typeof document !== 'undefined') {
     $('reply').hidden = !canReply || s.prompt_refusal != null;
     $('session-refusal').hidden = !canReply || s.prompt_refusal == null;
     $('session-refusal').textContent = s.prompt_refusal ? `No reply from here: ${s.prompt_refusal}` : '';
-    const entry = s.kind === 'claude' ? API.lastResponse : API.screen;
-    const key = `${entry} ${id}`;
+    if (s.kind === 'claude') return loadConversation(id, null);
+    const key = `${API.screen} ${id}`;
     try {
-      const reply = await call(entry, id);
+      const reply = await call(API.screen, id);
       if (state.open !== id || !isCurrent(state.held[key], reply)) return null;
       state.held[key] = { epoch: reply.epoch, revision: reply.revision };
-      $('session-text').textContent = reply.body.text || '';
+      showText(reply.body.text || '');
     } catch (error) {
-      if (error instanceof HttpError && error.status !== 401) {
-        if (state.open === id) $('session-text').textContent = error.message;
-        return null;
-      }
-      return failed(error);
+      return blockFailed(id, error);
     }
     return null;
+  }
+
+  /**
+   * A conversation page, the last turns or those before turn `before`,
+   * merged into the turns held. A session that has not started its
+   * conversation answers `no_conversation`, which is said in the block
+   * and is not an error.
+   */
+  async function loadConversation(id, before) {
+    const key = `${API.conversation} ${id}`;
+    try {
+      const reply = await call(API.conversation, id, undefined, conversationQuery(before));
+      if (state.open !== id || !isCurrent(state.held[key], reply)) return null;
+      state.held[key] = { epoch: reply.epoch, revision: reply.revision };
+      // Another transcript (a new conversation under the same session)
+      // shares no turn numbers with the one held.
+      if (reply.body.resume_id !== state.resumeId) state.turns = [];
+      state.resumeId = reply.body.resume_id;
+      state.turns = mergeTurns(state.turns, reply.body);
+      drawTurns();
+    } catch (error) {
+      // A failed request for older turns must not hide the turns held.
+      if (before && error instanceof HttpError && error.status !== 401) {
+        if (state.open === id) $('earlier-error').textContent = error.message;
+        return null;
+      }
+      return blockFailed(id, error);
+    }
+    return null;
+  }
+
+  async function loadEarlier() {
+    const id = state.open;
+    if (!id || state.turns.length === 0) return null;
+    const lowest = state.turns[0].n;
+    const keepPlace = document.documentElement.scrollHeight;
+    $('earlier').disabled = true;
+    $('earlier-error').textContent = '';
+    try {
+      await serial(() => loadConversation(id, lowest));
+      // The older turns land above the reader's place; keep the place.
+      window.scrollBy(0, document.documentElement.scrollHeight - keepPlace);
+    } finally {
+      $('earlier').disabled = false;
+    }
+    return null;
+  }
+
+  /** The screen, or the host's message, in the session's text block. */
+  function showText(text) {
+    $('turns').hidden = true;
+    $('session-text').hidden = false;
+    $('session-text').textContent = text;
+  }
+
+  /** A read for the open session failed: a 401 says why, anything else in the block. */
+  async function blockFailed(id, error) {
+    if (error instanceof HttpError && error.status !== 401) {
+      if (state.open === id) showText(error.message);
+      return null;
+    }
+    return failed(error);
+  }
+
+  /** The held turns, oldest first; a turn's steps stay open across a redraw. */
+  function drawTurns() {
+    const list = $('turn-list');
+    const open = new Set(Array.from(list.querySelectorAll('details[open]'), (d) => d.dataset.n));
+    const now = Date.now();
+    list.replaceChildren();
+    for (const turn of state.turns) {
+      const article = document.createElement('article');
+      article.className = 'turn';
+      const meta = document.createElement('p');
+      meta.className = 'meta';
+      meta.textContent = [`Turn ${turn.n}`, sinceText(turn.at_ms, now)].filter(Boolean).join(' · ');
+      article.append(meta);
+      if (turn.user) {
+        const prompt = document.createElement('div');
+        prompt.className = 'prompt';
+        prompt.textContent = turn.user;
+        article.append(prompt);
+      }
+      const activity = turn.activity || [];
+      if (activity.length > 0) {
+        const details = document.createElement('details');
+        details.dataset.n = String(turn.n);
+        details.open = open.has(details.dataset.n);
+        const summary = document.createElement('summary');
+        summary.textContent = activity.length === 1 ? '1 step' : `${activity.length} steps`;
+        const steps = document.createElement('ol');
+        for (const a of activity) {
+          const step = document.createElement('li');
+          if (a.error) step.className = 'is-error';
+          step.textContent = a.line;
+          steps.append(step);
+        }
+        details.append(summary, steps);
+        article.append(details);
+      }
+      if (turn.final_text) {
+        const answer = document.createElement('div');
+        answer.className = 'answer';
+        answer.textContent = turn.final_text;
+        article.append(answer);
+      }
+      list.append(article);
+    }
+    $('turns-empty').hidden = state.turns.length > 0;
+    $('earlier').hidden = state.turns.length === 0 || state.turns[0].n <= 1;
+    $('session-text').hidden = true;
+    $('turns').hidden = false;
+    // The view goes to the last turn once, when the session is opened;
+    // a refresh leaves the reader where they are.
+    if (state.scrollToEnd && list.lastElementChild) {
+      state.scrollToEnd = false;
+      list.lastElementChild.scrollIntoView({ block: 'start' });
+    }
   }
 
   function newOp() {
@@ -419,7 +599,7 @@ if (typeof document !== 'undefined') {
       if (error instanceof HttpError && error.status === 403 && error.code === 'scope') {
         $('reply-status').textContent = 'This device reads only.';
         try { state.me = (await call(API.me)).body; $('scope').textContent = state.me.scope; } catch (_) { /* the next poll says */ }
-        await refreshSession();
+        await serial(loadSession);
       } else if (error instanceof HttpError && error.status === 401) {
         await unauthorized();
       } else if (error instanceof HttpError) {
@@ -441,19 +621,21 @@ if (typeof document !== 'undefined') {
     if (state.timer) clearTimeout(state.timer);
     state.timer = null;
     if (document.visibilityState === 'visible' && state.me) {
-      try {
-        const reply = await call(API.waiting);
-        const mark = state.listMark;
-        if (!mark || mark.epoch !== reply.epoch || mark.revision !== reply.revision) {
-          await refreshList();
-        } else {
-          // Nothing changed, but an earlier failed poll may have put up
-          // "Can't reach the host"; the answer just now takes it down.
-          showCurrent();
+      await serial(async () => {
+        try {
+          const reply = await call(API.waiting);
+          const mark = state.listMark;
+          if (!mark || mark.epoch !== reply.epoch || mark.revision !== reply.revision) {
+            await loadList();
+          } else {
+            // Nothing changed, but an earlier failed poll may have put up
+            // "Can't reach the host"; the answer just now takes it down.
+            showCurrent();
+          }
+        } catch (error) {
+          await failed(error);
         }
-      } catch (error) {
-        await failed(error);
-      }
+      });
     }
     if (state.me) schedule();
   }
@@ -518,6 +700,7 @@ if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', () => {
     $('back').addEventListener('click', closeSession);
     $('send').addEventListener('click', send);
+    $('earlier').addEventListener('click', loadEarlier);
     const invite = parseFragment(location.hash);
     // The code leaves the address bar before anything else happens.
     if (location.hash) history.replaceState(null, '', location.pathname);
