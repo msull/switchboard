@@ -8,6 +8,8 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-25
+
 ### Added
 
 - The web page's sessions list opens on live sessions in one list, each row naming its project, with a search box and a Filters button for state, kind, projects and sort; the choices are remembered in the browser, a line counts the waiting sessions the filters hide, and an ended session shows how long ago it was last seen.
