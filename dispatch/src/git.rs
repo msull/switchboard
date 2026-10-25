@@ -2811,21 +2811,40 @@ mod tests {
         assert!(GitCli::default().poll_check("k").unwrap().is_err());
     }
 
+    /// `poll_within` with a ten-second limit.
+    fn poll_to<T>(what: &str, ready: impl FnMut() -> Option<T>) -> T {
+        poll_within(what, std::time::Duration::from_secs(10), ready)
+    }
+
     /// Polls `ready` every 25 ms until it gives a value; panics naming
-    /// `what` after ten seconds. A deadline, not a count, so a loaded
+    /// `what` once `limit` has passed. A deadline, not a count, so a loaded
     /// machine only makes the test slower.
-    fn poll_to<T>(what: &str, mut ready: impl FnMut() -> Option<T>) -> T {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    fn poll_within<T>(
+        what: &str,
+        limit: std::time::Duration,
+        mut ready: impl FnMut() -> Option<T>,
+    ) -> T {
+        let deadline = std::time::Instant::now() + limit;
         loop {
             if let Some(value) = ready() {
                 return value;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "never saw {what} within 10 s"
+                "never saw {what} within {} s",
+                limit.as_secs()
             );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+    }
+
+    /// The exit code of the confined check `key`. A check that fails exits
+    /// only after the wrapper's `log show` queries and its `sleep 1`, which
+    /// under the whole suite can pass `poll_to`'s ten seconds, so it waits 30.
+    #[cfg(target_os = "macos")]
+    fn confined_exit(cli: &mut GitCli, key: &str) -> i32 {
+        let limit = std::time::Duration::from_secs(30);
+        poll_within("the confined check's exit", limit, || cli.poll_check(key)).unwrap()
     }
 
     /// The pid a check's script wrote to `pid` in `dir`, once it has.
@@ -4001,7 +4020,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        let code = poll_to("the check's exit", || cli.poll_check("k")).unwrap();
+        let code = confined_exit(&mut cli, "k");
         let exists = probe.exists();
         let _ = std::fs::remove_file(&probe);
         let text = std::fs::read_to_string(&log).unwrap();
@@ -4072,7 +4091,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        let confined = poll_to("the confined exit", || cli.poll_check("c")).unwrap();
+        let confined = confined_exit(&mut cli, "c");
         let bare = poll_to("the bare exit", || cli.poll_check("u")).unwrap();
         assert_eq!((confined, bare), (-1, -1));
         let text = std::fs::read_to_string(&log).unwrap();
@@ -4098,7 +4117,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        let code = poll_to("the check's exit", || cli.poll_check("c")).unwrap();
+        let code = confined_exit(&mut cli, "c");
         assert_eq!(code, 255);
         let text = std::fs::read_to_string(&log).unwrap();
         assert_eq!(text.lines().count(), 1, "only the header: {text}");
