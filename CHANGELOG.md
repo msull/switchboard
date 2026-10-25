@@ -8,6 +8,10 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+
+- A reply sent from a paired device, by its Send or the web page's, now answers a session's standing ask, as one typed in the app does; a tool's `session.send` still leaves it.
+
 ## [0.5.0] - 2026-10-24
 
 ### Added

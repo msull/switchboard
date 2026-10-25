@@ -271,6 +271,16 @@ impl WorkerRecords {
     }
 }
 
+/// Who a control request came from, decided by the channel it arrived
+/// on and never by anything in it: a line on `control.sock` is a tool's,
+/// even one from a pane holding its launch token, and a request the
+/// remote port authenticated is the owner's.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Tool,
+    Owner,
+}
+
 /// How a remote request was answered: now, or later through the reply
 /// channel it was handed, by the content worker or by Dispatch's
 /// answer to a ticket command.
@@ -3230,7 +3240,7 @@ impl SwitchboardApp {
             "resume" => wire::Body::SessionResume { session },
             _ => wire::Body::SessionTrust { session },
         };
-        let reply = self.serve(&wire::Request::new(op, body));
+        let reply = self.serve_from(&wire::Request::new(op, body), Origin::Owner);
         if let wire::Reply::Failed { reason } = &reply
             && reason.starts_with("interrupted")
         {
@@ -3450,13 +3460,16 @@ impl SwitchboardApp {
                 }
                 return self.refuse(request, 400, "failed", "the draft is empty", true);
             }
-            let reply = self.serve(&wire::Request::new(
-                op,
-                wire::Body::SessionSend {
-                    session: session.to_owned(),
-                    text,
-                },
-            ));
+            let reply = self.serve_from(
+                &wire::Request::new(
+                    op,
+                    wire::Body::SessionSend {
+                        session: session.to_owned(),
+                        text,
+                    },
+                ),
+                Origin::Owner,
+            );
             match &reply {
                 wire::Reply::Failed { reason } if reason.starts_with("interrupted") => {
                     return self.refuse(request, 409, "interrupted", reason, true);
@@ -3812,10 +3825,17 @@ impl SwitchboardApp {
         RemoteReply::new(status, self.error_json(code, message), authenticated)
     }
 
+    /// One request from a tool on `control.sock`, one reply.
+    fn serve(&mut self, request: &wire::Request) -> wire::Reply {
+        self.serve_from(request, Origin::Tool)
+    }
+
     /// One request, one reply. A query reads; a command runs through the
     /// core under its operation id, and its reply is logged so a repeat
     /// of the same id is answered from the log without running again.
-    fn serve(&mut self, request: &wire::Request) -> wire::Reply {
+    /// The owner's `session.send` becomes `OwnerSend`, which answers a
+    /// standing ask; a tool's stays `SendInput`, which leaves it.
+    fn serve_from(&mut self, request: &wire::Request, origin: Origin) -> wire::Reply {
         if !request.body.is_command() {
             return self.answer(&request.body);
         }
@@ -3827,6 +3847,9 @@ impl SwitchboardApp {
             return reply;
         }
         let action = match ControlAction::try_from(request.body.clone()) {
+            Ok(ControlAction::SendInput { id, text }) if origin == Origin::Owner => {
+                ControlAction::OwnerSend { id, text }
+            }
             Ok(action) => action,
             Err(reason) => return wire::Reply::failed(reason),
         };

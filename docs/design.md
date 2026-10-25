@@ -2692,7 +2692,13 @@ Schema v14.
     reaches one that is gone; the next typed prompt event consumes the
     mark and leaves the ask, and a new spawn drops it. The app's own
     message box and Prompt Box (`AppAction::SendMessage`) set no mark, so
-    the owner's sends clear.
+    the owner's sends clear. So does a send from a paired device, by
+    `/send` or the draft's Send: the remote port serves it as the owner's
+    and it reaches the core as `ControlAction::OwnerSend`, which sets no
+    mark. The origin is the channel the app read the request from, set in
+    the app and never a wire field, since any socket client could set
+    one: everything on `control.sock` is a tool's, `session.prompt`
+    included, even from a pane holding its launch token.
 - **The supervisor.** Its seed gains one line telling it to run
   `<abs>/switchboard-ask` before it stops on something the owner must
   answer, and its launch flags an allow rule

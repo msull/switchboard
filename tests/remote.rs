@@ -13,7 +13,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
@@ -25,7 +25,8 @@ use switchboard::adapters::fakes::{
 use switchboard::adapters::remote::{self, MAX_UNAUTHENTICATED, pinned_client};
 use switchboard::app::Services;
 use switchboard::content::ContentKey;
-use switchboard::core::{AppAction, RecordId};
+use switchboard::core::{AppAction, Ask, RecordId};
+use switchboard::ports::events::{EventKind, SessionEvent};
 use switchboard::ports::host::{HostId, HostStatus, Liveness as HostLiveness};
 use switchboard::ports::remote::{Listen, Scope};
 use switchboard::ports::transcript::{Conversation, Turn};
@@ -1276,6 +1277,115 @@ fn the_control_scope_sends_with_the_op_as_the_key_and_a_read_device_is_refused()
         r#"{"op":"tx4","text":"hello"}"#,
     );
     assert_eq!((status, code(&reply)), (403, "scope"), "{reply}");
+}
+
+/// Puts a standing ask on `id` as `session.ask` would; the test holds
+/// no launch token to call it with.
+fn seed_ask(port: &mut Port, id: RecordId) {
+    let ask = Ask::note("merge now?", SystemTime::now());
+    port.app.core_mut_for_seeding().seed_asking(id, Some(ask));
+}
+
+/// One hook event for `id`, as the helper would log it.
+fn hook(port: &mut Port, id: RecordId, kind: EventKind) {
+    port.app.dispatch(AppAction::Events(vec![SessionEvent {
+        at: SystemTime::now(),
+        seq: 0,
+        record_id: Some(id),
+        provider_session_id: None,
+        cwd: None,
+        transcript_path: None,
+        kind,
+    }]));
+}
+
+fn stopped() -> EventKind {
+    EventKind::Stopped {
+        last_message: None,
+        pending: None,
+    }
+}
+
+/// The owner's reply from a paired device, by `/send` or by the
+/// draft's Send, answers a standing ask as one typed in the app does.
+/// The same `session.send` on the control socket is a tool's, even
+/// from the pane itself, and leaves the ask standing.
+#[test]
+fn a_devices_send_answers_the_ask_and_a_socket_send_does_not() {
+    let mut port = port();
+    let (_, _, session) = seed(&mut port, "");
+    let id = RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    let token = pair(&mut port, "ABCD2345", Scope::Control, "Vision Pro");
+    let t = Some(token.as_str());
+    running(&mut port, &session, "\u{276f} ");
+    let asking = |port: &Port| port.app.core().session(id).unwrap().asking.is_some();
+
+    seed_ask(&mut port, id);
+    hook(&mut port, id, stopped());
+    let send = format!("/api/v1/sessions/{session}/send");
+    let body = r#"{"op":"tx1","text":"merge it"}"#;
+    let (status, reply) = call(&mut port, "POST", &send, t, body);
+    assert_eq!(status, 200, "{reply}");
+    hook(&mut port, id, EventKind::PromptSubmitted);
+    assert!(!asking(&port), "the device's send answered");
+    let (status, _) = call(&mut port, "POST", &send, t, body);
+    assert_eq!(status, 200);
+    assert_eq!(
+        port.host.state().written.len(),
+        1,
+        "a repeat never types twice"
+    );
+
+    seed_ask(&mut port, id);
+    hook(&mut port, id, stopped());
+    let draft = format!("/api/v1/sessions/{session}/draft");
+    call(
+        &mut port,
+        "POST",
+        &draft,
+        t,
+        r#"{"action":"replace","text":"merge it"}"#,
+    );
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &draft,
+        t,
+        r#"{"action":"send","op":"d1"}"#,
+    );
+    assert_eq!(status, 200, "{reply}");
+    hook(&mut port, id, EventKind::PromptSubmitted);
+    assert!(!asking(&port), "the draft's Send answered");
+    let (status, _) = call(
+        &mut port,
+        "POST",
+        &draft,
+        t,
+        r#"{"action":"send","op":"d1"}"#,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(
+        port.host.state().written.len(),
+        2,
+        "a repeat never types twice"
+    );
+
+    seed_ask(&mut port, id);
+    hook(&mut port, id, stopped());
+    let reply = control(
+        &mut port,
+        Request::new(
+            "s1",
+            Body::SessionSend {
+                session: session.clone(),
+                text: "commit your work".into(),
+            },
+        ),
+    );
+    assert!(!matches!(reply, Reply::Failed { .. }), "{reply:?}");
+    assert_eq!(port.host.state().written.len(), 3);
+    hook(&mut port, id, EventKind::PromptSubmitted);
+    assert!(asking(&port), "a tool's send is not the owner's answer");
 }
 
 /// A pane at Claude Code's folder question: the session view says so,
