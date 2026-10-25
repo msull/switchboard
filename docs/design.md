@@ -2256,7 +2256,10 @@ long-lived Claude Code session that watches its tickets
 - The table (`guidance`, `read`, `setup` as one argv or several,
   `model`, `decides`), validated against the decisions Dispatch asks
   (`scheduler::DECISIONS`, held to the ask sites by a test) and the ones
-  the file's gates ask.
+  the file's gates ask; `stuck` is in the list but refused in `decides`,
+  since its answer is the owner's. A template's `{decisions.<name>}` is
+  checked against the same names only when a ticket takes the file,
+  never on a running ticket's copy.
 - `ProjectState.supervisor` (record v13): the workspace, the current
   session by Switchboard record id with its seed hash, the ones it
   replaced, an intent from the port, the one request in flight (made

@@ -24,7 +24,7 @@ use crate::pipeline::{
 use crate::port::Port;
 use crate::restart::DISCARDED_BY;
 use crate::review::{checks_key, find_reviewer_mut, reviewer_key};
-use crate::services::{push_stuck, stuck_answer, stuck_pending, withdraw_stuck};
+use crate::services::{SERVICE, push_stuck, stuck_answer, stuck_pending, withdraw_stuck};
 use crate::store::{
     DataDir, Lock, Settings, expand_home, read_project, read_ticket, shell_unsafe, write_project,
     write_ticket_stamped,
@@ -432,8 +432,9 @@ pub const BY_SUPERVISOR: &str = "supervisor";
 pub const NOTE_FILE_MAX: u64 = 64 * 1024;
 
 /// Every decision Dispatch asks of its own accord, by name, beside the
-/// ones a pipeline's gates name. A supervisor's `decides` may list
-/// these; a test holds the list to the ask sites.
+/// ones a pipeline's gates name. A template may name any of these and a
+/// supervisor's `decides` may list all but `stuck`, whose answer is the
+/// owner's; a test holds the list to the ask sites.
 pub const DECISIONS: &[&str] = &[
     "finalize",
     "paused",
@@ -447,6 +448,8 @@ pub const DECISIONS: &[&str] = &[
     "message",
     RESOLUTION,
     "lost-send",
+    STUCK,
+    SERVICE,
 ];
 
 /// The decision a `pr-merged` gate asks when it names none.
@@ -3531,7 +3534,7 @@ impl Runner {
                 // The cut reads this answer from the record, later on
                 // this same pass, and marks it acted once it is used.
                 ("branch", "reuse" | "fresh") => continue,
-                (crate::services::SERVICE, "retry") => self.retry_services(t, ps, p, now_ms)?,
+                (SERVICE, "retry") => self.retry_services(t, ps, p, now_ms)?,
                 (_, "park") => self.park_by_answer(t, ps, i, now_ms)?,
                 (name, other) => {
                     self.park(
@@ -11667,13 +11670,22 @@ mod tests {
     use super::*;
 
     /// Every decision name Dispatch asks of its own accord, as a literal
-    /// at its ask site, is one a supervisor's `decides` may list.
+    /// or a const at its ask site, is one a template may name.
     #[test]
     fn decisions_holds_every_name_an_ask_site_spells() {
+        // The consts an ask site names; one not listed here fails below.
+        let consts = [
+            ("REFRESH", REFRESH),
+            ("RESOLUTION", RESOLUTION),
+            ("SERVICE", SERVICE),
+            ("STUCK", STUCK),
+        ];
+        let mut seen = BTreeSet::new();
         for (file, text) in [
             ("scheduler.rs", include_str!("scheduler.rs")),
             ("review.rs", include_str!("review.rs")),
             ("recover.rs", include_str!("recover.rs")),
+            ("services.rs", include_str!("services.rs")),
         ] {
             let code = text.split("#[cfg(test)]").next().unwrap();
             for rest in code.split("name: \"").skip(1) {
@@ -11688,11 +11700,34 @@ mod tests {
                     "{file} asks `{name}`; add it to DECISIONS"
                 );
             }
+            // A site may name its decision through a const, which the
+            // literal scan above cannot see; each const must be listed.
+            // `services.rs` builds the `STUCK` ask as `STUCK.to_owned()`.
+            for rest in code.split("name: ").skip(1) {
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_uppercase() || c == '_'))
+                    .unwrap_or(rest.len());
+                let (ident, after) = rest.split_at(end);
+                if ident.is_empty()
+                    || !(after.starts_with(',') || after.starts_with(".to_owned(),"))
+                {
+                    continue;
+                }
+                let Some((_, name)) = consts.iter().find(|(i, _)| *i == ident) else {
+                    panic!("{file} asks the const `{ident}`; add it to this test's table");
+                };
+                assert!(
+                    DECISIONS.contains(name),
+                    "{file} asks `{name}`; add it to DECISIONS"
+                );
+                seen.insert(ident);
+            }
         }
+        assert_eq!(seen.len(), consts.len(), "{seen:?}");
         assert_eq!(
             DECISIONS
                 .iter()
-                .filter(|d| **d == REFRESH || **d == RESOLUTION)
+                .filter(|d| **d == STUCK || **d == SERVICE)
                 .count(),
             2
         );
@@ -13233,6 +13268,34 @@ prompt = "Decided: {decisions.lead} ({decisions.lead.note}); {decisions.look.not
         );
         let vars = vars_for(&t, &p, None);
         assert_eq!(field(&vars, "decisions.lead.note").as_deref(), Some("tied"));
+    }
+
+    #[test]
+    fn stuck_and_service_render_the_tickets_newest_answer() {
+        let p = gates_pipeline();
+        let mut t = crate::ticket::blank();
+        decided(&mut t, "lead", 1, "root", SERVICE, Some(("wait", None, 5)));
+        decided(
+            &mut t,
+            "lead",
+            2,
+            "root",
+            SERVICE,
+            Some(("retry", Some("up now"), 9)),
+        );
+        decided(
+            &mut t,
+            "lead",
+            3,
+            "root",
+            STUCK,
+            Some(("released", Some("killed it"), 7)),
+        );
+        let vars = vars_for(&t, &p, None);
+        assert_eq!(
+            vars.render("{decisions.service} ({decisions.service.note}); {decisions.stuck} ({decisions.stuck.note})"),
+            "retry (up now); released (killed it)"
+        );
     }
 
     #[test]
