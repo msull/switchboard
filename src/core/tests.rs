@@ -9524,6 +9524,53 @@ mod dispatch_page {
         assert_eq!(core.session(id).unwrap().asking, None);
     }
 
+    /// The owner's reply from a paired device answers the ask as one
+    /// typed in the app does, and sets no mark to consume later.
+    #[test]
+    fn a_prompt_sent_by_the_owners_device_answers_the_ask() {
+        use crate::core::ControlAction;
+        let (mut core, id) = asking_core();
+        hook(&mut core, id, stopped(), 2_000);
+        core.dispatch(
+            AppAction::Control {
+                op: "s".into(),
+                action: ControlAction::OwnerSend {
+                    id,
+                    text: "merge it".into(),
+                },
+            },
+            Clock::at(2_500),
+        );
+        assert!(!core.relayed.contains(&id));
+        assert!(
+            core.take_control_outcome("s")
+                .is_some_and(|o| o.error.is_none())
+        );
+        hook(&mut core, id, EventKind::PromptSubmitted, 3_000);
+        assert_eq!(core.session(id).unwrap().asking, None);
+    }
+
+    /// The same text as a tool's `session.send` leaves the ask; the two
+    /// differ only by the channel the app saw.
+    #[test]
+    fn a_prompt_sent_by_a_tool_leaves_the_ask() {
+        use crate::core::ControlAction;
+        let (mut core, id) = asking_core();
+        hook(&mut core, id, stopped(), 2_000);
+        core.dispatch(
+            AppAction::Control {
+                op: "s".into(),
+                action: ControlAction::SendInput {
+                    id,
+                    text: "merge it".into(),
+                },
+            },
+            Clock::at(2_500),
+        );
+        hook(&mut core, id, EventKind::PromptSubmitted, 3_000);
+        assert!(core.session(id).unwrap().asking.is_some());
+    }
+
     /// `/clear`, `/compact` and `/resume` run `SessionStart` between
     /// turns with no `Stop` after (spike 17): the owner's next prompt
     /// still answers, after any event that sets no activity. One inside

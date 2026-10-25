@@ -68,6 +68,15 @@ pub enum ControlAction {
         id: RecordId,
         text: String,
     },
+    /// The owner's own send from a paired device: `SendInput` with no
+    /// relay mark, so it answers a standing ask as the app's message box
+    /// does. No wire body converts to it; the app builds it only for a
+    /// request the remote port authenticated, because a socket client
+    /// could claim anything a wire field said.
+    OwnerSend {
+        id: RecordId,
+        text: String,
+    },
     Kill(RecordId),
     /// Resume an agent's conversation without opening a terminal; never
     /// a fresh launch.
@@ -324,6 +333,10 @@ impl AppCore {
                 // that window.
                 self.mark_typed(id, now.wall, true);
                 self.apply_control(ControlAction::SendInput { id, text }, now, out)
+            }
+            ControlAction::OwnerSend { id, text } => {
+                self.session_action(AppAction::SendInput { id, text }, now, out);
+                Vec::new()
             }
             ControlAction::Kill(id) => {
                 self.session_action(AppAction::KillSession(id), now, out);
@@ -1144,7 +1157,7 @@ fn control_kind(action: &ControlAction) -> String {
         ControlAction::RemoveProject(_) => "project.remove",
         ControlAction::NewSession { .. } => "session.new",
         ControlAction::CloneSession { .. } => "session.clone",
-        ControlAction::SendInput { .. } => "session.send",
+        ControlAction::SendInput { .. } | ControlAction::OwnerSend { .. } => "session.send",
         ControlAction::Prompt { .. } => "session.prompt",
         ControlAction::Kill(_) => "session.kill",
         ControlAction::Resume(_) => "session.resume",
