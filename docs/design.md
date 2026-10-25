@@ -2123,6 +2123,11 @@ over it with `Env::wait`. Dispatch's integration tests skip the device
 flush in `store::atomic_write`, which was most of their time on macOS.
 `scripts/test-times.sh` measures every test serially against a budget
 of 5 s a test, and the README records the slowest.
+A test that waits on a child's setup waits on a marker the child
+writes after that setup, because a deadline after the action cannot
+order the action behind it: the check kill test waits for the inner
+shell's `ready` after its `trap "" TERM`, and the long typing test waits
+for the pane's `ready` after `stty -icanon` before it writes.
 
 Known gap: tmux 3.4 on the Linux runner can leave a pane dead without
 a status. The exit-code test accepts that on a tmux older than 3.5,

@@ -3081,7 +3081,7 @@ mod tests {
             &[
                 "sh".into(),
                 "-c".into(),
-                "sh -c 'trap \"\" TERM; sleep 30' & echo $! > pid; wait".into(),
+                "sh -c 'trap \"\" TERM; echo ok > ready; sleep 30' & echo $! > pid; wait".into(),
             ],
             &[],
             &dir.path().join("gate.log"),
@@ -3089,6 +3089,11 @@ mod tests {
         )
         .unwrap();
         let inner = written_pid(dir.path());
+        // The outer shell writes `pid` before the inner one has run its
+        // trap, so only `ready` says a TERM will be ignored.
+        poll_to("the inner shell's trap", || {
+            dir.path().join("ready").exists().then_some(())
+        });
         cli.kill_check("k");
         cli.kill_check("k");
         assert!(alive(inner), "a second kill sends no KILL");
