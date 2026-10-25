@@ -3220,6 +3220,7 @@ ports = [3100, 3199]
             [
                 "investigate",
                 "lanes",
+                "decisions",
                 "facts",
                 "plan",
                 "review",
