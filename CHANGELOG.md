@@ -8,6 +8,10 @@ and the versions follow [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Added
+
+- The web page shows a Claude Code session's conversation, turn by turn with each turn's steps folded under it, and loads earlier turns on request; on a tablet the page reads in a centred column.
+
 ## [0.5.0] - 2026-10-24
 
 ### Added
