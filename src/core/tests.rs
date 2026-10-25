@@ -1761,6 +1761,33 @@ fn the_session_view_names_the_transcript_of_its_resume_handle() {
     assert_eq!(view.transcript, None);
 }
 
+/// An ended session still has an age: the view carries when the record
+/// was last seen, running or not.
+#[test]
+fn the_session_view_carries_last_seen_whether_running_or_not() {
+    let ms =
+        |t: SystemTime| u64::try_from(t.duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap();
+    let p = project("p");
+    let mut w = Workspace::new(p.clone());
+    let mut live = record(p.id, agent(), 0);
+    live.last_seen = Clock::at(5_000).wall;
+    let mut ended = record(p.id, SessionKind::Shell, 1);
+    ended.last_seen = Clock::at(7_000).wall;
+    let (live_id, ended_id) = (live.id, ended.id);
+    w.sessions.extend([live, ended]);
+    let (core, _) = loaded(vec![w], vec![running(live_id)]);
+    let now = Clock::at(9_000).wall;
+    let view = core.session_view(live_id, now).unwrap();
+    assert_eq!(view.liveness, switchboard_control::Liveness::Running);
+    assert_eq!(
+        view.last_seen_ms,
+        Some(ms(core.session(live_id).unwrap().last_seen))
+    );
+    let view = core.session_view(ended_id, now).unwrap();
+    assert_ne!(view.liveness, switchboard_control::Liveness::Running);
+    assert_eq!(view.last_seen_ms, Some(ms(Clock::at(7_000).wall)));
+}
+
 #[test]
 fn the_session_view_says_what_the_stop_listed_and_until_when_it_holds() {
     let (mut core, _, ids) = with_records(&[agent()], |s| Some(running(s.id)));

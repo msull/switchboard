@@ -654,6 +654,11 @@ pub struct SessionView {
     /// a client that derives quiet itself. An older app omits it.
     #[serde(default)]
     pub last_activity_ms: Option<u64>,
+    /// When the record was last seen alive (a hook event, the pane
+    /// printing, the pane going), in milliseconds since the epoch, so an
+    /// ended session has an age. An older app omits it.
+    #[serde(default)]
+    pub last_seen_ms: Option<u64>,
     pub waiting: bool,
     pub waiting_reason: Option<String>,
     /// The pane shows Claude Code's own folder trust question, which
@@ -945,6 +950,7 @@ mod tests {
             last_exit: Some(0),
             last_stop_at_ms: Some(1),
             last_activity_ms: None,
+            last_seen_ms: Some(4),
             quiet_secs: None,
             waiting: false,
             waiting_reason: None,
@@ -1236,8 +1242,11 @@ mod tests {
         line.as_object_mut().unwrap().remove("prompt_refusal");
         // Nor a transcript, which reads as none and is not written back.
         line.as_object_mut().unwrap().remove("transcript");
+        // Nor when it was last seen, which reads as unknown.
+        line.as_object_mut().unwrap().remove("last_seen_ms");
         let view: SessionView = serde_json::from_value(line).unwrap();
         assert_eq!(view.prompt_refusal, None);
+        assert_eq!(view.last_seen_ms, None);
         assert_eq!(view.transcript, None);
         assert!(
             !serde_json::to_value(&view)
