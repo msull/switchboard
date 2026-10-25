@@ -5877,6 +5877,42 @@ fn the_plan_tab_labels_a_reviewed_copy() {
     }
 }
 
+/// A copy the owner revised, failed or rerun, says whose revision it is.
+#[test]
+fn the_plan_tab_names_the_owners_revised_copy() {
+    use switchboard::ports::dispatch::{PathsView, PlanRevision};
+    let cases = [
+        (
+            false,
+            None,
+            "Reviewed copy. Revised copy from attempt 1 (you)",
+        ),
+        (
+            true,
+            Some(3),
+            "Reviewed copy, round 3: review open. Revised copy from attempt 1 (you)",
+        ),
+    ];
+    for (reviewing, round, said) in cases {
+        let (mut dispatch, edit) = ticket_with_documents();
+        dispatch.paths = PathsView {
+            plan_stage: Some("review-plan".into()),
+            plan_reviewed: true,
+            plan_reviewing: reviewing,
+            plan_round: round,
+            plan_revised: Some(PlanRevision {
+                attempt: 1,
+                by: "you".into(),
+                path: "/dispatch/tickets/t1/review-plan/1/repo/plan.md".into(),
+            }),
+            ..dispatch.paths
+        };
+        let mut harness = ticket_page_on(dispatch, Changes::default(), edit);
+        click(&mut harness, "Plan");
+        harness.get_by_label(said);
+    }
+}
+
 /// A plan already read is read again once the ticket moves, and stays
 /// drawn while it is: a review edits its copy under the same path.
 #[test]

@@ -3876,6 +3876,31 @@ unknown fields, so a misspelt key would pass silently, and the key
 waits for a gate that needs it. A decision pending from before the
 change keeps its stored question until `dispatch restart` asks again.
 
+## A plan review rerun keeps the owner's revise (2026-10-25)
+
+A plan review whose run failed after the owner answered `revise` (the
+app answering `no such run`, say) was rerun from the plan stage's
+original, so the owner's objection and the planner's edits for it were
+lost. `Ticket::revised_copy` now says when a failed or cancelled review
+attempt holds the owner's revision: a `revise` answered about it with
+its `Revision` and round file in place, or a rerun that carried one
+with its round 1 in place. The rerun copies that attempt's copy, writes
+the revise text (and any `rerun` note) as its `plan.feedback-1.md`, and
+sends it as `workflow.start`'s `owner_round`. The app opens such a run
+with the owner's round: the reviewer launches idle, the planner answers
+first, and the reviewer's first prompt is `review_first` at round 2.
+The rerun clones the failed run's planner when the app still has its
+transcript, else the plan stage's session. The rerun question, `show`
+(`plan_revised`) and the Plan tab name the copy. No record version
+changes: `revisions` and `carried_from` carry it.
+
+Known gaps: only the last revise is carried (earlier ones are already
+in the copy if their edits landed). A failed run's half-finished edits
+are kept with the copy, the cost of reviewing the revised copy at all.
+Nothing retries or reattaches a run the app reports gone before failing
+the attempt; why the app loses a run across a runner restart is not
+traced.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

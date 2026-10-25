@@ -17,7 +17,7 @@ use std::thread::JoinHandle;
 use anyhow::{Context, Result, bail};
 use dispatch_control::{
     AttemptView, Body, DecisionView, EventView, EventsView, LaneFile, LaneView, PathsView,
-    PlanRoundView, ProjectView, Reply, Request, SOCKET_FILE, Status, TicketView,
+    PlanRevision, PlanRoundView, ProjectView, Reply, Request, SOCKET_FILE, Status, TicketView,
 };
 
 use crate::epoch_ms;
@@ -561,13 +561,19 @@ pub fn ticket_paths(t: &Ticket, p: Option<&Pipeline>) -> PathsView {
         .rev()
         .flat_map(|a| a.rounds.iter().rev())
         .find_map(|r| r.feedback.clone());
-    let review = t
-        .attempts
-        .iter()
-        .rev()
-        .filter(|a| a.kind == AttemptKind::Workflow)
-        .find(|a| !a.artifacts.is_empty());
     let shown = t.shown("plan");
+    // A revised failed copy shown is the review whose rounds it holds,
+    // whatever review was started since.
+    let revised_shown = shown
+        .map(|(a, _)| a)
+        .filter(|a| t.revised_copy(a, &|p| p.is_file()).is_some());
+    let review = revised_shown.or_else(|| {
+        t.attempts
+            .iter()
+            .rev()
+            .filter(|a| a.kind == AttemptKind::Workflow)
+            .find(|a| !a.artifacts.is_empty())
+    });
     let reviewed = shown.filter(|(a, _)| a.kind == AttemptKind::Workflow);
     let plan_rounds = review.map_or_else(Vec::new, plan_rounds);
     let round_file = last_round.or_else(|| plan_rounds.last().map(|r| r.feedback.clone()));
@@ -590,7 +596,38 @@ pub fn ticket_paths(t: &Ticket, p: Option<&Pipeline>) -> PathsView {
         plan_rounds,
         plan_files,
         notes_files,
+        plan_revised: shown.and_then(|(a, _)| plan_revision(t, a)),
     }
+}
+
+/// The revised copy the plan review attempt `a` is, or a rerun of it
+/// carried, so `show` names where the owner's revision is.
+fn plan_revision(t: &Ticket, a: &Attempt) -> Option<PlanRevision> {
+    if a.kind != AttemptKind::Workflow {
+        return None;
+    }
+    if let Some(r) = t
+        .revised_copy(a, &|p| p.is_file())
+        .filter(|r| r.from == a.n)
+    {
+        return Some(PlanRevision {
+            attempt: r.from,
+            by: r.by,
+            path: r.copy,
+        });
+    }
+    // A rerun whose round file is gone is not a `revised_copy`, but it
+    // still names the copy it was started from.
+    let (stage, from) = a.carried_from.as_ref()?;
+    let earlier = t
+        .attempts
+        .iter()
+        .find(|x| &x.stage == stage && x.n == *from)?;
+    Some(PlanRevision {
+        attempt: *from,
+        by: a.round_one_by(),
+        path: earlier.artifacts.values().next()?.clone(),
+    })
 }
 
 /// The latest head an attempt in the lane recorded: the record has no
@@ -1496,6 +1533,127 @@ slots = 1
         let paths = ticket_paths(&t, Some(&p));
         assert!(paths.plan_reviewed && !paths.plan_reviewing);
         assert_eq!(paths.plan_round, None);
+    }
+
+    /// A failed review the owner revised is the plan shown, with its
+    /// rounds, until its rerun opens; the rerun names where it came from.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn the_paths_name_a_revised_failed_copy_and_the_rerun_that_carries_it() {
+        use crate::ticket::{Decision, DecisionKind, DecisionState, Revision};
+        let dir = tempfile::tempdir().unwrap();
+        let p = Pipeline::parse(PIPELINE).unwrap();
+        let failed = dir.path().join("review/1/plan.md");
+        let rerun = dir.path().join("review/2/plan.md");
+        for copy in [&failed, &rerun] {
+            fs::create_dir_all(copy.parent().unwrap()).unwrap();
+            fs::write(copy, "plan").unwrap();
+        }
+        let attempt = |stage: &str, n: u32, kind: AttemptKind, state: AttemptState, path: &Path| {
+            crate::scheduler::new_attempt(
+                stage,
+                n,
+                "root",
+                kind,
+                state,
+                std::collections::BTreeMap::from([("plan".to_owned(), path.to_path_buf())]),
+                0,
+            )
+        };
+        let mut t = crate::ticket::blank();
+        t.attempts.push(attempt(
+            "plan",
+            1,
+            AttemptKind::Agent,
+            AttemptState::Complete,
+            Path::new("/plan/1/plan.md"),
+        ));
+        let mut review = attempt(
+            "review-plan",
+            1,
+            AttemptKind::Workflow,
+            AttemptState::Failed {
+                reason: "review run gone: no such run".into(),
+            },
+            &failed,
+        );
+        review.revisions.push(Revision {
+            round: 2,
+            by: "you".into(),
+            at_ms: 5,
+        });
+        t.attempts.push(review);
+        fs::write(crate::report::round_file(&failed, 1), "feedback").unwrap();
+        fs::write(crate::report::round_file(&failed, 2), "objection").unwrap();
+        // No `revise` answered: the plan stage's file.
+        let paths = ticket_paths(&t, Some(&p));
+        assert_eq!(paths.plan, Some(PathBuf::from("/plan/1/plan.md")));
+        assert_eq!(paths.plan_revised, None);
+        t.decisions.push(Decision {
+            id: "d1".into(),
+            stage: "review-plan".into(),
+            name: "finalize".into(),
+            kind: DecisionKind::Permission,
+            question: String::new(),
+            options: Vec::new(),
+            recommendation: None,
+            attempt: Some(("review-plan".into(), 1)),
+            state: DecisionState::Answered {
+                answer: "revise".into(),
+                note: Some("objection".into()),
+                by: "you".into(),
+                at_ms: 5,
+                acted: true,
+            },
+            made_ms: 0,
+            refusals: Vec::new(),
+        });
+        let paths = ticket_paths(&t, Some(&p));
+        assert_eq!(paths.plan, Some(failed.clone()));
+        assert!(paths.plan_reviewed && !paths.plan_reviewing);
+        assert_eq!(
+            paths.plan_revised,
+            Some(PlanRevision {
+                attempt: 1,
+                by: "you".into(),
+                path: failed.clone(),
+            })
+        );
+        assert_eq!(
+            paths.plan_rounds.iter().map(|r| r.n).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        // The rerun opens with the owner's round, carried from attempt 1.
+        let mut second = attempt(
+            "review-plan",
+            2,
+            AttemptKind::Workflow,
+            AttemptState::Running,
+            &rerun,
+        );
+        second.carried_from = Some(("review-plan".into(), 1));
+        second.revisions.push(Revision {
+            round: 1,
+            by: "you".into(),
+            at_ms: 6,
+        });
+        t.attempts.push(second);
+        fs::write(crate::report::round_file(&rerun, 1), "objection").unwrap();
+        let paths = ticket_paths(&t, Some(&p));
+        assert_eq!(paths.plan, Some(rerun.clone()));
+        assert!(paths.plan_reviewing);
+        assert_eq!(
+            paths.plan_revised.map(|r| (r.attempt, r.path)),
+            Some((1, failed))
+        );
+        assert_eq!(
+            paths
+                .plan_rounds
+                .iter()
+                .map(|r| (r.n, r.by.clone()))
+                .collect::<Vec<_>>(),
+            [(1, Some("you".into()))]
+        );
     }
 
     #[test]

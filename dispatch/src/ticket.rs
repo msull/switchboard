@@ -309,10 +309,12 @@ pub struct Attempt {
     /// at the reviewed head, so asking about it again offers `keep` too.
     #[serde(default)]
     pub failed_at_rewrite: bool,
-    /// A code review attempt that continues an earlier attempt of the
-    /// same stage and context: that attempt's last reviewed state, its
-    /// settled and open points, are this one's start. Written when the
-    /// attempt is made and never changed.
+    /// For a code review attempt, the earlier attempt of the same stage
+    /// and context it continues: that attempt's last reviewed state, its
+    /// settled and open points, are this one's start.
+    /// For a plan review rerun, the failed attempt whose revised copy it
+    /// copied; it opens with the owner's round from it.
+    /// Written when the attempt is made and never changed.
     #[serde(default)]
     pub carried_from: Option<(String, u32)>,
     /// The note the user sent a code review attempt's stage back with,
@@ -374,6 +376,23 @@ pub struct Attempt {
     pub agent: Option<String>,
     pub started_ms: u64,
     pub ended_ms: Option<u64>,
+}
+
+/// A failed plan review attempt's copy the owner revised, as
+/// `Ticket::revised_copy` finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisedCopy {
+    /// The attempt whose `revise` this is: the attempt itself, or the
+    /// one a rerun carried it from.
+    pub from: u32,
+    /// Who answered `revise`.
+    pub by: String,
+    /// The round the owner's text opened.
+    pub round: u32,
+    /// The attempt's copy.
+    pub copy: PathBuf,
+    /// That round's file beside the copy, holding the owner's text.
+    pub text_file: PathBuf,
 }
 
 /// One session of a plan review's workflow run.
@@ -857,6 +876,17 @@ impl Attempt {
     #[must_use]
     pub fn is_open(&self) -> bool {
         matches!(self.state, AttemptState::Starting | AttemptState::Running)
+    }
+
+    /// Who answered the owner's round a plan review rerun opened with:
+    /// its round 1 revision.
+    #[must_use]
+    pub fn round_one_by(&self) -> String {
+        self.revisions
+            .iter()
+            .find(|r| r.round == 1)
+            .map(|r| r.by.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -1462,6 +1492,59 @@ impl Ticket {
             .find_map(|a| a.artifacts.get(name).map(|p| (a.stage.as_str(), p)))
     }
 
+    /// The owner's revised copy `a` holds, when `a` is a failed or
+    /// cancelled plan review attempt the owner had revised: a `revise`
+    /// answered about it with that round's file still beside the copy,
+    /// or a rerun that carried an earlier revise as its round 1 with
+    /// that file in place. A refused or lost revise has no file, so it
+    /// reads as not revised. `exists` is the file test, so a caller
+    /// with no disk can say what is there. Every reader of "revised"
+    /// asks this, so the rerun, `show` and the question agree.
+    #[must_use]
+    pub fn revised_copy(&self, a: &Attempt, exists: &dyn Fn(&Path) -> bool) -> Option<RevisedCopy> {
+        if a.kind != AttemptKind::Workflow
+            || !matches!(
+                a.state,
+                AttemptState::Failed { .. } | AttemptState::Cancelled { .. }
+            )
+        {
+            return None;
+        }
+        // A plan review attempt has one artifact: its copy.
+        let copy = a.artifacts.values().next().filter(|c| exists(c))?;
+        let at = Some((a.stage.clone(), a.n));
+        let revised = self.decisions.iter().any(|d| {
+            d.name == "finalize"
+                && d.attempt == at
+                && matches!(&d.state, DecisionState::Answered { answer, .. } if answer == "revise")
+        });
+        let mut own = None;
+        if revised {
+            own = a.revisions.iter().rev().find_map(|r| {
+                let file = crate::report::round_file(copy, r.round);
+                exists(&file).then(|| RevisedCopy {
+                    from: a.n,
+                    by: r.by.clone(),
+                    round: r.round,
+                    copy: copy.clone(),
+                    text_file: file,
+                })
+            });
+        }
+        if own.is_some() {
+            return own;
+        }
+        let (_, from) = a.carried_from.as_ref()?;
+        let file = crate::report::round_file(copy, 1);
+        exists(&file).then(|| RevisedCopy {
+            from: *from,
+            by: a.round_one_by(),
+            round: 1,
+            copy: copy.clone(),
+            text_file: file,
+        })
+    }
+
     /// `shown_where` with no filter.
     #[must_use]
     pub fn shown(&self, name: &str) -> Option<(&Attempt, &PathBuf)> {
@@ -1470,8 +1553,10 @@ impl Ticket {
 
     /// `input_where` for a reader who wants the document as it stands: a
     /// workflow attempt still open counts too, since a review edits its
-    /// copy in place until `finalize` is answered. Display only; an agent
-    /// is handed `input_where`'s complete files.
+    /// copy in place until `finalize` is answered, and so does a failed
+    /// one the owner revised (`revised_copy`), which a rerun starts
+    /// from. Display only; an agent is handed `input_where`'s complete
+    /// files.
     #[must_use]
     pub fn shown_where(
         &self,
@@ -1485,6 +1570,7 @@ impl Ticket {
             .filter(|a| {
                 a.state == AttemptState::Complete
                     || (a.kind == AttemptKind::Workflow && a.is_open())
+                    || self.revised_copy(a, &|p| p.is_file()).is_some()
             })
             .filter(|a| keep(a))
             .find_map(|a| a.artifacts.get(name).map(|p| (a, p)))
@@ -1898,6 +1984,151 @@ mod tests {
             },
         );
         assert_eq!(shown(&t), at("plan", "/plan/2/plan.md"));
+    }
+
+    fn answered(name: &str, answer: &str, attempt: (&str, u32)) -> Decision {
+        Decision {
+            id: format!("d-{name}"),
+            stage: attempt.0.into(),
+            name: name.into(),
+            kind: DecisionKind::Permission,
+            question: String::new(),
+            options: Vec::new(),
+            recommendation: None,
+            attempt: Some((attempt.0.into(), attempt.1)),
+            state: DecisionState::Answered {
+                answer: answer.into(),
+                note: None,
+                by: "you".into(),
+                at_ms: 1,
+                acted: true,
+            },
+            made_ms: 0,
+            refusals: Vec::new(),
+        }
+    }
+
+    fn revision(round: u32) -> Revision {
+        Revision {
+            round,
+            by: "you".into(),
+            at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn a_failed_review_copy_is_revised_only_with_the_owners_round_on_disk() {
+        let review = |n: u32, copy: &str| {
+            new_attempt(
+                "review-plan",
+                n,
+                "root",
+                AttemptKind::Workflow,
+                AttemptState::Failed {
+                    reason: "review run gone".into(),
+                },
+                BTreeMap::from([("plan".to_owned(), PathBuf::from(copy))]),
+                0,
+            )
+        };
+        let on_disk = |files: &'static [&'static str]| {
+            move |p: &Path| files.iter().any(|f| Path::new(f) == p)
+        };
+        let mut t = blank();
+        let mut a = review(1, "/r/1/plan.md");
+        a.revisions = vec![revision(2), revision(3)];
+        t.decisions
+            .push(answered("finalize", "revise", ("review-plan", 1)));
+        // The latest round whose file is there counts.
+        let found = t.revised_copy(
+            &a,
+            &on_disk(&[
+                "/r/1/plan.md",
+                "/r/1/plan.feedback-2.md",
+                "/r/1/plan.feedback-3.md",
+            ]),
+        );
+        assert_eq!(
+            found,
+            Some(RevisedCopy {
+                from: 1,
+                by: "you".into(),
+                round: 3,
+                copy: "/r/1/plan.md".into(),
+                text_file: "/r/1/plan.feedback-3.md".into(),
+            })
+        );
+        // A refused or lost revise left no file: not revised.
+        assert_eq!(t.revised_copy(&a, &on_disk(&["/r/1/plan.md"])), None);
+        // A missing copy is not one to start from.
+        assert_eq!(
+            t.revised_copy(&a, &on_disk(&["/r/1/plan.feedback-3.md"])),
+            None
+        );
+        // A revision with no `revise` answer about the attempt is not one.
+        let lone = blank();
+        assert_eq!(
+            lone.revised_copy(&a, &on_disk(&["/r/1/plan.md", "/r/1/plan.feedback-3.md"])),
+            None
+        );
+        // A rerun that carried the revise as its round 1.
+        let mut b = review(2, "/r/2/plan.md");
+        b.carried_from = Some(("review-plan".into(), 1));
+        b.revisions = vec![revision(1)];
+        assert_eq!(
+            t.revised_copy(&b, &on_disk(&["/r/2/plan.md", "/r/2/plan.feedback-1.md"]))
+                .map(|r| (r.from, r.round)),
+            Some((1, 1))
+        );
+        assert_eq!(t.revised_copy(&b, &on_disk(&["/r/2/plan.md"])), None);
+        // A note-only rerun has an owner round but carried nothing.
+        b.carried_from = None;
+        assert_eq!(
+            t.revised_copy(&b, &on_disk(&["/r/2/plan.md", "/r/2/plan.feedback-1.md"])),
+            None
+        );
+        // An open review is not a failed one.
+        a.state = AttemptState::Running;
+        assert_eq!(
+            t.revised_copy(&a, &on_disk(&["/r/1/plan.md", "/r/1/plan.feedback-3.md"])),
+            None
+        );
+    }
+
+    #[test]
+    fn a_revised_failed_copy_is_shown_but_never_an_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let copy = dir.path().join("plan.md");
+        let round = dir.path().join("plan.feedback-2.md");
+        std::fs::write(&copy, "revised").unwrap();
+        let mut t = blank();
+        t.attempts.push(new_attempt(
+            "plan",
+            1,
+            "root",
+            AttemptKind::Agent,
+            AttemptState::Complete,
+            BTreeMap::from([("plan".to_owned(), PathBuf::from("/plan/1/plan.md"))]),
+            0,
+        ));
+        let mut a = new_attempt(
+            "review-plan",
+            1,
+            "root",
+            AttemptKind::Workflow,
+            AttemptState::Failed { reason: "x".into() },
+            BTreeMap::from([("plan".to_owned(), copy.clone())]),
+            0,
+        );
+        a.revisions = vec![revision(2)];
+        t.attempts.push(a);
+        t.decisions
+            .push(answered("finalize", "revise", ("review-plan", 1)));
+        let shown = |t: &Ticket| t.shown("plan").map(|(_, p)| p.clone());
+        assert_eq!(shown(&t), Some(PathBuf::from("/plan/1/plan.md")));
+        std::fs::write(&round, "# The owner's objection\n\nfix it\n").unwrap();
+        assert_eq!(shown(&t), Some(copy));
+        assert_eq!(t.input("plan"), Some(&PathBuf::from("/plan/1/plan.md")));
     }
 
     #[test]
