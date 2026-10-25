@@ -1153,6 +1153,101 @@ fn an_inspect_question_cuts_a_long_stat() {
     }
 }
 
+/// The `inspect` gate asking its own question, so the tests below see
+/// what the default lines become beside it.
+const INSPECT_QUESTION: &str = "Ship {branch}?";
+
+fn with_inspect_question(env: &Env) {
+    live_edit(
+        env,
+        "decision = \"inspect\" }",
+        &format!("decision = \"inspect\", question = \"{INSPECT_QUESTION}\" }}"),
+    );
+}
+
+/// A lane gate's own question follows the default's branch line, the
+/// diff, the tree and the notes with their first line, and is last.
+#[test]
+fn a_lane_gates_own_question_follows_the_default_lines() {
+    let mut env = Env::new();
+    with_inspect_question(&env);
+    let id = at_inspect(&mut env);
+    let t = env.ticket(&id);
+    let lane = &t.lanes[0];
+    let d = pending_named(&env, &id, "inspect").unwrap();
+    let q = &d.question;
+    assert!(q.starts_with("inspect ("), "{q}");
+    let notes = artifact_of(&t, "implement", "notes");
+    for want in [
+        format!(" branch {} at base0000 over origin/main.", lane.branch),
+        "abc1234 Escape leaves the field".to_owned(),
+        format!("Tree: {}", lane.worktree.display()),
+        format!("Notes (implement): {}\n  # done", notes.display()),
+    ] {
+        assert!(q.contains(&want), "{want} in {q}");
+    }
+    assert!(q.ends_with(&format!("\n\nShip {}?", lane.branch)), "{q}");
+}
+
+/// `at_inspect` with the gate's own question, asked again by a restart
+/// after `break_git` broke the tree's git reads. The checks before the
+/// gate read the head too, so the reads break only once they passed.
+fn at_inspect_broken(
+    env: &mut Env,
+    break_git: impl FnOnce(&mut FakeRepo, &std::path::Path),
+) -> String {
+    with_inspect_question(env);
+    let id = at_inspect(env);
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    break_git(&mut env.repo.lock().unwrap(), &tree);
+    let first = pending_named(env, &id, "inspect").unwrap();
+    restart_at(env, &id, Some("inspect"));
+    env.steps_until(&id, "the inspect question again", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "inspect" && d.id != first.id)
+    });
+    id
+}
+
+/// A diff that cannot be read leaves only the diff out, and a head
+/// that cannot be read leaves the branch line out; the gate asks
+/// either way and its attempt stays open.
+#[test]
+fn a_git_read_that_fails_leaves_its_line_out_and_the_gate_asks() {
+    let mut env = Env::new();
+    let id = at_inspect_broken(&mut env, |repo, tree| {
+        repo.fail_summary.push(tree.to_path_buf());
+    });
+    let t = env.ticket(&id);
+    let q = pending_named(&env, &id, "inspect").unwrap().question;
+    assert!(q.contains(" over origin/main."), "{q}");
+    assert!(!q.contains("Escape leaves the field"), "{q}");
+    assert!(q.contains("Tree: "), "{q}");
+    assert!(q.ends_with(&format!("Ship {}?", t.lanes[0].branch)), "{q}");
+    assert!(
+        t.attempts_of("inspect")
+            .last()
+            .is_some_and(Attempt::is_open)
+    );
+
+    let mut env = Env::new();
+    let id = at_inspect_broken(&mut env, |repo, tree| {
+        repo.heads.remove(tree);
+    });
+    let t = env.ticket(&id);
+    let q = pending_named(&env, &id, "inspect").unwrap().question;
+    assert!(!q.contains(" over "), "{q}");
+    assert!(q.starts_with("inspect ("), "{q}");
+    assert!(q.contains("Tree: "), "{q}");
+    assert!(q.ends_with(&format!("Ship {}?", t.lanes[0].branch)), "{q}");
+    assert!(
+        t.attempts_of("inspect")
+            .last()
+            .is_some_and(Attempt::is_open)
+    );
+}
+
 /// The `inspect` stage asks once per lane with the branch, what it
 /// adds and where to look, on a gate-only attempt.
 #[test]
@@ -2973,7 +3068,8 @@ fn a_ticket_from_pull_requests_checks_out_their_branches_and_watches_the_merges(
 /// A pull request on a mirror: the spec names the remote, the clone
 /// gains it, the lane checks the PR's branch out from there (Bitbucket
 /// has the branch itself, no pull ref), and the merge is read from
-/// that provider by number.
+/// that provider by number. The sign-off's own question follows the
+/// branch line over the PR's base.
 #[test]
 fn a_pull_request_on_a_named_mirror_is_fetched_from_that_remote() {
     let mut env = Env::new();
@@ -2981,6 +3077,10 @@ fn a_pull_request_on_a_named_mirror_is_fetched_from_that_remote() {
     let text = pr_pipeline(&worktrees).replace(
         "repo = \"git@github.com:msull/docs.git\"\n",
         "repo = \"git@github.com:msull/docs.git\"\nremotes = { bb = \"git@bitbucket.org:msull/docs.git\" }\n",
+    )
+    .replace(
+        "decision = \"inspect\" }",
+        "decision = \"inspect\", question = \"Sign off?\" }",
     );
     std::fs::write(env.data.pr_pipeline(PROJECT), text).unwrap();
     env.bitbucket.lock().unwrap().prs.push((
@@ -3043,7 +3143,8 @@ fn a_pull_request_on_a_named_mirror_is_fetched_from_that_remote() {
     let t = env.ticket(&id);
     assert_eq!(t.lanes.len(), 1, "only the docs lane is cut");
     let d = env.pending(&id).into_iter().next().unwrap();
-    assert!(d.question.contains("over bb/dev"), "{}", d.question);
+    assert!(d.question.contains("over bb/dev."), "{}", d.question);
+    assert!(d.question.ends_with("\n\nSign off?"), "{}", d.question);
     let now = env.tick();
     env.runner.decide(&id, &d.id, "proceed", None, now).unwrap();
     env.steps_until(&id, "the merge watch", |t, _| {
@@ -21808,6 +21909,37 @@ fn a_tester_is_told_its_evidence_directory_and_its_files_are_listed_at_completio
     );
 }
 
+/// A gate's own question after a deploy follows the deployed, served
+/// and evidence lines.
+#[test]
+fn a_tried_gates_own_question_follows_the_deployed_and_served_lines() {
+    let mut env = Env::new();
+    let text = BACK_HALF
+        .replace("{worktrees}", &env.worktrees.display().to_string())
+        .replace(
+            "writes = [\"notes\"]\nprompt = \"my-dev",
+            "writes = [\"notes\", { name = \"evidence\", dir = true }]\nprompt = \"Screenshots to {evidence}. my-dev",
+        )
+        .replace(
+            "decision = \"tried\", confirm = true }",
+            "decision = \"tried\", confirm = true, question = \"Did #{issue.number} work?\" }",
+        );
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, BOTH);
+    let dir = tester_running(&mut env, &id);
+    std::fs::write(dir.join("steps.md"), "# steps").unwrap();
+    tester_done(&mut env, &id);
+    let q = tried_question(&mut env, &id).question;
+    for want in [
+        "Deployed: deploy at ",
+        "Served: frontend http://localhost:3100",
+        "evidence: 1 files",
+    ] {
+        assert!(q.contains(want), "{want} in {q}");
+    }
+    assert!(q.ends_with("\n\nDid #42 work?"), "{q}");
+}
+
 #[test]
 fn an_empty_evidence_directory_does_not_hold_the_tester() {
     let (mut env, id) = evidence_env("");
@@ -22509,12 +22641,19 @@ fn a_human_gates_note_reaches_the_planner_and_the_review() {
     let t = env.ticket(&id);
     let d = pending_named(&env, &id, "decisions").unwrap();
     let notes = artifact_of(&t, "investigate", "notes");
-    assert_eq!(
-        d.question,
-        format!(
-            "Open decisions are in {}. Answer each in the note.",
+    assert!(
+        d.question.starts_with("decisions (root):"),
+        "{}",
+        d.question
+    );
+    assert!(d.question.contains("Tree: "), "{}", d.question);
+    assert!(
+        d.question.ends_with(&format!(
+            "\n\nOpen decisions are in {}. Answer each in the note.",
             notes.display()
-        )
+        )),
+        "{}",
+        d.question
     );
     assert_eq!(d.options, ["proceed", "rerun", "park"]);
     assert!(env.sb().sessions_named("planner").is_empty());
@@ -22571,6 +22710,47 @@ fn a_gate_answered_without_a_note_renders_empty_and_asks_the_default() {
     assert!(
         prompt.contains("The lead has decided (proceed): ."),
         "{prompt}"
+    );
+}
+
+/// A gate's own question may name its own decision: empty when first
+/// asked, and the re-ask after a `rerun` shows that answer and its
+/// note.
+#[test]
+fn a_gates_own_question_naming_its_decision_shows_the_last_answer() {
+    let mut env = Env::new();
+    let id = at_decisions(
+        &mut env,
+        7,
+        Some("Last time: {decisions.decisions} [{decisions.decisions.note}]."),
+    );
+    let first = pending_named(&env, &id, "decisions").unwrap();
+    assert!(
+        first.question.ends_with("\n\nLast time:  []."),
+        "{}",
+        first.question
+    );
+    decide_named(&mut env, &id, "decisions", "rerun", Some("look again"));
+    env.steps_until(&id, "a second investigator", |t, _| {
+        t.attempts_of("investigate").count() == 2
+    });
+    let t = env.ticket(&id);
+    env.finish(
+        &session_of(&t, "investigate"),
+        &artifact_of(&t, "investigate", "notes"),
+        "# notes\n## Open questions\n- [owner] which way now?",
+    );
+    env.steps_until(&id, "the decisions question again", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "decisions")
+    });
+    let again = pending_named(&env, &id, "decisions").unwrap();
+    assert_ne!(again.id, first.id);
+    assert!(
+        again
+            .question
+            .ends_with("\n\nLast time: rerun [look again]."),
+        "{}",
+        again.question
     );
 }
 

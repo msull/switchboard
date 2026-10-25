@@ -823,13 +823,19 @@ What follows a merge on your side (a rebundle, a mirror
 backup) is outside Dispatch's definition of done and is named in the
 decision's text as a reminder, not verified.
 
-A human gate may carry its own `question`, which is asked in place of
-the default one above: the branch, its diff, the tree, the notes and
-what is deployed all go, so a question that wants the notes names
-`{inputs.notes}` itself. It is a template like a prompt, rendered for
-the context when the gate asks and frozen on the decision, so a
-`{decisions.<name>}` inside it shows what was answered before the gate
-asked. Its options stay `proceed`, `rerun` and `park` (or a confirm
+A human gate may carry its own `question`, which is asked after the
+default one above, following a blank line: the branch, its diff, the
+tree, the notes with their first lines and what is deployed all stay,
+so the question is asked about what they show. A question that names
+`{inputs.notes}` for a sentence of its own repeats the path the notes
+line already shows. There is no key yet for a gate that wants only its
+own text. A `question` on the built-in `lanes` gate, which builds its
+own question, is refused when the file loads. It is a template
+like a prompt, rendered for the context when the gate asks and frozen
+on the decision, so a `{decisions.<name>}` inside it shows what was
+answered before the gate asked. A git read that fails for the branch
+line or the diff leaves that line out and is logged, and the gate
+still asks. Its options stay `proceed`, `rerun` and `park` (or a confirm
 gate's), and `rerun` with a note still sends the context back to the
 nearest earlier agent stage. A human gate of the file reads no dial
 (the built-in `lanes` gate is the one that does): it always asks,

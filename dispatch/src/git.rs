@@ -1706,6 +1706,8 @@ pub struct FakeRepo {
     pub remotes: std::collections::BTreeMap<PathBuf, String>,
     /// What a tree's branch adds over its base, as a test wrote it.
     pub summaries: std::collections::BTreeMap<PathBuf, String>,
+    /// Trees whose summary over their base cannot be read.
+    pub fail_summary: Vec<PathBuf>,
     /// Worktrees repaired: repo, dir.
     pub repaired: Vec<(PathBuf, PathBuf)>,
     /// Checks started.
@@ -2204,6 +2206,9 @@ impl Repo for FakeRepo {
         Ok(self.remotes.get(dir).cloned())
     }
     fn summary(&self, dir: &Path, _base: &str) -> Result<String> {
+        if self.fail_summary.iter().any(|d| d == dir) {
+            bail!("fatal: bad revision for {}", dir.display());
+        }
         Ok(self.summaries.get(dir).cloned().unwrap_or_default())
     }
     fn run(&mut self, dir: &Path, argv: &[String], _env: &[(String, String)]) -> Result<()> {

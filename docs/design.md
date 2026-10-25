@@ -1713,7 +1713,10 @@ passes, `rerun` with a note (typed under the decision on the page) sends
 that lane back to the nearest earlier agent stage with the note and
 the previous attempt's notes path in the next prompt, restarting that
 stage's services with a fresh `before`. The question shows each
-notes file's first line. A `confirm` gate (`tried`) inside its agent
+notes file's first line. A gate's own `question` follows these lines
+after a blank line rather than replacing them, and a branch or diff
+line whose git read fails is left out (and logged) rather than failing
+the gate. A `confirm` gate (`tried`) inside its agent
 stage's hold run offers `rerun` beside `done` and `park`, so a try
 that could not test runs again on the same deploy while the stack
 stays held. The note box under a decision is multi-line, and an
@@ -3769,6 +3772,25 @@ only, which includes the built-in definition's reviewer. Whether the
 dialog or its Esc writes any hook line is not settled; if a lost prompt
 turns out to fire `UserPromptSubmit`, the check needs a turn count
 rather than a timestamp.
+
+## A human gate's own question (2026-10-25)
+
+A human gate's own `question` used to replace the default question, so
+a custom-question gate lost the branch, diff, `Tree:`, notes and
+`Deployed:`/`Served:` lines, and naming `{inputs.notes}` brought back
+only the path, not the first line. The custom text now follows the
+default after a blank line. The supervisor seed's "shown in the
+question" is true for every human gate as a result. A `question` on the
+built-in `lanes` gate, which was silently ignored, is refused at load.
+The default's `git.head` and `git.summary` reads no longer fail the
+gate attempt: the line is left out and the error logged.
+
+Known gaps: a question that names `{inputs.notes}` (the shipped
+`decisions` gate does) shows the notes path twice. There is no opt-out
+key for a gate that wants only its own text; `Gate::Human` does not deny
+unknown fields, so a misspelt key would pass silently, and the key
+waits for a gate that needs it. A decision pending from before the
+change keeps its stored question until `dispatch restart` asks again.
 
 ## Open questions
 
