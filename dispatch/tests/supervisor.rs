@@ -1284,6 +1284,25 @@ impl Env {
         session
     }
 
+    /// Drop the runner's subscription to `ticket`, as a record from
+    /// before the runner followed every ticket would lack it.
+    fn unfollow(&mut self, ticket: &str) {
+        assert!(self.runner.unsubscribe(ticket).unwrap());
+    }
+
+    /// The runner's pass that follows Orchard's active tickets.
+    fn follow_active(&mut self) {
+        let now = self.tick();
+        self.runner.subscribe_active(ORCHARD, now).unwrap();
+    }
+
+    fn sub(&self, ticket: &str) -> Option<dispatch::ticket::Subscription> {
+        self.supervision()
+            .subscriptions
+            .into_iter()
+            .find(|s| s.ticket == ticket)
+    }
+
     fn subscribe(&mut self, ticket: &str) {
         let now = self.tick();
         self.runner
@@ -1533,6 +1552,7 @@ fn subscribing_to_a_parked_ticket_delivers_nothing_until_it_moves() {
     let mut env = Env::new();
     env.idle_supervisor();
     let t = env.take(ORCHARD, 1);
+    env.unfollow(&t.id);
     env.parked(&t.id);
     env.subscribe(&t.id);
     assert!(env.supervision().subscriptions[0].park_seen);
@@ -1676,6 +1696,8 @@ fn brief_and_subscriptions_show_what_is_not_delivered() {
     env.seat(ORCHARD, SUPERVISOR);
     let t = env.take(ORCHARD, 1);
     let other = env.take(GROVE, 2);
+    env.unfollow(&t.id);
+    env.unfollow(&other.id);
     accepted(&env.cli(Some(SUPERVISOR), &["subscribe", &t.id]));
     refused(
         &env.cli(Some(SUPERVISOR), &["subscribe", &other.id]),
@@ -1701,4 +1723,193 @@ fn brief_and_subscriptions_show_what_is_not_delivered() {
     );
     accepted(&env.cli(Some(SUPERVISOR), &["unsubscribe", &t.id]));
     assert!(env.supervision().subscriptions.is_empty());
+}
+
+// --- the runner follows every active ticket itself
+
+#[test]
+fn a_take_subscribes_the_supervisor_from_the_tail() {
+    let mut env = Env::new();
+    let sup = env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    let sub = env.sub(&t.id).expect("followed at take");
+    assert_eq!(env.supervision().subscriptions.len(), 1);
+    assert_eq!(sub.by, dispatch::subscribe::BY_RUNNER);
+    assert_eq!(sub.what, "move");
+    assert_eq!(sub.since, env.tail());
+    assert!(!sub.park_seen);
+    env.deliver();
+    assert!(env.prompts().is_empty(), "a take alone delivers nothing");
+    assert_eq!(env.sb().kinds_called("session"), 0);
+    env.moved(&t.id);
+    env.deliver();
+    let sent = env.sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].0, sup);
+    assert!(sent[0].1.contains("  stage  "), "{}", sent[0].1);
+    assert!(!sent[0].1.contains("  taken  "), "{}", sent[0].1);
+}
+
+#[test]
+fn a_take_with_no_supervisor_is_followed_and_a_fresh_one_gets_its_moves() {
+    let mut env = Env::new();
+    let t = env.take(ORCHARD, 1);
+    assert!(env.sub(&t.id).is_some());
+    env.moved(&t.id);
+    env.deliver();
+    assert!(env.prompts().is_empty(), "no one to type to");
+    let sup = env.idle_supervisor();
+    env.deliver();
+    let sent = env.sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].0, sup);
+    assert!(sent[0].1.contains("  stage  "), "{}", sent[0].1);
+}
+
+#[test]
+fn the_pass_follows_an_unfollowed_ticket_and_leaves_a_cursor_alone() {
+    let mut env = Env::new();
+    let a = env.take(ORCHARD, 1);
+    let b = env.take(ORCHARD, 2);
+    env.unfollow(&a.id);
+    let now = env.tick();
+    env.runner
+        .subscribe(&b.id, "move", Some(1), "owner", now)
+        .unwrap();
+    let file = env.data.project_file(ORCHARD);
+    env.follow_active();
+    let sub = env.sub(&a.id).expect("the pass follows it");
+    assert_eq!(sub.by, dispatch::subscribe::BY_RUNNER);
+    assert_eq!(sub.since, env.tail());
+    assert!(!sub.park_seen);
+    assert_eq!(env.since(&b.id), Some(1), "an existing cursor stays");
+    // A pass with every ticket followed writes nothing.
+    let written = std::fs::read_to_string(&file).unwrap();
+    env.follow_active();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), written);
+}
+
+#[test]
+fn the_pass_follows_a_parked_ticket_once_it_resumes() {
+    let mut env = Env::new();
+    let t = env.take(ORCHARD, 1);
+    env.unfollow(&t.id);
+    env.parked(&t.id);
+    env.follow_active();
+    assert_eq!(
+        env.sub(&t.id),
+        None,
+        "a standing park is not news to mark seen"
+    );
+    env.set_state(&t.id, TicketState::Active);
+    env.follow_active();
+    let sub = env.sub(&t.id).expect("followed once active");
+    assert!(!sub.park_seen);
+}
+
+#[test]
+fn the_pass_skips_closing_and_closed_tickets() {
+    let mut env = Env::new();
+    let closing = env.take(ORCHARD, 1);
+    let closed = env.take(ORCHARD, 2);
+    env.unfollow(&closing.id);
+    env.unfollow(&closed.id);
+    env.set_state(
+        &closing.id,
+        TicketState::Closing {
+            reason: "done".into(),
+        },
+    );
+    env.set_state(
+        &closed.id,
+        TicketState::Closed {
+            reason: "done".into(),
+        },
+    );
+    env.follow_active();
+    assert!(env.supervision().subscriptions.is_empty());
+}
+
+#[test]
+fn a_ticket_unsubscribed_is_followed_again_on_the_next_pass() {
+    let mut env = Env::new();
+    let t = env.take(ORCHARD, 1);
+    env.unfollow(&t.id);
+    env.follow_active();
+    assert!(env.sub(&t.id).is_some());
+}
+
+#[test]
+fn a_gate_open_before_the_ticket_was_followed_is_delivered_once() {
+    let mut env = Env::new();
+    env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    env.unfollow(&t.id);
+    env.moved(&t.id);
+    let d = env.ask(&t.id, "inspect");
+    let gate = dispatch::events::read_since(&dispatch::events::log_path(&env.data), 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == Kind::Decision && e.decision.as_deref() == Some(d.as_str()))
+        .expect("the decision line")
+        .seq;
+    env.follow_active();
+    assert_eq!(env.since(&t.id), Some(gate - 1));
+    env.deliver();
+    let sent = env.sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let text = &sent[0].1;
+    assert!(text.contains("  decision  "), "{text}");
+    assert!(
+        !text.contains("  stage  "),
+        "the move before it is old: {text}"
+    );
+    assert!(
+        text.contains(&format!(
+            " decide {} {d} <answer> [--note <text> | --file <path>]",
+            t.id
+        )),
+        "{text}"
+    );
+    env.deliver();
+    assert_eq!(env.sent().len(), 1, "delivered once");
+}
+
+#[test]
+fn an_answered_gate_is_not_replayed_when_the_ticket_is_followed() {
+    let mut env = Env::new();
+    env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    env.unfollow(&t.id);
+    env.ask(&t.id, "inspect");
+    let now = env.tick();
+    let mut answered = env.ticket(&t.id);
+    answered.decisions[0].state = DecisionState::Answered {
+        answer: "inspect".into(),
+        note: None,
+        by: "owner".into(),
+        at_ms: now,
+        acted: true,
+    };
+    env.runner.save_ticket(&mut answered, now).unwrap();
+    env.follow_active();
+    assert_eq!(env.since(&t.id), Some(env.tail()));
+    env.deliver();
+    assert!(env.prompts().is_empty());
+}
+
+#[test]
+fn the_runner_pass_follows_and_delivers_in_the_same_pass() {
+    let mut env = Env::new();
+    env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    env.unfollow(&t.id);
+    env.ask(&t.id, "inspect");
+    env.now += 3_000;
+    let now = env.now;
+    env.runner.step_all(now).unwrap();
+    assert!(env.sub(&t.id).is_some());
+    let sent = env.sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].1.contains("  decision  "), "{}", sent[0].1);
 }

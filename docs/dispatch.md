@@ -2771,8 +2771,19 @@ makes it count as the owner. What a supervisor does is stamped
 (`Supervision.subscriptions`, a cursor per ticket starting at the log's
 tail), and each runner pass, after the supervisor's intent and before
 the project's tickets, types what is due into `supervisor.current`'s
-pane. What is due per ticket is `events::next_burst`: what `wait --for
-move` would return from the cursor, read with a stepped clock so the
+pane. The supervisor need not call it: `take` subscribes the new ticket
+(`by` is `runner`, the cursor the log's tail, with or without a
+supervisor seated), and each pass first subscribes every Active ticket
+of the project that has no subscription. Such a ticket's cursor is the
+log's tail, or one before the oldest `decision` line still waiting on
+the user, so a gate opened before the ticket was followed is delivered
+once with its `decide` line. A parked ticket is left until it resumes,
+since one subscribed while parked would mark its standing park seen;
+closing and closed ones are skipped. A ticket the supervisor
+unsubscribes is followed again on the next pass. `subscribe` stays for
+`--since`, which moves a cursor, and for a ticket the runner has not
+reached yet. What is due per ticket is `events::next_burst`: what
+`wait --for move` would return from the cursor, read with a stepped clock so the
 pass never blocks, held while the burst may still grow (its last line
 neither a decision nor an end, within `SETTLE_MS` of now, its first
 within `SETTLE_CAP_MS`). Every subscribed ticket's burst goes in one

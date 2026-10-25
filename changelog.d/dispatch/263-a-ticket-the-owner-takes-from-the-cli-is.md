@@ -1,0 +1,1 @@
+Fixed: A ticket taken from the command line is now followed by the project's supervisor from the moment it is taken, and an active ticket it was missing is picked up on the next pass, with a gate already waiting delivered once.

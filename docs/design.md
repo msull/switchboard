@@ -2296,8 +2296,17 @@ long-lived Claude Code session that watches its tickets
   pane has the message, kept on a failed write, and given back to the
   editor on a failed editor write. A draft in a box does not hold
   deliveries off. Only keys in the embedded terminal do.
-- A supervisor subscribes to its tickets (`dispatch subscribe`), and
-  the runner types each settled burst into its pane through
+- The runner subscribes the supervisor to every active ticket of the
+  project: `take` subscribes the new ticket (`by` `runner`, from the
+  log's tail, with or without a supervisor seated), and each pass,
+  before delivering, subscribes every Active ticket that has none, from
+  one before its oldest `decision` line still waiting on the user when
+  there is one, so a gate already open is delivered once. Parked
+  tickets wait until they resume and closing or closed ones are
+  skipped; an existing cursor is never moved. The seed no longer tells
+  the supervisor to subscribe, which with `--since` would move the
+  runner's cursor; `dispatch subscribe` stays for `--since`.
+- The runner types each settled burst into its pane through
   `session.prompt`, which the core refuses unless
   `AppCore::ready_for_prompt` holds: a running Claude Code agent
   between turns by the same `between_turns` an owner's queued answer
@@ -2336,6 +2345,12 @@ long-lived Claude Code session that watches its tickets
 
 Known gaps:
 
+- The seed's subscribe lines changed, so a supervisor started before
+  the runner followed every ticket reads "seed changed" until a Fresh,
+  and until then its seed may still run `subscribe --since` and move a
+  cursor the runner set.
+- A ticket the supervisor unsubscribes is subscribed again on the next
+  pass: it follows every active ticket.
 - Keys typed into an outside terminal attached to the supervisor's
   tmux session are invisible to the typed mark.
 - A draft left in the embedded terminal past `TYPED_HOLD` is still in
