@@ -3171,6 +3171,38 @@ ports = [3100, 3199]
         assert_eq!(checked, 15, "toml blocks in the guide");
     }
 
+    /// The repository's own pipeline file is installed by copying it into
+    /// Dispatch's data directory, so it is held to the same bar as the
+    /// guide's blocks: it parses, validates for a take, and every key in
+    /// it is one the parser keeps.
+    #[test]
+    fn the_repositorys_own_pipeline_file_is_a_pipeline_the_parser_knows() {
+        let text = include_str!("../../pipelines/Switchboard.toml");
+        let source: toml::Table = toml::from_str(text).unwrap();
+        let p =
+            Pipeline::parse(text).unwrap_or_else(|e| panic!("pipelines/Switchboard.toml: {e:#}"));
+        p.validate_for_take()
+            .unwrap_or_else(|e| panic!("pipelines/Switchboard.toml: {e:#}"));
+        let parsed = toml::Table::try_from(&p).unwrap();
+        keys_survive(&source, &parsed, "", 0);
+        let names: Vec<&str> = p.stages.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "investigate",
+                "lanes",
+                "facts",
+                "plan",
+                "review",
+                "implement",
+                "review-code",
+                "pr",
+                "ready",
+                "merge"
+            ]
+        );
+    }
+
     fn back_half_refused(from: &str, to: &str, expected: &str) {
         let text = DEPLOYING_BACK_HALF.replace(from, to);
         assert_ne!(text, DEPLOYING_BACK_HALF, "{from}");
