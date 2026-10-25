@@ -1,1 +1,0 @@
-Fixed: A plan review rerun after a failed attempt starts from the owner's revised copy, sends the revise note and any rerun note to its first round, and says which copy it reviews in the rerun question, in show and on the Plan tab.

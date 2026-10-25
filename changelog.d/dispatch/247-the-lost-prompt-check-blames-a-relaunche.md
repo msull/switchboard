@@ -1,1 +1,0 @@
-Fixed: A review round no longer fails as "never started a turn" when its reviewer pane was relaunched on Continue and is still starting up; Continue no longer sends the ask a second time into that pane.

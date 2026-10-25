@@ -10,6 +10,19 @@ publishes that section as the release notes. The format follows
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-25
+
+### Changed
+
+- Concurrent tickets no longer conflict on the changelog: each change is a file under changelog.d/ that scripts/bump.sh folds into the release section.
+
+### Fixed
+
+- A plan review rerun after a failed attempt starts from the owner's revised copy, sends the revise note and any rerun note to its first round, and says which copy it reviews in the rerun question, in show and on the Plan tab.
+- Dispatch runner children started through git (and its hooks), gh, curl, df, ps and kill no longer inherit the runner's launch token.
+- A review round no longer fails as "never started a turn" when its reviewer pane was relaunched on Continue and is still starting up; Continue no longer sends the ask a second time into that pane.
+- A ticket taken from the command line is now followed by the project's supervisor from the moment it is taken, and an active ticket it was missing is picked up on the next pass, with a gate already waiting delivered once.
+
 ## [0.7.0] - 2026-10-25
 
 ### Added
