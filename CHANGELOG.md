@@ -1,10 +1,12 @@
 # Changelog
 
-Every user-visible change goes under Unreleased as it lands.
-`scripts/bump.sh` moves that section under the next version with the
-date, and `scripts/release.sh` publishes that section as the release
-notes. The format follows [Keep a Changelog](https://keepachangelog.com)
-and the versions follow [Semantic Versioning](https://semver.org).
+Every user-visible change lands as a fragment in `changelog.d/`, not
+as a line here (format in `changelog.d/README.md`). `scripts/bump.sh`
+folds the fragments, with anything left under Unreleased, into a
+section for the next version with the date, and `scripts/release.sh`
+publishes that section as the release notes. The format follows
+[Keep a Changelog](https://keepachangelog.com) and the versions follow
+[Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
