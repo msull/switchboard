@@ -71,3 +71,30 @@ test('a route fills its id', () => {
   assert.deepStrictEqual(page.route(page.API.send, 'x y'), { method: 'POST', path: '/api/v1/sessions/x%20y/send' });
   assert.deepStrictEqual(page.route(page.API.info), { method: 'GET', path: '/api/v1/info' });
 });
+
+test('a conversation query asks for the last turns or those before one', () => {
+  assert.strictEqual(page.conversationQuery(null), '?from=last&limit=20');
+  assert.strictEqual(page.conversationQuery(7), '?before=7&limit=20');
+});
+
+test('turns merge by number', () => {
+  const turn = (n, text) => ({ n, final_text: text || `answer ${n}` });
+  const held = [turn(3), turn(4)];
+  const ns = (turns) => turns.map((t) => t.n);
+
+  const replaced = page.mergeTurns(held, { total: 5, turns: [turn(4, 'new'), turn(5)] });
+  assert.deepStrictEqual(ns(replaced), [3, 4, 5]);
+  assert.strictEqual(replaced[1].final_text, 'new');
+
+  const gap = page.mergeTurns(held, { total: 9, turns: [turn(8), turn(9)] });
+  assert.deepStrictEqual(ns(gap), [8, 9], 'a gap drops the held turns');
+
+  const earlier = page.mergeTurns(held, { total: 4, turns: [turn(1), turn(2)] });
+  assert.deepStrictEqual(ns(earlier), [1, 2, 3, 4]);
+
+  const same = { total: 4, turns: [turn(3), turn(4)] };
+  assert.deepStrictEqual(page.mergeTurns(page.mergeTurns(held, same), same), page.mergeTurns(held, same));
+
+  assert.deepStrictEqual(ns(page.mergeTurns(held, { total: 3, turns: [] })), [3], 'past the total is gone');
+  assert.deepStrictEqual(ns(page.mergeTurns([], { total: 2, turns: [turn(1), turn(2)] })), [1, 2]);
+});
