@@ -1058,7 +1058,16 @@ has no Stop hook, so a Codex reviewer that sits idle without its file
 still only gets the stall notice below; the planner is always a Claude
 Code clone, so its half is always covered. A round saved before the
 asked times were kept never fails on a stop (the stop may be the
-previous round's).
+previous round's). A Claude Code agent whose hooks report, that has
+started no turn since it was asked (no typed `UserPromptSubmit` after
+the ask: `SessionRecord::last_prompt_at`; an injected notification does
+not show the ask was taken), whose pane runs, whose card is not on an
+open turn or at a permission dialog, and that holds nothing for the owner (the trust
+question, an outside wait, its own ask) fails the run the same way once
+`LOST_PROMPT_AFTER` (three minutes) has passed since the ask: a dialog
+in the pane swallowed the prompt, and no Stop will ever come. Codex has
+no hooks, so a Codex reviewer whose prompt is lost still only gets the
+stall notice.
 
 An approval prompt inside the agent (Codex asking to run `gh`, say) is
 invisible the same way, and a round can sit on it for as long as nobody
@@ -3698,6 +3707,26 @@ once, which the tab drops. The two agree only for a session with no
 subagent files whose records all carry an id; a session whose
 Agent-tool subagents wrote their own files shows fewer tokens on the
 session page.
+
+## Lost review prompts (2026-10-24)
+
+A Claude Code first-run dialog (auto mode's environment setup, at
+least) can take a review round's prompt: the reviewer sits idle with no
+turn, the round file never comes, no Stop fires, and the run waited
+forever. Claude Code has no setting or flag that keeps the dialog out
+of a launch, so the fix is on the detection side (see Signals under
+Workflows). Each session keeps `last_prompt_at`, stamped by
+`PromptSubmitted` only; a waiting run whose Claude Code
+agent has none after the ask fails after `LOST_PROMPT_AFTER`, which
+Dispatch reads as a failed review and offers to rerun. Continue
+re-sends the ask once when no turn began. Nothing re-sends on its own,
+since a re-send into a pane still at the dialog is lost the same way.
+
+Known gaps: Codex agents report no hooks and keep the stall notice
+only, which includes the built-in definition's reviewer. Whether the
+dialog or its Esc writes any hook line is not settled; if a lost prompt
+turns out to fire `UserPromptSubmit`, the check needs a turn count
+rather than a timestamp.
 
 ## Open questions
 

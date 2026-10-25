@@ -346,7 +346,7 @@ pub fn migrate(value: serde_json::Value) -> Result<Workspace, String> {
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "missing schema_version".to_string())?;
     match version {
-        // v2 to v16 added optional fields and variants only (v8: the
+        // v2 to v17 added optional fields and variants only (v8: the
         // project's space; v9: the control port's operation id, the
         // outside waiting reason, the pending-launch mark and the last
         // stop time; v10: a session's launcher environment; v11: when a
@@ -354,10 +354,10 @@ pub fn migrate(value: serde_json::Value) -> Result<Workspace, String> {
         // and a session's environment sets, and a session's launch-token
         // hash; v13: whether a round is the owner's objection; v14: a
         // session's own ask; v15: an ask's kind and pending answer; v16:
-        // a session's pending work at its last stop), so an older
-        // document reads with their defaults; it is written back at the
-        // current version.
-        1..=16 => serde_json::from_value(value)
+        // a session's pending work at its last stop; v17: when a prompt
+        // last began a session's turn), so an older document reads with
+        // their defaults; it is written back at the current version.
+        1..=17 => serde_json::from_value(value)
             .map(|mut w: Workspace| {
                 w.schema_version = SCHEMA_VERSION;
                 w
@@ -505,6 +505,7 @@ mod tests {
             waiting_on: None,
             pending_launch: false,
             last_stop_at: None,
+            last_prompt_at: None,
             pending_at_stop: None,
             env: Vec::new(),
             env_sets: Vec::new(),
@@ -1035,6 +1036,20 @@ mod tests {
         let loaded = migrate(value).unwrap();
         assert_eq!(loaded.schema_version, SCHEMA_VERSION);
         assert!(loaded.sessions.iter().all(|s| s.pending_at_stop.is_none()));
+    }
+
+    #[test]
+    fn v16_records_read_with_no_prompt_time() {
+        let mut w = workspace("v16");
+        w.schema_version = 16;
+        let mut value = serde_json::to_value(&w).unwrap();
+        assert!(!value["sessions"].as_array().unwrap().is_empty());
+        for s in value["sessions"].as_array_mut().unwrap() {
+            s.as_object_mut().unwrap().remove("last_prompt_at");
+        }
+        let loaded = migrate(value).unwrap();
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert!(loaded.sessions.iter().all(|s| s.last_prompt_at.is_none()));
     }
 
     #[test]
