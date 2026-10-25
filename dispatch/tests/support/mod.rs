@@ -242,6 +242,7 @@ impl FakeSwitchboard {
             last_exit: None,
             last_stop_at_ms: None,
             last_activity_ms: None,
+            last_seen_ms: None,
             quiet_secs: Some(0),
             waiting: false,
             waiting_reason: None,

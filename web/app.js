@@ -1,6 +1,7 @@
 // Switchboard's web page: pair a browser from the pairing window's QR,
-// list the sessions with the waiting ones first, read one (a Claude
-// Code session as its conversation, anything else as its screen), and
+// list the sessions (live ones by default, waiting first, narrowed by
+// state, kind, project and a name search), read one (a Claude Code
+// session as its conversation, anything else as its screen), and
 // reply.
 // It speaks the remote port's /api/v1 as a native client does, with
 // two differences: the token is a cookie this script never sees, and
@@ -94,24 +95,113 @@ function isCurrent(held, next) {
   return next.revision >= held.revision;
 }
 
+// The list's choices: which sessions show and in what order.
+const VIEW_KEY = 'switchboard-list';
+const STATES = ['live', 'waiting', 'ended', 'all'];
+const KINDS = ['all', 'claude', 'codex', 'shell', 'command', 'service'];
+const SORTS = ['waiting', 'recent', 'project', 'name'];
+const DEFAULT_VIEW = Object.freeze({ state: 'live', kind: 'all', projects: Object.freeze([]), sort: 'waiting' });
+
 /**
- * The projects with their sessions, a project with a waiting session
- * first and waiting sessions first within each, the host's order kept
- * otherwise. Projects with no session are left out.
+ * The list's choices from what storage held, which may be anything:
+ * each field that is missing, mistyped or unknown takes its default.
  */
-function orderSessions(projects, sessionsByProject) {
-  const waitingFirst = (list) => list
-    .map((item, i) => ({ item, i }))
-    .sort((a, b) => (b.item.waiting - a.item.waiting) || (a.i - b.i))
-    .map((x) => x.item);
-  const groups = projects
-    .map((project) => ({
-      project,
-      sessions: waitingFirst((sessionsByProject[project.id] || []).map((s) => ({ ...s, waiting: !!s.waiting }))),
-    }))
-    .filter((g) => g.sessions.length > 0)
-    .map((g) => ({ ...g, waiting: g.sessions.some((s) => s.waiting) }));
-  return waitingFirst(groups).map(({ project, sessions }) => ({ project, sessions }));
+function readView(raw) {
+  const v = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  return {
+    state: STATES.includes(v.state) ? v.state : DEFAULT_VIEW.state,
+    kind: KINDS.includes(v.kind) ? v.kind : DEFAULT_VIEW.kind,
+    projects: Array.isArray(v.projects) ? v.projects.filter((p) => typeof p === 'string') : [...DEFAULT_VIEW.projects],
+    sort: SORTS.includes(v.sort) ? v.sort : DEFAULT_VIEW.sort,
+  };
+}
+
+/**
+ * Whether the pane runs. Liveness is the string `running`, or `missing`,
+ * or an object for an exited pane; only the first is live, whatever the
+ * card says.
+ */
+function isLive(s) {
+  return s.liveness === 'running';
+}
+
+/**
+ * When the session last did anything, in milliseconds: the latest of
+ * the pane printing, the record being seen, and the agent stopping. An
+ * ended session has only the last two.
+ */
+function recencyMs(s) {
+  return Math.max(s.last_activity_ms || 0, s.last_seen_ms || 0, s.last_stop_at_ms || 0);
+}
+
+function passesState(s, state) {
+  if (state === 'live') return isLive(s);
+  if (state === 'waiting') return !!s.waiting;
+  if (state === 'ended') return !isLive(s);
+  return true;
+}
+
+const SORTERS = {
+  // `arrangeSessions` coerces `waiting` to a boolean, so subtracting is safe.
+  waiting: (a, b) => (b.session.waiting - a.session.waiting) || (recencyMs(b.session) - recencyMs(a.session)),
+  recent: (a, b) => recencyMs(b.session) - recencyMs(a.session),
+  project: (a, b) => a.project.name.localeCompare(b.project.name) || (recencyMs(b.session) - recencyMs(a.session)),
+  name: (a, b) => String(a.session.name).localeCompare(String(b.session.name)),
+};
+
+/**
+ * The sessions to show under `view` and the `search` text, one flat
+ * list with each row's project: state, kind and projects narrow it (a
+ * selection naming no project that exists means all), then a
+ * case-insensitive match on the name. The host's order breaks every tie,
+ * so rows that compare equal never reshuffle. `hiddenWaiting` counts
+ * the waiting sessions any of that hid.
+ */
+function arrangeSessions(projects, sessionsByProject, view, search) {
+  const known = new Set(projects.map((p) => p.id));
+  const picked = new Set(view.projects.filter((id) => known.has(id)));
+  const needle = (search || '').trim().toLowerCase();
+  const all = [];
+  for (const project of projects) {
+    for (const s of sessionsByProject[project.id] || []) {
+      all.push({ project, session: { ...s, waiting: !!s.waiting } });
+    }
+  }
+  const rows = all.filter(({ project, session }) => passesState(session, view.state)
+    && (view.kind === 'all' || session.kind === view.kind)
+    && (picked.size === 0 || picked.has(project.id))
+    && (!needle || String(session.name).toLowerCase().includes(needle)));
+  const shown = new Set(rows);
+  const hiddenWaiting = all.filter((r) => r.session.waiting && !shown.has(r)).length;
+  const sorter = SORTERS[view.sort] || SORTERS.waiting;
+  const sorted = rows
+    .map((row, i) => ({ row, i }))
+    .sort((a, b) => sorter(a.row, b.row) || (a.i - b.i))
+    .map((x) => x.row);
+  return { rows: sorted, total: all.length, shown: sorted.length, hiddenWaiting };
+}
+
+/**
+ * What an empty list says: nothing at all, nothing live under the
+ * default view (which is also what the host's first moments look like,
+ * before it has listed its panes), or nothing matching.
+ */
+function emptyText(result, view, search) {
+  if (result.total === 0) return 'No sessions.';
+  const isDefault = view.state === 'live' && view.kind === 'all'
+    && view.projects.length === 0 && !(search || '').trim();
+  if (isDefault) return `No live sessions; ${result.total} not running.`;
+  return 'Nothing matches these filters.';
+}
+
+/**
+ * How many of the band's choices differ from the defaults. A stored
+ * project that no longer exists narrows nothing, so it does not count.
+ */
+function changedCount(view, projects) {
+  const known = new Set(projects.map((p) => p.id));
+  return ['state', 'kind', 'sort'].filter((k) => view[k] !== DEFAULT_VIEW[k]).length
+    + (view.projects.some((id) => known.has(id)) ? 1 : 0);
 }
 
 /** "just now", "5 min ago", "3 h ago", "2 d ago". */
@@ -164,7 +254,13 @@ if (typeof module !== 'undefined' && module.exports) {
     deviceName,
     inferUnauthorized,
     isCurrent,
-    orderSessions,
+    DEFAULT_VIEW,
+    readView,
+    isLive,
+    recencyMs,
+    arrangeSessions,
+    emptyText,
+    changedCount,
     sinceText,
     route,
     conversationQuery,
@@ -181,6 +277,12 @@ if (typeof document !== 'undefined') {
     listMark: null,
     open: null,
     sessions: {},
+    // The last list loaded, which the list's controls arrange without
+    // asking the host again.
+    loaded: { projects: [], sessionsByProject: {} },
+    view: readView(null),
+    search: '',
+    projectChoices: null,
     held: {},
     // The open conversation's turns, kept in memory only.
     turns: [],
@@ -221,6 +323,18 @@ if (typeof document !== 'undefined') {
 
   function stored() {
     try { return JSON.parse(localStorage.getItem(STORE_KEY)); } catch (_) { return null; }
+  }
+
+  /**
+   * The list's choices this browser kept. Storage may be refused or
+   * cleared, so the defaults are always a whole answer.
+   */
+  function storedView() {
+    try { return readView(JSON.parse(localStorage.getItem(VIEW_KEY))); } catch (_) { return readView(null); }
+  }
+
+  function saveView() {
+    try { localStorage.setItem(VIEW_KEY, JSON.stringify(state.view)); } catch (_) { /* kept for this visit only */ }
   }
 
   function show(section) {
@@ -368,7 +482,9 @@ if (typeof document !== 'undefined') {
     for (const list of Object.values(sessionsByProject)) {
       for (const s of list) state.sessions[s.id] = s;
     }
-    drawList(orderSessions(projects, sessionsByProject));
+    state.loaded = { projects, sessionsByProject };
+    drawProjectChoices();
+    redraw();
     if (state.open) {
       if (state.sessions[state.open]) await loadSession();
       else closeSession();
@@ -376,35 +492,119 @@ if (typeof document !== 'undefined') {
     return null;
   }
 
-  function drawList(groups) {
-    const root = $('projects');
-    root.replaceChildren();
-    $('list-empty').hidden = groups.length > 0;
-    const now = Date.now();
-    for (const { project, sessions } of groups) {
-      const heading = document.createElement('h3');
-      heading.textContent = project.name;
-      root.append(heading);
-      for (const s of sessions) {
-        const row = document.createElement('button');
-        row.type = 'button';
-        row.className = s.waiting ? 'row is-waiting' : 'row';
-        if (s.waiting) {
-          const w = document.createElement('p');
-          w.className = 'waiting';
-          w.textContent = s.waiting_reason ? `Waiting on you: ${s.waiting_reason}` : 'Waiting on you';
-          row.append(w);
-        }
-        const name = document.createElement('div');
-        name.className = 'name';
-        name.textContent = s.name;
-        const meta = document.createElement('div');
-        meta.className = 'meta';
-        meta.textContent = [s.kind, s.card, sinceText(s.last_activity_ms, now)].filter(Boolean).join(' · ');
-        row.append(name, meta);
-        row.addEventListener('click', () => openSession(s.id));
-        root.append(row);
+  /** The list arranged under the current choices, drawn. */
+  function redraw() {
+    const { projects, sessionsByProject } = state.loaded;
+    drawList(arrangeSessions(projects, sessionsByProject, state.view, state.search));
+  }
+
+  /**
+   * A checkbox per project, rebuilt only when the projects change, so a
+   * poll does not take a tick from under the reader's finger.
+   */
+  function drawProjectChoices() {
+    const projects = state.loaded.projects;
+    const key = JSON.stringify(projects.map((p) => [p.id, p.name]));
+    if (key !== state.projectChoices) {
+      state.projectChoices = key;
+      const root = $('f-project-list');
+      root.replaceChildren();
+      for (const project of projects) {
+        const label = document.createElement('label');
+        label.className = 'check';
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.value = project.id;
+        box.addEventListener('change', () => {
+          state.view.projects = Array.from(root.querySelectorAll('input:checked'), (b) => b.value);
+          viewChanged();
+        });
+        const name = document.createElement('span');
+        name.textContent = project.name;
+        label.append(box, name);
+        root.append(label);
       }
+    }
+    syncControls();
+  }
+
+  /**
+   * The controls showing `state.view`. The search box is left alone: it
+   * is only ever what the reader typed, and setting it would move their
+   * caret.
+   */
+  function syncControls() {
+    $('f-state').value = state.view.state;
+    $('f-kind').value = state.view.kind;
+    $('f-sort').value = state.view.sort;
+    const picked = new Set(state.view.projects);
+    for (const box of $('f-project-list').querySelectorAll('input')) box.checked = picked.has(box.value);
+    // The count keeps a folded band from narrowing the list unseen.
+    const changed = changedCount(state.view, state.loaded.projects);
+    $('filters-toggle').textContent = changed ? `Filters (${changed})` : 'Filters';
+  }
+
+  function viewChanged() {
+    saveView();
+    syncControls();
+    redraw();
+  }
+
+  function showEverything() {
+    state.view = { ...state.view, state: 'all', kind: 'all', projects: [] };
+    state.search = '';
+    $('search').value = '';
+    viewChanged();
+  }
+
+  function toggleFilters() {
+    const open = $('filters').hidden;
+    $('filters').hidden = !open;
+    $('filters-toggle').setAttribute('aria-expanded', String(open));
+  }
+
+  /** A session's kind, card and age, for its row and its page. */
+  function metaText(s, now) {
+    return [s.kind, s.card, sinceText(recencyMs(s) || null, now)].filter(Boolean).join(' · ');
+  }
+
+  /** The empty text, counts and hidden-waiting line above the rows. */
+  function drawSummary(result) {
+    $('list-empty').hidden = result.shown > 0;
+    $('list-empty-text').textContent = emptyText(result, state.view, state.search);
+    $('show-all').hidden = result.total === 0;
+    $('list-count').textContent = `${result.shown} of ${result.total} shown`;
+    const hidden = result.hiddenWaiting;
+    $('list-hidden-waiting').hidden = hidden === 0;
+    $('list-hidden-waiting').textContent = hidden === 1
+      ? '1 session waiting on you is hidden by the filters'
+      : `${hidden} sessions waiting on you are hidden by the filters`;
+  }
+
+  function drawList(result) {
+    drawSummary(result);
+    const root = $('sessions');
+    root.replaceChildren();
+    const now = Date.now();
+    for (const { project, session: s } of result.rows) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = s.waiting ? 'row is-waiting' : 'row';
+      if (s.waiting) {
+        const w = document.createElement('p');
+        w.className = 'waiting';
+        w.textContent = s.waiting_reason ? `Waiting on you: ${s.waiting_reason}` : 'Waiting on you';
+        row.append(w);
+      }
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = s.name;
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = [project.name, metaText(s, now)].filter(Boolean).join(' · ');
+      row.append(name, meta);
+      row.addEventListener('click', () => openSession(s.id));
+      root.append(row);
     }
     showCurrent();
   }
@@ -435,7 +635,7 @@ if (typeof document !== 'undefined') {
     const s = state.sessions[id];
     if (!s) return null;
     $('session-name').textContent = s.name;
-    $('session-meta').textContent = [s.kind, s.card, sinceText(s.last_activity_ms, Date.now())].filter(Boolean).join(' · ');
+    $('session-meta').textContent = metaText(s, Date.now());
     $('session-waiting').hidden = !s.waiting;
     $('session-waiting').textContent = s.waiting_reason ? `Waiting on you: ${s.waiting_reason}` : 'Waiting on you';
     const canReply = state.me && state.me.scope === 'control';
@@ -701,6 +901,20 @@ if (typeof document !== 'undefined') {
     $('back').addEventListener('click', closeSession);
     $('send').addEventListener('click', send);
     $('earlier').addEventListener('click', loadEarlier);
+    state.view = storedView();
+    syncControls();
+    $('filters-toggle').addEventListener('click', toggleFilters);
+    $('show-all').addEventListener('click', showEverything);
+    $('search').addEventListener('input', () => {
+      state.search = $('search').value;
+      redraw();
+    });
+    for (const [id, field] of [['f-state', 'state'], ['f-kind', 'kind'], ['f-sort', 'sort']]) {
+      $(id).addEventListener('change', () => {
+        state.view = readView({ ...state.view, [field]: $(id).value });
+        viewChanged();
+      });
+    }
     const invite = parseFragment(location.hash);
     // The code leaves the address bar before anything else happens.
     if (location.hash) history.replaceState(null, '', location.pathname);

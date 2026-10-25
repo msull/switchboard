@@ -22,8 +22,46 @@
   </section>
 
   <section id="list" hidden>
-    <p id="list-empty" class="meta" hidden>No sessions.</p>
-    <div id="projects"></div>
+    <div class="bar">
+      <input id="search" type="search" placeholder="Search names" aria-label="Search session names" autocomplete="off">
+      <button id="filters-toggle" type="button" aria-expanded="false" aria-controls="filters">Filters</button>
+    </div>
+    <div id="filters" hidden>
+      <label for="f-state">Show</label>
+      <select id="f-state">
+        <option value="live">Live</option>
+        <option value="waiting">Waiting on you</option>
+        <option value="ended">Ended</option>
+        <option value="all">Everything</option>
+      </select>
+      <label for="f-kind">Kind</label>
+      <select id="f-kind">
+        <option value="all">Any kind</option>
+        <option value="claude">claude</option>
+        <option value="codex">codex</option>
+        <option value="shell">shell</option>
+        <option value="command">command</option>
+        <option value="service">service</option>
+      </select>
+      <label for="f-sort">Sort</label>
+      <select id="f-sort">
+        <option value="waiting">Waiting first</option>
+        <option value="recent">Recent</option>
+        <option value="project">By project</option>
+        <option value="name">By name</option>
+      </select>
+      <fieldset id="f-projects">
+        <legend>Projects (none ticked means all)</legend>
+        <div id="f-project-list"></div>
+      </fieldset>
+    </div>
+    <p id="list-count" class="meta" role="status"></p>
+    <p id="list-hidden-waiting" class="waiting" hidden></p>
+    <div id="list-empty" hidden>
+      <p id="list-empty-text" class="meta"></p>
+      <button id="show-all" type="button">Show everything</button>
+    </div>
+    <div id="sessions"></div>
   </section>
 
   <section id="session" hidden>

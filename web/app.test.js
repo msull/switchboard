@@ -47,15 +47,106 @@ test('a reply older than the one held is dropped', () => {
   assert.ok(page.isCurrent(held, { epoch: 'restarted', revision: 1 }));
 });
 
-test('waiting sessions and their projects come first', () => {
-  const projects = [{ id: 'p1', name: 'one' }, { id: 'p2', name: 'two' }, { id: 'p3', name: 'empty' }];
-  const groups = page.orderSessions(projects, {
-    p1: [{ id: 'a', waiting: false }, { id: 'b', waiting: false }],
-    p2: [{ id: 'c', waiting: false }, { id: 'd', waiting: true }],
-  });
-  assert.deepStrictEqual(groups.map((g) => g.project.id), ['p2', 'p1']);
-  assert.deepStrictEqual(groups[0].sessions.map((s) => s.id), ['d', 'c']);
-  assert.deepStrictEqual(groups[1].sessions.map((s) => s.id), ['a', 'b']);
+const projects = [{ id: 'p1', name: 'beta' }, { id: 'p2', name: 'alpha' }, { id: 'p3', name: 'empty' }];
+const s = (id, fields) => ({ id, name: id, kind: 'claude', liveness: 'running', card: 'idle', waiting: false, ...fields });
+const fixture = () => ({
+  p1: [
+    s('a', { last_activity_ms: 100 }),
+    s('Build', { kind: 'shell', waiting: true, last_activity_ms: 50 }),
+    s('gone', { liveness: { exited: { code: 0 } }, card: 'exited (0)', last_seen_ms: 900 }),
+  ],
+  p2: [
+    s('c', { card: 'starting', last_activity_ms: 300 }),
+    s('lost', { liveness: 'missing', card: 'not running', waiting: true, last_seen_ms: 10 }),
+  ],
+});
+const view = (fields) => ({ ...page.readView(null), ...fields });
+const ids = (result) => result.rows.map((r) => r.session.id);
+
+test('the default list is every live session, waiting first, then the most recent', () => {
+  const result = page.arrangeSessions(projects, fixture(), page.readView(null), '');
+  assert.deepStrictEqual(ids(result), ['Build', 'c', 'a']);
+  assert.deepStrictEqual(result.rows.map((r) => r.project.id), ['p1', 'p2', 'p1']);
+  assert.strictEqual(result.shown, 3);
+  assert.strictEqual(result.total, 5);
+  assert.strictEqual(result.hiddenWaiting, 1, 'the missing waiting session is hidden');
+  assert.ok(page.isLive(s('x')));
+  assert.ok(!page.isLive(s('x', { liveness: 'missing' })));
+  assert.ok(!page.isLive(s('x', { liveness: { exited: { code: null } } })));
+});
+
+test('the state, kind and project choices narrow the list', () => {
+  const by = (fields, search) => ids(page.arrangeSessions(projects, fixture(), view(fields), search));
+  assert.deepStrictEqual(by({ state: 'waiting' }), ['Build', 'lost']);
+  assert.deepStrictEqual(by({ state: 'ended' }), ['lost', 'gone']);
+  assert.strictEqual(by({ state: 'all' }).length, 5);
+  assert.deepStrictEqual(by({ state: 'all', kind: 'shell' }), ['Build']);
+  assert.deepStrictEqual(by({ state: 'all', projects: ['p2'] }), ['lost', 'c']);
+  assert.strictEqual(by({ state: 'all', projects: ['stale'] }).length, 5, 'a stale project means all');
+  assert.deepStrictEqual(by({ state: 'all', projects: ['stale', 'p2'] }), ['lost', 'c']);
+  assert.strictEqual(by({ state: 'all', projects: [] }).length, 5);
+});
+
+test('the search matches names, trimmed and in any case', () => {
+  const by = (search) => ids(page.arrangeSessions(projects, fixture(), view({ state: 'all' }), search));
+  assert.deepStrictEqual(by('  bUiL '), ['Build']);
+  assert.deepStrictEqual(by('o'), ['lost', 'gone']);
+  assert.deepStrictEqual(by('shell'), [], 'the kind is not searched');
+  assert.strictEqual(by('   ').length, 5);
+});
+
+test('each sort orders the rows, the host order breaking ties', () => {
+  const by = (sort) => ids(page.arrangeSessions(projects, fixture(), view({ state: 'all', sort }), ''));
+  assert.deepStrictEqual(by('waiting'), ['Build', 'lost', 'gone', 'c', 'a']);
+  assert.deepStrictEqual(by('recent'), ['gone', 'c', 'a', 'Build', 'lost'], 'an ended session sorts by when it was last seen');
+  assert.deepStrictEqual(by('project'), ['c', 'lost', 'gone', 'a', 'Build']);
+  assert.deepStrictEqual(by('name'), ['a', 'Build', 'c', 'gone', 'lost']);
+  const twins = { p1: [s('x', { name: 'same' }), s('y', { name: 'same' }), s('z', { name: 'same' })] };
+  for (const sort of ['waiting', 'recent', 'project', 'name']) {
+    assert.deepStrictEqual(ids(page.arrangeSessions(projects, twins, view({ sort }), '')), ['x', 'y', 'z']);
+  }
+  assert.strictEqual(page.recencyMs({ last_activity_ms: 5, last_seen_ms: 9, last_stop_at_ms: 7 }), 9);
+  assert.strictEqual(page.recencyMs({ last_activity_ms: null, last_seen_ms: undefined, last_stop_at_ms: 3 }), 3);
+  assert.strictEqual(page.recencyMs({}), 0);
+});
+
+test('a waiting session hidden by any choice is counted', () => {
+  const hidden = (fields, search) => page.arrangeSessions(projects, fixture(), view(fields), search).hiddenWaiting;
+  assert.strictEqual(hidden({ state: 'all' }, ''), 0);
+  assert.strictEqual(hidden({ state: 'ended' }, ''), 1, 'by state');
+  assert.strictEqual(hidden({ state: 'all', kind: 'claude' }, ''), 1, 'by kind');
+  assert.strictEqual(hidden({ state: 'all', projects: ['p2'] }, ''), 1, 'by project');
+  assert.strictEqual(hidden({ state: 'all' }, 'gone'), 2, 'by search');
+});
+
+test('a stored view is read back, anything odd as the defaults', () => {
+  const defaults = { state: 'live', kind: 'all', projects: [], sort: 'waiting' };
+  assert.deepStrictEqual(page.readView(null), defaults);
+  assert.deepStrictEqual(page.readView('live'), defaults);
+  assert.deepStrictEqual(page.readView([1]), defaults);
+  assert.deepStrictEqual(page.readView({ state: 'bogus', kind: 3, projects: 'p1', sort: null }), defaults);
+  assert.deepStrictEqual(page.readView({ projects: ['p1', 7] }).projects, ['p1']);
+  const kept = { state: 'ended', kind: 'codex', projects: ['p1'], sort: 'name' };
+  assert.deepStrictEqual(page.readView(JSON.parse(JSON.stringify(kept))), kept);
+  assert.deepStrictEqual({ ...page.DEFAULT_VIEW, projects: [...page.DEFAULT_VIEW.projects] }, defaults);
+});
+
+test('an empty list says why', () => {
+  const none = page.arrangeSessions(projects, {}, page.readView(null), '');
+  assert.strictEqual(page.emptyText(none, page.readView(null), ''), 'No sessions.');
+  const cold = { p1: [s('a', { liveness: 'missing' }), s('b', { liveness: 'missing' })] };
+  const result = page.arrangeSessions(projects, cold, page.readView(null), '');
+  assert.strictEqual(result.shown, 0);
+  assert.strictEqual(page.emptyText(result, page.readView(null), ''), 'No live sessions; 2 not running.');
+  assert.strictEqual(page.emptyText(result, view({ kind: 'shell' }), ''), 'Nothing matches these filters.');
+  assert.strictEqual(page.emptyText(result, page.readView(null), 'zz'), 'Nothing matches these filters.');
+});
+
+test('the filters button counts the choices that differ from the defaults', () => {
+  assert.strictEqual(page.changedCount(page.readView(null), projects), 0);
+  assert.strictEqual(page.changedCount(view({ state: 'all', sort: 'name' }), projects), 2);
+  assert.strictEqual(page.changedCount(view({ kind: 'shell', projects: ['p1', 'p2'] }), projects), 2);
+  assert.strictEqual(page.changedCount(view({ projects: ['gone'] }), projects), 0);
 });
 
 test('times read as a person says them', () => {

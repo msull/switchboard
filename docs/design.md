@@ -3665,6 +3665,31 @@ Built so far:
   (through `spaces/{space}/sets` and `sets/{id}`, as no route lists
   pins); and dictation last, behind `isSecureContext` and the
   recognizer check on each device.
+- **The web page's sessions list (2026-10-25).** The list opens on
+  the live sessions (liveness `running`, whatever the card says) as one
+  flat list, waiting first and then by recency, each row naming its
+  project. A search box and a "Filters" button sit in one row; behind
+  the button are the state (live, waiting on you, ended, everything),
+  the kind (the wire's five words), the projects (checkboxes, none
+  meaning all) and the sort (waiting first, recent, by project, by
+  name), the words following the native client's filter vocabulary.
+  The button counts the choices that differ from the defaults, a count
+  line says "N of M shown", and a line says how many waiting sessions
+  the filters hide. An empty default list says "No live sessions; N
+  not running" with a "Show everything" button, so the host's first
+  moments, when every session reads not running, are never a blank
+  page. Everything runs in the browser over the last list loaded
+  (`arrangeSessions`), so a control never refetches. The choices,
+  but not the search text, are kept in `localStorage` under
+  `switchboard-list`, read through `readView`, which turns anything
+  odd into the defaults. `SessionView` gains an additive
+  `last_seen_ms` (the record's `last_seen`, for every liveness), so
+  an ended session has an age; recency is the latest of it,
+  `last_activity_ms` and `last_stop_at_ms`. Known gaps: no browser was
+  driven, so the layout at 375 and 390 px and whether the choices
+  survive a reload on the self-signed origin are unchecked; the
+  Swift client does not read `last_seen_ms`; the search text is not
+  remembered.
 
 ## Versioning and updates (2026-10-15)
 

@@ -794,6 +794,7 @@ impl AppCore {
                 wire::Liveness::Running => status.and_then(|h| h.last_activity).and_then(epoch_ms),
                 _ => None,
             },
+            last_seen_ms: epoch_ms(s.last_seen),
             waiting: card == super::CardState::WaitingOnYou,
             waiting_reason: self.waiting_reason(id),
             trust_question: self.at_trust_prompt(id),
