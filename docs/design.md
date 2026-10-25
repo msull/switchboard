@@ -2472,7 +2472,9 @@ The runner's pane carries its record id and launch token, and its
 children inherit the id. A command gate of a stage with `env` runs
 under `switchboard-env exec --` with the token, so it resolves the
 runner's grants (`switchboard-env grant --runner <set>`); every other
-child of the runner has the token removed.
+child of the runner has the token removed. Every child is built
+through `dispatch/src/child.rs`, and a test fails when a
+`Command::new` appears anywhere else in the crate's code.
 
 The row reads `runner up · pid N · K ticket(s)` with Stop, `runner
 starting…` while the pane runs but has not answered, `runner

@@ -43,6 +43,7 @@
 #![cfg_attr(test, allow(clippy::assert_is_empty))]
 
 pub mod bitbucket;
+mod child;
 mod confine;
 pub mod events;
 pub mod git;
