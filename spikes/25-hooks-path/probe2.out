@@ -1,0 +1,5 @@
+--- rebase with hooksPath
+   1 post-checkout
+   1 post-rewrite
+   1 pre-rebase
+--- rebase with -c missing
