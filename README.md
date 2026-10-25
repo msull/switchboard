@@ -516,6 +516,8 @@ thread's result) polls to a deadline through its file's helper
 (`poll_on` in the tmux adapter, `poll_to`, `wait_until` and `hold` in
 `tests/gate.rs`, `frames_until` in `tests/ui.rs`, `poll_to` in
 Dispatch's `git.rs`) and never sleeps a fixed time before an assert.
+A confined check's exit gets the longer `poll_within` deadline in
+`git.rs`, because the sandbox wrapper's `log show` queries ride on it.
 Dispatch's integration tests skip the device flush
 (`store::skip_fsync_for_tests`) and move time with `Env::wait` rather
 than stepping through it.
