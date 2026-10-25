@@ -127,7 +127,9 @@ confined; they run in Switchboard.
   changes only tickets taken afterwards and tickets restarted after the
   edit. A stage added to the file (a `decisions` gate after `lanes`)
   reaches a ticket already in flight only through `dispatch restart
-  <ticket> <stage>`.
+  <ticket> <stage>`, which a project that works in place refuses (a
+  ranged restart needs a branch to reset), so there it reaches only
+  tickets taken afterwards.
   Reviewer definitions are installed into Switchboard under
   `Dispatch: <operator>@<content hash>`, so an edited definition is a
   new name and a run in flight keeps looking up the one it started
@@ -829,9 +831,9 @@ the context when the gate asks and frozen on the decision, so a
 `{decisions.<name>}` inside it shows what was answered before the gate
 asked. Its options stay `proceed`, `rerun` and `park` (or a confirm
 gate's), and `rerun` with a note still sends the context back to the
-nearest earlier agent stage. A human gate reads no dial: it always
-asks, unless a supervisor whose `decides` names its decision answers
-it. Its answer and the note given with it are the prompt variables
+nearest earlier agent stage. A human gate of the file reads no dial
+(the built-in `lanes` gate is the one that does): it always asks,
+unless a supervisor whose `decides` names its decision answers it. Its answer and the note given with it are the prompt variables
 `{decisions.<name>}` and `{decisions.<name>.note}` for every stage
 after it (the table below), which is how a lead's answers to the open
 decisions in an investigator's notes reach the planner:

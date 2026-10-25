@@ -1920,7 +1920,7 @@ impl AppCore {
     }
 
     /// Set a record's own ask directly. Tests only; a session sets it
-    /// through `session.ask` with its token. For tests only.
+    /// through `session.ask` with its token.
     pub fn seed_asking(&mut self, id: RecordId, ask: Option<super::Ask>) {
         if let Some(s) = self.session_mut(id) {
             s.asking = ask;

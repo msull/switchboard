@@ -1062,8 +1062,9 @@ previous round's). A Claude Code agent whose hooks report, that has
 started no turn since it was asked (no typed `UserPromptSubmit` after
 the ask: `SessionRecord::last_prompt_at`; an injected notification does
 not show the ask was taken), whose pane runs, whose card is not on an
-open turn or at a permission dialog, and that holds nothing for the owner (the trust
-question, an outside wait, its own ask) fails the run the same way once
+open turn or at a permission dialog, and that holds nothing for the
+owner (the trust question, an outside wait, its own ask) fails the run
+the same way once
 `LOST_PROMPT_AFTER` (three minutes) has passed since the ask: a dialog
 in the pane swallowed the prompt, and no Stop will ever come. Codex has
 no hooks, so a Codex reviewer whose prompt is lost still only gets the
@@ -3400,11 +3401,12 @@ Built so far:
   `scope`, by name, with nothing run). The body carries the device's
   own operation id, `op`, and for a send the text (16 KiB at most).
   The request becomes the wire request the control socket would carry
-  and goes through the same `serve`, so nothing new runs or logs: a
-  send or a resume is written to `operations.log` before it runs, a
-  repeat of the op is answered from the log without typing or
-  launching again, and an op that was started and never answered is
-  refused `interrupted` (409) rather than run twice. `/info` lists
+  and goes through `serve_from` as the owner's, which is what lets a
+  send answer a standing ask (Asking the owner, above); nothing new
+  runs or logs: a send or a resume is written to `operations.log`
+  before it runs, a repeat of the op is answered from the log without
+  typing or launching again, and an op that was started and never
+  answered is refused `interrupted` (409) rather than run twice. `/info` lists
   `control` among the capabilities and the send and op caps among the
   limits. The client makes a UUID per command and follows the spec's
   rule on a timeout: a status query, never a blind resend; `done`
@@ -3437,7 +3439,7 @@ Built so far:
   pass can do (`DraftView`); `POST` with `action` applies replace,
   undo, redo, clear, clean_up, delete_sentence or delete_paragraph,
   or `send` with the device's `op`, which takes the draft to the pane
-  through `serve` as the plain send does and clears the editor (a
+  as the owner's, as the plain send does, and clears the editor (a
   repeat of a send that went is answered from the log; an empty draft
   is refused); `POST sessions/{id}/dictation` feeds a device's speech
   events (`started`, `voice_started`, `partial`, `final`,
@@ -3753,9 +3755,9 @@ session page.
 A Claude Code first-run dialog (auto mode's environment setup, at
 least) can take a review round's prompt: the reviewer sits idle with no
 turn, the round file never comes, no Stop fires, and the run waited
-forever. Claude Code has no setting or flag that keeps the dialog out
-of a launch, so the fix is on the detection side (see Signals under
-Workflows). Each session keeps `last_prompt_at`, stamped by
+forever. No launch flag that keeps the dialog out is confirmed (none
+was looked for beyond the obvious), so the fix is on the detection side
+(see Signals under Workflows). Each session keeps `last_prompt_at`, stamped by
 `PromptSubmitted` only; a waiting run whose Claude Code
 agent has none after the ask fails after `LOST_PROMPT_AFTER`, which
 Dispatch reads as a failed review and offers to rerun. Continue

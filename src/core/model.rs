@@ -1144,8 +1144,8 @@ pub struct SessionRecord {
     pub last_stop_at: Option<SystemTime>,
     /// When a prompt last began one of the agent's turns (the
     /// `UserPromptSubmit` hook, typed; an injected notification does not
-    /// count). A review ask with no
-    /// prompt since it never reached the agent.
+    /// count). A review ask with no prompt after it never reached the
+    /// agent.
     #[serde(default)]
     pub last_prompt_at: Option<SystemTime>,
     /// What the agent's last Stop said was still in flight. Replaced on
