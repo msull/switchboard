@@ -22441,3 +22441,245 @@ fn an_issue_is_taken_once_per_project() {
         .to_string();
     assert!(err.contains("is already ticket"), "{err}");
 }
+
+/// The question of the `decisions` gate the tests below add.
+const LEAD_QUESTION: &str = "Open decisions are in {inputs.notes}. Answer each in the note.";
+
+/// The live pipeline with a `decisions` gate between `lanes` and
+/// `plan`, asking `question` (the default when `None`), and the
+/// planner's prompt, its guidance and the review's first template
+/// naming the answer and its note.
+fn with_decisions(env: &Env, question: Option<&str>) {
+    let question = question.map_or_else(String::new, |q| format!(", question = \"{q}\""));
+    live_edit(
+        env,
+        "[[stages]]\nname = \"plan\"",
+        &format!(
+            "[[stages]]\nname = \"decisions\"\ngate = {{ kind = \"human\", decision = \"decisions\"{question} }}\n\n[[stages]]\nname = \"plan\""
+        ),
+    );
+    live_edit(
+        env,
+        "plan #{issue.number} to {plan} on {branch}.",
+        "plan #{issue.number} to {plan} on {branch}. The lead has decided ({decisions.decisions}): {decisions.decisions.note}. Lanes: [{decisions.lanes.note}].",
+    );
+    live_edit(
+        env,
+        "[operators.planner]\nkind = \"claude\"",
+        "[operators.planner]\nkind = \"claude\"\nguidance = \"Guided by [{decisions.decisions.note}].\"",
+    );
+    live_edit(
+        env,
+        "review_first = \"Review {plan}",
+        "review_first = \"Lead: [{decisions.decisions.note}]. Review {plan}",
+    );
+}
+
+/// A ticket taken onto `with_decisions`'s pipeline, through
+/// `investigate`, waiting at the `decisions` gate.
+fn at_decisions(env: &mut Env, number: u64, question: Option<&str>) -> String {
+    with_decisions(env, question);
+    let id = env.take(number).id;
+    env.step();
+    let t = env.ticket(&id);
+    env.finish(
+        &session_of(&t, "investigate"),
+        &artifact_of(&t, "investigate", "notes"),
+        "# notes\n## Open questions\n- [owner] which way?",
+    );
+    env.steps_until(&id, "the decisions question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "decisions")
+    });
+    id
+}
+
+fn decide_named(env: &mut Env, id: &str, name: &str, with: &str, note: Option<&str>) {
+    let d = pending_named(env, id, name).unwrap_or_else(|| panic!("no {name} pending"));
+    let now = env.tick();
+    env.runner.decide(id, &d.id, with, note, now).unwrap();
+}
+
+/// The lead's answers to the open decisions, typed with `proceed`, are
+/// in the planner's first prompt, its guidance and the review's
+/// template as typed, braces and all; the gate asked its own question.
+#[test]
+fn a_human_gates_note_reaches_the_planner_and_the_review() {
+    let mut env = Env::new();
+    let id = at_decisions(&mut env, 7, Some(LEAD_QUESTION));
+    let t = env.ticket(&id);
+    let d = pending_named(&env, &id, "decisions").unwrap();
+    let notes = artifact_of(&t, "investigate", "notes");
+    assert_eq!(
+        d.question,
+        format!(
+            "Open decisions are in {}. Answer each in the note.",
+            notes.display()
+        )
+    );
+    assert_eq!(d.options, ["proceed", "rerun", "park"]);
+    assert!(env.sb().sessions_named("planner").is_empty());
+    let note = "1. Keep {the old flag}.\n2. Ship both lanes.";
+    decide_named(&mut env, &id, "decisions", "proceed", Some(note));
+    env.steps_until(&id, "the plan stage", |t, _| {
+        t.attempts_of("plan").next().is_some()
+    });
+    let prompt = last_prompt_of(&env, "planner");
+    assert!(prompt.contains(&format!("Guided by [{note}].")), "{prompt}");
+    assert!(
+        prompt.contains(&format!("The lead has decided (proceed): {note}.")),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Lanes: []."), "never asked: {prompt}");
+    let t = env.ticket(&id);
+    env.finish(
+        &session_of(&t, "plan"),
+        &artifact_of(&t, "plan", "plan"),
+        "# plan\nsteps",
+    );
+    env.steps_until(&id, "the review run", |t, _| {
+        t.attempts_of("review")
+            .last()
+            .is_some_and(|a| a.run.is_some())
+    });
+    let first = env.sb().definitions[0].review_first.clone();
+    assert!(
+        first.starts_with(&format!("Lead: [{note}]. Review ")),
+        "{first}"
+    );
+}
+
+/// A gate answered without a note leaves nothing as written in the
+/// prompt, and a gate with no question of its own asks the default.
+#[test]
+fn a_gate_answered_without_a_note_renders_empty_and_asks_the_default() {
+    let mut env = Env::new();
+    let id = at_decisions(&mut env, 7, None);
+    let d = pending_named(&env, &id, "decisions").unwrap();
+    assert!(
+        d.question.starts_with("decisions (root):"),
+        "{}",
+        d.question
+    );
+    assert!(d.question.contains("Tree: "), "{}", d.question);
+    decide_named(&mut env, &id, "decisions", "proceed", None);
+    env.steps_until(&id, "the plan stage", |t, _| {
+        t.attempts_of("plan").next().is_some()
+    });
+    let prompt = last_prompt_of(&env, "planner");
+    assert!(!prompt.contains("{decisions."), "{prompt}");
+    assert!(prompt.starts_with("Guided by []."), "{prompt}");
+    assert!(
+        prompt.contains("The lead has decided (proceed): ."),
+        "{prompt}"
+    );
+}
+
+/// `dispatch restart <ticket> decisions` asks the gate again from the
+/// live file, at the gate or past it, and the plan that runs after it
+/// reads the newest answer.
+#[test]
+fn a_restart_at_the_gate_asks_again_and_the_plan_reads_the_new_note() {
+    let mut env = Env::new();
+    let id = at_decisions(&mut env, 7, Some(LEAD_QUESTION));
+    let first = pending_named(&env, &id, "decisions").unwrap();
+    live_edit(&env, "Answer each in the note.", "Answer each, numbered.");
+    let t = restart_at(&mut env, &id, Some("decisions"));
+    assert!(t.active(), "{:?}", t.state);
+    let old = t.decisions.iter().find(|d| d.id == first.id).unwrap();
+    assert_eq!(old.state, DecisionState::Cancelled);
+    env.steps_until(&id, "the decisions question again", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "decisions")
+    });
+    let again = pending_named(&env, &id, "decisions").unwrap();
+    assert_ne!(again.id, first.id);
+    assert!(
+        again.question.ends_with("Answer each, numbered."),
+        "{}",
+        again.question
+    );
+    decide_named(&mut env, &id, "decisions", "proceed", Some("second"));
+    env.steps_until(&id, "the plan stage", |t, _| {
+        t.attempts_of("plan").any(Attempt::is_open)
+    });
+    assert!(
+        last_prompt_of(&env, "planner").contains("The lead has decided (proceed): second."),
+        "{}",
+        last_prompt_of(&env, "planner")
+    );
+
+    // Past the gate: the planner is let go, the gate asks again, and
+    // the next planner reads the newer note, not the earlier one.
+    let planners = env.sb().sessions_named("planner").len();
+    let t = restart_at(&mut env, &id, Some("decisions"));
+    assert!(t.active(), "{:?}", t.state);
+    assert!(
+        t.decisions
+            .iter()
+            .filter(|d| d.name == "decisions")
+            .all(|d| d.state == DecisionState::Cancelled),
+        "{:#?}",
+        t.decisions
+    );
+    env.steps_until(&id, "the decisions question a third time", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "decisions")
+    });
+    decide_named(&mut env, &id, "decisions", "proceed", Some("third"));
+    // The planner the park let go is asked about, as after any park.
+    env.steps_until(&id, "the plan's rerun question", |t, _| {
+        t.pending_decisions()
+            .iter()
+            .any(|d| d.name == "rerun" && d.stage == "plan")
+    });
+    answer_named(&mut env, &id, "rerun", "rerun");
+    env.steps_until(&id, "a second planner", |t, _| {
+        t.attempts_of("plan").any(Attempt::is_open)
+    });
+    assert_eq!(env.sb().sessions_named("planner").len(), planners + 1);
+    let prompt = last_prompt_of(&env, "planner");
+    assert!(
+        prompt.contains("The lead has decided (proceed): third."),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("second"), "{prompt}");
+}
+
+/// A supervisor answers the gate only when its `decides` names it.
+#[test]
+fn a_supervisor_answers_the_gate_only_when_it_decides_it() {
+    let mut env = Env::new();
+    let id = at_decisions(&mut env, 7, Some(LEAD_QUESTION));
+    let path = env.data.pipeline(PROJECT);
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str("\n[supervisor]\nguidance = \"Keep it moving.\"\ndecides = [\"finalize\"]\n");
+    std::fs::write(&path, text).unwrap();
+    env.runner.actor = Some(dispatch::scheduler::BY_SUPERVISOR.into());
+    let d = pending_named(&env, &id, "decisions").unwrap();
+    let now = env.tick();
+    let e = env
+        .runner
+        .decide(&id, &d.id, "proceed", Some("go"), now)
+        .unwrap_err();
+    assert!(e.to_string().contains("may not answer `decisions`"), "{e}");
+    assert_eq!(
+        pending_named(&env, &id, "decisions")
+            .unwrap()
+            .refusals
+            .len(),
+        1
+    );
+    live_edit(
+        &env,
+        "decides = [\"finalize\"]",
+        "decides = [\"finalize\", \"decisions\"]",
+    );
+    decide_named(&mut env, &id, "decisions", "proceed", Some("go"));
+    env.runner.actor = None;
+    env.steps_until(&id, "the plan stage", |t, _| {
+        t.attempts_of("plan").next().is_some()
+    });
+    assert!(
+        last_prompt_of(&env, "planner").contains("The lead has decided (proceed): go."),
+        "{}",
+        last_prompt_of(&env, "planner")
+    );
+}

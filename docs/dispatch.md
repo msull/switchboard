@@ -125,7 +125,9 @@ confined; they run in Switchboard.
   directory, and the ticket runs from that copy until it finishes or is
   restarted (`dispatch restart`, below); editing the project's file
   changes only tickets taken afterwards and tickets restarted after the
-  edit.
+  edit. A stage added to the file (a `decisions` gate after `lanes`)
+  reaches a ticket already in flight only through `dispatch restart
+  <ticket> <stage>`.
   Reviewer definitions are installed into Switchboard under
   `Dispatch: <operator>@<content hash>`, so an edited definition is a
   new name and a run in flight keeps looking up the one it started
@@ -813,9 +815,32 @@ stage stands in the same hold run as the gate, for a resource the gate
 which sends the ticket back as a permission gate's does: the stack is
 still held, so nothing is deployed again and the hold is never let go.
 A `published`-style gate after a `release` needs nothing and has no
-`rerun`. What follows a merge on your side (a rebundle, a mirror
+`rerun`.
+
+What follows a merge on your side (a rebundle, a mirror
 backup) is outside Dispatch's definition of done and is named in the
 decision's text as a reminder, not verified.
+
+A human gate may carry its own `question`, which is asked in place of
+the default one above: the branch, its diff, the tree, the notes and
+what is deployed all go, so a question that wants the notes names
+`{inputs.notes}` itself. It is a template like a prompt, rendered for
+the context when the gate asks and frozen on the decision, so a
+`{decisions.<name>}` inside it shows what was answered before the gate
+asked. Its options stay `proceed`, `rerun` and `park` (or a confirm
+gate's), and `rerun` with a note still sends the context back to the
+nearest earlier agent stage. A human gate reads no dial: it always
+asks, unless a supervisor whose `decides` names its decision answers
+it. Its answer and the note given with it are the prompt variables
+`{decisions.<name>}` and `{decisions.<name>.note}` for every stage
+after it (the table below), which is how a lead's answers to the open
+decisions in an investigator's notes reach the planner:
+
+```toml
+[[stages]]
+name = "decisions"
+gate = { kind = "human", decision = "decisions", question = "Open decisions are in {inputs.notes}. Answer each in the note, or proceed with none to take the recommendations." }
+```
 
 ## The pipeline file
 
@@ -902,7 +927,7 @@ context = "root" | "each" | "joined" | ["front"]
 writes = ["notes"]            # artifact names; each expands as {notes}, {plan}, ...
 writes = ["seed", { name = "personas", secret = true }]   # a gate-only command stage: the command writes each to $DISPATCH_WRITES_<NAME>; a secret one needs a [[resources]] entry in needs
 writes = ["notes", { name = "evidence", dir = true }]    # one evidence directory: {evidence} and $DISPATCH_WRITES_EVIDENCE are its path; listed at completion, removed evidence_keep_days after close (see "Evidence directories")
-prompt = "..."                # templates: {issue.number} {issue.title} {task.text} {lane} {lane.merge_after} {lanes} {lanes.all} {branch} {worktree} {project.root} {inputs.<artifact>}; the full list is the table below
+prompt = "..."                # templates: {issue.number} {issue.title} {task.text} {lane} {lane.merge_after} {lanes} {lanes.all} {branch} {worktree} {project.root} {inputs.<artifact>} {decisions.<name>} {decisions.<name>.note}; the full list is the table below
 gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" }
      | { kind = "command", per_lane = { <lane> = ["..."] }, in = "lane" }
      | { kind = "command", like = "implement" }   # an earlier stage's command gate by reference; its result at the same clean head is reused
@@ -912,6 +937,7 @@ gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" 
      | { kind = "external", check = "pr-checks" | "pr-merged", provider = "github" | "bitbucket" }   # overrides the provider read from the lane's remote
      | { kind = "external", check = "pr-merged", decision = "merge" }   # the pending decision while it waits; absent, `merge`
      | { kind = "human", decision = "...", confirm = true }
+     | { kind = "human", decision = "...", question = "..." }   # asked in place of the default question; a template, rendered when the gate asks
 on_dirty = { nudge = 1 } | "ask"   # an agent stage with a command gate, or a code review stage's implementer: overrides the policy's
 without_lane = "base"         # a gate-only command stage in lane:<name>: when the ticket did not choose the lane, run it on the lane's base from the project's base tree
 services = ["frontend"]       # lanes with a serve, started for this stage if the ticket cut them; needs a [[resources]] entry in needs and [policy] ports
@@ -1047,6 +1073,8 @@ as written.
 | `{inputs.<artifact>}` | the path from the newest completed attempt that wrote it, among this lane's and those of stages that run in one context; `$DISPATCH_INPUT_<ARTIFACT>` |
 | `{inputs.<stage>.<artifact>}` | the path from the latest completed attempt of `<stage>`, in this lane when `<stage>` runs per lane; `$DISPATCH_INPUT_<STAGE>_<ARTIFACT>`. A root or joined stage naming a per-lane stage's artifact is refused |
 | `{inputs.<stage>.commit}` | the head that same attempt's gate recorded (a deploy's commit); refused in the same case |
+| `{decisions.<name>}` | the answer to decision `<name>` (`proceed`), for every decision a gate of the pipeline or Dispatch itself asks: the newest answered one this context sees (a root gate's from every lane, a per-lane gate's in its own lane), so an answer given after a `rerun` or a restart takes over; empty while there is none. A name no gate and nothing in Dispatch asks is refused when the file is read |
+| `{decisions.<name>.note}` | the note given with that answer, as typed (braces in it are not read as fields); empty when it had none |
 
 A command-gated stage's `checks` log and a code review's `summary`
 count as artifacts it writes, for both the refusal and the variable
@@ -3140,6 +3168,16 @@ and one against the real one:
 | A second ticket waits for `my-dev` while the first's `tried` is answered `rerun` | It waits through the rerun and takes `my-dev` only once `tried` is answered `done` (`a_ticket_queued_for_the_stack_waits_through_a_tried_rerun`) |
 | A `tried` rerun whose service's port stays taken | One `stuck` question after the stop limit; no tester and no second record until it is answered (`a_tried_rerun_restart_past_the_stop_limit_asks_stuck`) |
 | The reply to a service's `session.new` is lost | Recovery finds the session; it is on the record and the process list; nothing launches twice (`a_lost_service_reply_is_found_again_not_started_twice`) |
+
+A human gate's answer and note are prompt variables, and a human gate
+can carry its own question:
+
+| Case | Expected |
+|---|---|
+| A `decisions` gate with a `question` between `lanes` and `plan`, answered `proceed` with a note | The question is the gate's own, with `{inputs.notes}` filled; the note, braces and all, is in the planner's prompt, its guidance and the review's first template (`a_human_gates_note_reaches_the_planner_and_the_review`) |
+| The gate answered with no note; a decision never asked | Both render empty, nothing is left as written; a gate with no `question` asks the default (`a_gate_answered_without_a_note_renders_empty_and_asks_the_default`) |
+| `dispatch restart <ticket> decisions` at the gate, then past it | The answered or pending decision is cancelled and the gate asks again from the live file; the next planner reads the newest note (`a_restart_at_the_gate_asks_again_and_the_plan_reads_the_new_note`) |
+| A supervisor answers the gate | Refused unless its `decides` names `decisions`, then answered (`a_supervisor_answers_the_gate_only_when_it_decides_it`) |
 
 Then, in order: `implement` with its command gate bound to a commit,
 tested with one lane committing after another lane's checks finished;

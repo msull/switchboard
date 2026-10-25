@@ -4299,9 +4299,20 @@ impl Runner {
                 let decision = decision.clone().unwrap_or_else(|| DEFAULT_MERGE.to_owned());
                 self.pr_merged_stage(t, ps, p, stage, &decision, now_ms)
             }
-            Some(Gate::Human { decision, confirm }) => {
-                self.human_gate(t, ps, p, stage, decision, *confirm, now_ms)
-            }
+            Some(Gate::Human {
+                decision,
+                confirm,
+                question,
+            }) => self.human_gate(
+                t,
+                ps,
+                p,
+                stage,
+                decision,
+                *confirm,
+                question.as_deref(),
+                now_ms,
+            ),
             Some(Gate::Command { .. }) => self.command_gate_stage(t, ps, p, stage, now_ms),
             Some(gate) => {
                 let kind = match gate {
@@ -4705,6 +4716,8 @@ impl Runner {
     /// nearest earlier agent stage, `park` stops. A `confirm` gate is
     /// "you did this": its answer is `done`, and one inside its agent
     /// stage's hold run also takes `rerun` (see [`confirm_rerun`]).
+    /// The gate's own `question`, if it has one, is asked in place of
+    /// the default, rendered like a prompt for the context.
     #[allow(clippy::too_many_arguments)]
     fn human_gate(
         &mut self,
@@ -4714,6 +4727,7 @@ impl Runner {
         stage: &Stage,
         decision: &str,
         confirm: bool,
+        own_question: Option<&str>,
         now_ms: u64,
     ) -> Result<()> {
         let Some(contexts) = self.contexts_or_park(t, ps, p, stage, now_ms)? else {
@@ -4733,7 +4747,10 @@ impl Runner {
                 continue;
             };
             all_complete = false;
-            let question = self.human_question(t, p, stage, &attempt, &cwd, lane.as_deref())?;
+            let question = match own_question {
+                Some(q) => vars_for(t, p, lane.as_deref()).render(q),
+                None => self.human_question(t, p, stage, &attempt, &cwd, lane.as_deref())?,
+            };
             let (kind, options): (DecisionKind, &[&str]) = if confirm {
                 (
                     DecisionKind::Confirmation,
@@ -10777,6 +10794,7 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
             vars.set(format!("inputs.{name}"), path.display().to_string());
         }
     }
+    decision_vars(&mut vars, t, p, lane);
     // What an earlier stage left the tree at (a deploy's commit), or
     // that it was skipped. A per-lane stage with no attempt in this lane
     // leaves its fields unset rather than hand over another lane's.
@@ -10823,6 +10841,49 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
         }
     }
     vars
+}
+
+/// `{decisions.X}` and `{decisions.X.note}` for every decision a gate of
+/// the pipeline or Dispatch asks: the newest answer a reader in `lane`
+/// sees, and empty while there is none, so an unanswered decision never
+/// reaches an agent as written. A decision about an attempt is seen
+/// where that attempt's writes are; a later answer (a gate asked again
+/// after a `rerun`) takes over from an earlier one.
+fn decision_vars(vars: &mut Vars, t: &Ticket, p: &Pipeline, lane: Option<&str>) {
+    let seen = |d: &Decision| {
+        d.attempt.as_ref().is_none_or(|(stage, n)| {
+            t.attempts
+                .iter()
+                .find(|a| &a.stage == stage && a.n == *n)
+                .is_none_or(|a| visible(p, lane, a))
+        })
+    };
+    let names: BTreeSet<&str> = p
+        .gate_decisions()
+        .into_iter()
+        .chain(DECISIONS.iter().copied())
+        .collect();
+    for name in names {
+        let latest = t
+            .decisions
+            .iter()
+            .filter(|d| d.name == name && seen(d))
+            .filter_map(|d| match &d.state {
+                DecisionState::Answered {
+                    answer,
+                    note,
+                    at_ms,
+                    ..
+                } => Some((*at_ms, answer, note)),
+                _ => None,
+            })
+            .max_by_key(|(at_ms, ..)| *at_ms);
+        let (answer, note) = latest.map_or((String::new(), String::new()), |(_, a, n)| {
+            (a.clone(), n.clone().unwrap_or_default())
+        });
+        vars.set(format!("decisions.{name}"), answer)
+            .set(format!("decisions.{name}.note"), note);
+    }
 }
 
 /// Whether a reader in `lane` (none in the root) sees what attempt `a`
@@ -12738,6 +12799,216 @@ prompt = "Write {notes}."
         );
         assert!(!q.contains("merge it there"));
         assert!(merge_question(&a, None, None).contains("; merge it there."));
+    }
+
+    /// A root gate `lead` and a per-lane gate `look`, ahead of a reader.
+    fn gates_pipeline() -> Pipeline {
+        crate::pipeline::two_lanes(
+            r#"
+[[stages]]
+name = "lead"
+gate = { kind = "human", decision = "lead" }
+
+[[stages]]
+name = "look"
+context = "each"
+gate = { kind = "human", decision = "look" }
+
+[[stages]]
+name = "plan"
+operator = "agent"
+context = "each"
+prompt = "Decided: {decisions.lead} ({decisions.lead.note}); {decisions.look.note}."
+"#,
+        )
+    }
+
+    /// A decision `name` of `stage`'s gate-only attempt `n` in `ctx`,
+    /// answered at `at_ms` (never answered for `None`).
+    fn decided(
+        t: &mut Ticket,
+        stage: &str,
+        n: u32,
+        ctx: &str,
+        name: &str,
+        answer: Option<(&str, Option<&str>, u64)>,
+    ) {
+        if !t.attempts.iter().any(|a| a.stage == stage && a.n == n) {
+            t.attempts.push(new_attempt(
+                stage,
+                n,
+                ctx,
+                AttemptKind::GateOnly,
+                AttemptState::Complete,
+                BTreeMap::new(),
+                0,
+            ));
+        }
+        let mut d = new_decision(
+            t,
+            Ask {
+                stage,
+                name,
+                kind: DecisionKind::Permission,
+                question: "Go?".into(),
+                options: &["proceed", "rerun", "park"],
+                recommendation: None,
+                attempt: Some((stage.to_owned(), n)),
+            },
+            0,
+        );
+        if let Some((answer, note, at_ms)) = answer {
+            d.state = DecisionState::Answered {
+                answer: answer.into(),
+                note: note.map(str::to_owned),
+                by: "owner".into(),
+                at_ms,
+                acted: true,
+            };
+        }
+        t.decisions.push(d);
+    }
+
+    #[test]
+    fn an_unanswered_or_unasked_decision_renders_empty() {
+        let p = gates_pipeline();
+        let mut t = crate::ticket::blank();
+        t.stage = 2;
+        decided(&mut t, "lead", 1, "root", "lead", None);
+        let vars = vars_for(&t, &p, Some("A"));
+        for key in [
+            "decisions.lead",
+            "decisions.lead.note",
+            "decisions.look",
+            "decisions.look.note",
+        ] {
+            assert_eq!(field(&vars, key).as_deref(), Some(""), "{key}");
+        }
+        // Dispatch's own decisions are set too.
+        assert_eq!(field(&vars, "decisions.lanes.note").as_deref(), Some(""));
+        let prompt = vars.render(p.stages[2].prompt.as_deref().unwrap());
+        assert_eq!(prompt, "Decided:  (); .");
+    }
+
+    #[test]
+    fn an_answer_and_its_note_render_as_typed() {
+        let p = gates_pipeline();
+        let mut t = crate::ticket::blank();
+        decided(
+            &mut t,
+            "lead",
+            1,
+            "root",
+            "lead",
+            Some(("proceed", None, 5)),
+        );
+        let vars = vars_for(&t, &p, None);
+        assert_eq!(field(&vars, "decisions.lead").as_deref(), Some("proceed"));
+        assert_eq!(field(&vars, "decisions.lead.note").as_deref(), Some(""));
+        let mut t = crate::ticket::blank();
+        let note = "Keep {inputs.notes} and {decisions.lead} literal.";
+        decided(
+            &mut t,
+            "lead",
+            1,
+            "root",
+            "lead",
+            Some(("proceed", Some(note), 5)),
+        );
+        let vars = vars_for(&t, &p, None);
+        assert_eq!(
+            vars.render("{decisions.lead.note}"),
+            note,
+            "a value is not scanned again"
+        );
+    }
+
+    #[test]
+    fn the_newest_answer_wins_and_a_cancelled_one_never_does() {
+        let p = gates_pipeline();
+        let mut t = crate::ticket::blank();
+        decided(
+            &mut t,
+            "lead",
+            1,
+            "root",
+            "lead",
+            Some(("proceed", Some("old"), 5)),
+        );
+        decided(
+            &mut t,
+            "lead",
+            2,
+            "root",
+            "lead",
+            Some(("proceed", Some("new"), 9)),
+        );
+        decided(
+            &mut t,
+            "lead",
+            3,
+            "root",
+            "lead",
+            Some(("proceed", Some("gone"), 20)),
+        );
+        t.decisions.last_mut().unwrap().state = DecisionState::Cancelled;
+        decided(&mut t, "lead", 4, "root", "lead", None);
+        let vars = vars_for(&t, &p, None);
+        assert_eq!(field(&vars, "decisions.lead.note").as_deref(), Some("new"));
+        // On a tie the later record wins.
+        decided(
+            &mut t,
+            "lead",
+            5,
+            "root",
+            "lead",
+            Some(("proceed", Some("tied"), 9)),
+        );
+        let vars = vars_for(&t, &p, None);
+        assert_eq!(field(&vars, "decisions.lead.note").as_deref(), Some("tied"));
+    }
+
+    #[test]
+    fn a_lane_reads_its_own_lanes_answer_and_every_lane_the_roots() {
+        let p = gates_pipeline();
+        let mut t = crate::ticket::blank();
+        decided(
+            &mut t,
+            "lead",
+            1,
+            "root",
+            "lead",
+            Some(("proceed", Some("all"), 1)),
+        );
+        decided(
+            &mut t,
+            "look",
+            2,
+            "A",
+            "look",
+            Some(("proceed", Some("for A"), 2)),
+        );
+        decided(
+            &mut t,
+            "look",
+            3,
+            "B",
+            "look",
+            Some(("proceed", Some("for B"), 3)),
+        );
+        for (lane, look) in [(Some("A"), "for A"), (Some("B"), "for B"), (None, "")] {
+            let vars = vars_for(&t, &p, lane);
+            assert_eq!(
+                field(&vars, "decisions.lead.note").as_deref(),
+                Some("all"),
+                "{lane:?}"
+            );
+            assert_eq!(
+                field(&vars, "decisions.look.note").as_deref(),
+                Some(look),
+                "{lane:?}"
+            );
+        }
     }
 
     #[test]

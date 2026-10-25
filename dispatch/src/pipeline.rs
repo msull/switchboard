@@ -493,6 +493,11 @@ pub enum Gate {
         decision: String,
         #[serde(default)]
         confirm: bool,
+        /// The question asked in place of the default one (the branch,
+        /// its diff, the tree and the notes), rendered as a prompt when
+        /// the gate asks.
+        #[serde(default)]
+        question: Option<String>,
     },
 }
 
@@ -1937,6 +1942,7 @@ impl Pipeline {
             self.validate_stage(stage, &written)?;
             self.validate_inputs(stage, &self.stages[..i])?;
             self.validate_evidence_inputs(stage, &self.stages[..i])?;
+            self.validate_decision_vars(stage)?;
             if let Some(subject) = &stage.subject
                 && secrets.contains(&subject.as_str())
             {
@@ -2049,6 +2055,24 @@ impl Pipeline {
         Ok(())
     }
 
+    /// Every `{decisions.X}` a template names is a decision some gate of
+    /// this file or Dispatch itself asks. An unanswered one renders
+    /// empty, so a misspelt name would otherwise vanish unseen.
+    fn validate_decision_vars(&self, stage: &Stage) -> Result<()> {
+        let asked = self.gate_decisions();
+        for name in crate::template::decision_names(&self.templates_of(stage)) {
+            if !asked.contains(&name.as_str())
+                && !crate::scheduler::DECISIONS.contains(&name.as_str())
+            {
+                bail!(
+                    "stage {:?} names {{decisions.{name}}}, but no gate of this file and nothing in Dispatch asks a decision {name:?}",
+                    stage.name
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// No template names another stage's evidence directory as an
     /// input: only its own writer is told where it is.
     fn validate_evidence_inputs(&self, stage: &Stage, before: &[Stage]) -> Result<()> {
@@ -2115,8 +2139,13 @@ impl Pipeline {
                     &r.handoff,
                 ]
             });
+        let question = match &stage.gate {
+            Some(Gate::Human { question, .. }) => question.as_deref(),
+            _ => None,
+        };
         guidance
             .chain(stage.prompt.as_deref())
+            .chain(question)
             .chain(stage.review_prompt.as_deref())
             .chain(stage.fix_prompt.as_deref())
             .chain(workflow)
@@ -3695,6 +3724,70 @@ without_lane = "base"
         // `investigate` writes notes once, in the root, so the bare form
         // has a file to take.
         with(&joined("Read {inputs.notes}.")).unwrap();
+    }
+
+    /// A human gate with no question of its own.
+    const PLAIN_GATE: &str =
+        "[[stages]]\nname = \"again\"\ngate = { kind = \"human\", decision = \"again\" }\n";
+
+    /// A root human gate `ask` deciding `decision`, with `question`.
+    fn asking(decision: &str, question: &str) -> String {
+        format!(
+            "[[stages]]\nname = \"ask\"\ngate = {{ kind = \"human\", decision = \"{decision}\", question = \"{question}\" }}\n"
+        )
+    }
+
+    #[test]
+    fn a_human_gate_takes_its_own_question_or_none() {
+        let p = with(&asking("lead", "Read {inputs.notes}.")).unwrap();
+        let ask = p.stages.last().unwrap();
+        assert!(matches!(
+            &ask.gate,
+            Some(Gate::Human { decision, confirm: false, question: Some(q) })
+                if decision == "lead" && q == "Read {inputs.notes}."
+        ));
+        let p = with(PLAIN_GATE).unwrap();
+        assert!(matches!(
+            &p.stages.last().unwrap().gate,
+            Some(Gate::Human { question: None, .. })
+        ));
+    }
+
+    #[test]
+    fn a_template_naming_a_decision_nothing_asks_is_refused() {
+        refused(
+            &joined("Do {decisions.nope.note}."),
+            &[
+                "stage \"test\" names {decisions.nope}",
+                "asks a decision \"nope\"",
+            ],
+        );
+        // A gate of this file asks it, wherever the gate stands.
+        with(&format!(
+            "{}\n{}",
+            joined("Do {decisions.lead} {decisions.lead.note}."),
+            asking("lead", "Go?")
+        ))
+        .unwrap();
+        // Dispatch asks `lanes` and `finalize` itself.
+        with(&joined("Do {decisions.lanes.note} {decisions.finalize}.")).unwrap();
+        // A gate's own question is a template too.
+        refused(
+            &asking("lead", "After {decisions.nope}?"),
+            &["stage \"ask\" names {decisions.nope}"],
+        );
+    }
+
+    #[test]
+    fn a_root_gate_s_question_naming_a_per_lane_file_is_refused() {
+        refused(
+            &asking("lead", "Read {inputs.implement.notes}."),
+            &[
+                "stage \"ask\" (root) names {inputs.implement.notes}",
+                "implement writes notes once per lane",
+            ],
+        );
+        with(&asking("lead", "Read {inputs.investigate.notes}.")).unwrap();
     }
 
     #[test]
