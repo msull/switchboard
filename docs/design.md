@@ -3695,8 +3695,9 @@ Built so far:
 
 The version in `Cargo.toml` is the one source, by semantic versioning,
 and reaches the binary, the bundle's `Info.plist` and the host's
-`/info` reply; `CHANGELOG.md` lists every user-visible change under
-Unreleased until `scripts/bump.sh` dates it under the next version, and
+`/info` reply; each user-visible change is a fragment under
+`changelog.d/` until `scripts/bump.sh` folds the fragments into
+`CHANGELOG.md` under the next version, dated, and
 `scripts/release.sh` publishes that version as a GitHub release tagged
 `v<version>` with the signed bundle, its SHA-256 and the changelog
 section as notes. The app updates itself from there: `core::updates`

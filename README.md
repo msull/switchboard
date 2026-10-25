@@ -167,7 +167,7 @@ as you type; Save is the only time Switchboard writes into
 
 ```sh
 ./scripts/bundle.sh          # installs ~/Applications/Switchboard.app
-./scripts/bump.sh minor      # the next version into Cargo.toml, Cargo.lock and CHANGELOG.md
+./scripts/bump.sh minor      # the next version into Cargo.toml, Cargo.lock and CHANGELOG.md, folding changelog.d/
 ./scripts/release.sh         # publishes the committed version as a GitHub release (--dry-run: build and zip only)
 ./scripts/icon.sh            # regenerates the icons from assets/Switchboard.svg and assets/vision/*.svg
 ```
@@ -198,13 +198,15 @@ bottom of the Settings menu), the bundle's `Info.plist` and the host's
 three steps:
 
 ```sh
-./scripts/bump.sh minor          # or patch, major, or X.Y.Z: Cargo.toml, Cargo.lock, CHANGELOG.md
+./scripts/bump.sh minor          # or patch, major, or X.Y.Z: Cargo.toml, Cargo.lock, changelog.d/ into CHANGELOG.md
 git commit -am "Release 0.3.0"   # after a look at the diff
 ./scripts/release.sh             # builds, signs, zips, tags v0.3.0, publishes with the changelog section
 ```
 
-Every user-visible change adds a line under Unreleased in
-`CHANGELOG.md` as it lands, so the bump has something to move.
+Every user-visible change adds a fragment, `changelog.d/<branch>.md`,
+as it lands (format in `changelog.d/README.md`), so concurrent branches
+never edit the same lines of `CHANGELOG.md`; the bump folds the
+fragments into the new version's section and removes them.
 `scripts/release.sh` builds the bundle through `bundle.sh` into a
 staging directory, zips it with `ditto` (a plain `zip` would lose the
 signature), writes the zip's SHA-256 as a file of its own, tags the
@@ -442,12 +444,15 @@ tests/remote.rs          the remote port over a real TLS listener with fakes (th
 tests/fixtures/          a small real Claude Code transcript for the parser tests
 tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
+tests/changelog_fold.rs  scripts/fold-changelog.sh on a scratch changelog: the old insertion with no fragments, the groups' order, Unreleased lines kept, fragments removed, a bad line changing nothing
 scripts/test-times.sh    every test's time, serially, through libtest's `--report-time`; the slowest ten, each binary's total, the 5 s budget
 scripts/ci-test.sh       CI's test step: the workspace, then one retry of the failed tests, warning `flaky:` for each that passes on it
-scripts/bump.sh          the next version into Cargo.toml and Cargo.lock, and the changelog's Unreleased section dated under it
+scripts/bump.sh          the next version into Cargo.toml and Cargo.lock, and the changelog fragments and Unreleased section dated under it
+scripts/fold-changelog.sh  the fold bump.sh runs: `changelog.d/` fragments grouped Added, Changed, Fixed into a new version section of CHANGELOG.md, then removed; every line checked before anything is written
 pipelines/Switchboard.toml  this project's own Dispatch pipeline, the plan trial's result: haiku investigates, a sonnet facts stage settles the open questions with web search or a spike, a sonnet plan with a two-round review, then implement, code review and the pull request; a supervisor block for a Mac that runs the released app. Installed by copying it to `pipelines/Switchboard.toml` in Dispatch's data directory (a ticket runs the copy it froze at take); parsed and validated by a test in dispatch/src/pipeline.rs
 scripts/release.sh       the signed bundle and its SHA-256 attached to a GitHub release tagged `v<version>`, with the changelog section as notes; what the app updates itself from
-CHANGELOG.md             every user-visible change, under Unreleased until a bump
+CHANGELOG.md             every released user-visible change by version; written only by a bump
+changelog.d/             one fragment per branch, `<branch>.md`, of `Added:`, `Changed:` or `Fixed:` lines, folded into CHANGELOG.md by a bump (`README.md` there has the format)
 client/                  the Swift client (docs/remote-client.md §7): `SwitchboardProtocol` (the wire views as Codable, qualified refs, the envelope, the event frame and resource keys), `SwitchboardTransport` (HTTPS and the events WebSocket with the SPKI-pinning delegate, Bonjour browsing), `SwitchboardClientCore` (known servers, credentials, one connection actor per host that subscribes before it snapshots and reconciles events by revision, holds reference-counted screen watches that are resent after a reconnect, the unified store), `SwitchboardUI` (SwiftUI browser and server views), the `switchboard-remote` command-line browser, tests, `Fixtures/` shared with `tests/remote.rs`, and the apps: `project.yml` (xcodegen writes the git-ignored Xcode project from it), `Apps/SwitchboardVision/` (the visionOS entry, thin over `SwitchboardUI`: the main window with list, grid and focus layouts and the filters, the card window group, the prompt window and the keys panel placed as the virtual keyboard is), `scripts/sim.sh` (build, run and screenshot on the simulator), `scripts/device.sh` (build, install and launch on a paired headset)
 control/                 switchboard-control: the control port's wire contract (requests, replies, views, a session's transcript path among them; `session.resume` resumes an agent without a terminal and never launches fresh; `session.prompt` types a prompt only into a Claude Code agent between turns, else fails naming why) and a blocking client; std + serde only
 dispatch-control/        dispatch-control: the wire contract of Dispatch's own port (tickets as views, a ticket's events after a cursor, decide, queue, take, resume, close, worktrees, a project's supervisor and `supervisor-fresh`, a ticket's `usage`: tokens by model and each session's time), how a bring-up reads, and a blocking client; std + serde only

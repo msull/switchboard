@@ -34,11 +34,13 @@ cargo run --locked                                   # launch the app
 ./scripts/bundle.sh                                  # ~/Applications/Switchboard.app
 ```
 
-A user-visible change adds a line under Unreleased in `CHANGELOG.md` in
-the same commit. A release is `./scripts/bump.sh patch|minor|major`, a
-commit "Release X.Y.Z", then `./scripts/release.sh`; the version in
-`Cargo.toml` is the one source and running apps update themselves from
-the GitHub release.
+A user-visible change adds `changelog.d/<branch>.md` in the same commit,
+one `Added:`, `Changed:` or `Fixed:` line (format in
+`changelog.d/README.md`); never edit `CHANGELOG.md` by hand.
+`./scripts/bump.sh` folds the fragments. A release is
+`./scripts/bump.sh patch|minor|major`, a commit "Release X.Y.Z", then
+`./scripts/release.sh`; the version in `Cargo.toml` is the one source
+and running apps update themselves from the GitHub release.
 
 The pre-commit hook runs the first four. Enable it with
 `git config core.hooksPath .githooks` on a fresh clone. Never commit with
