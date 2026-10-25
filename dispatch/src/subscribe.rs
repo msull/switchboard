@@ -20,7 +20,7 @@ use crate::UsageError;
 use crate::events::{self, Event, Kind};
 use crate::scheduler::Runner;
 use crate::store::read_ticket;
-use crate::ticket::{Delivery, ProjectState, Subscription, Supervision, TicketState};
+use crate::ticket::{Delivery, ProjectState, Subscription, Supervision, Ticket, TicketState};
 
 /// A delivery stops taking tickets once it holds this many lines; the
 /// rest goes in on a later pass.
@@ -37,6 +37,9 @@ pub const DELIVERY_HEADER: &str = "Dispatch subscription";
 /// `delivery_waits` for an app that answered `session.prompt` as a bad
 /// request: it never parsed it, so nothing was typed.
 pub const UPDATE_THE_APP: &str = "Switchboard does not know session.prompt; update the app";
+
+/// The `by` of a subscription the runner makes itself.
+pub const BY_RUNNER: &str = "runner";
 
 /// Whether a line of kind `kind` is one a subscription delivers: what
 /// `wait --for move` returns, and the park or close that ends it.
@@ -125,6 +128,86 @@ impl Runner {
             };
             r.save_project(&ps)?;
             Ok(sub)
+        })
+    }
+
+    /// Follow `t` for the project's supervisor if nothing follows it yet;
+    /// whether a subscription was added. The cursor is the log's tail,
+    /// or one before the oldest `decision` line still waiting on the
+    /// user, so a gate opened before the ticket was followed is
+    /// delivered once. The caller holds the transaction and saves `ps`.
+    pub(crate) fn follow_locked(
+        &self,
+        t: &Ticket,
+        ps: &mut ProjectState,
+        now_ms: u64,
+    ) -> Result<bool> {
+        if ps.supervisor.subscriptions.iter().any(|s| s.ticket == t.id) {
+            return Ok(false);
+        }
+        let log = events::log_path(&self.data);
+        let waiting: Vec<&str> = t.waiting_on_you().iter().map(|d| d.id.as_str()).collect();
+        let gate = if waiting.is_empty() {
+            None
+        } else {
+            let all = events::read_since(&log, 0)?;
+            let gone = events::withdrawn(&all);
+            all.iter()
+                .filter(|e| {
+                    e.ticket == t.id
+                        && e.kind == Kind::Decision
+                        && !gone.contains(&e.seq)
+                        && e.decision.as_deref().is_some_and(|d| waiting.contains(&d))
+                })
+                .map(|e| e.seq)
+                .min()
+        };
+        let since = match gate {
+            Some(seq) => seq.saturating_sub(1),
+            None => events::last_seq(&log)?,
+        };
+        ps.supervisor.subscriptions.push(Subscription {
+            ticket: t.id.clone(),
+            what: "move".to_owned(),
+            since,
+            by: BY_RUNNER.to_owned(),
+            at_ms: now_ms,
+            park_seen: false,
+        });
+        Ok(true)
+    }
+
+    /// Follow every active ticket of `project` that nothing follows yet.
+    /// A parked, closing or closed ticket is left for a later pass: one
+    /// subscribed while parked would mark its standing park seen. A
+    /// project whose tickets are all followed costs one read.
+    pub fn subscribe_active(&mut self, project: &str, now_ms: u64) -> Result<()> {
+        self.transaction(|r| {
+            let mut ps = r.load_project(project)?;
+            let unfollowed: Vec<String> = ps
+                .queue
+                .iter()
+                .filter(|id| !ps.supervisor.subscriptions.iter().any(|s| &s.ticket == *id))
+                .cloned()
+                .collect();
+            let mut added = false;
+            for id in unfollowed {
+                let t = match read_ticket(&r.data.ticket_file(&id)) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        log::warn!("{project}: following {id}: {e:#}");
+                        continue;
+                    }
+                };
+                if t.state == TicketState::Active && r.follow_locked(&t, &mut ps, now_ms)? {
+                    log::info!("{project}: the supervisor follows {id}");
+                    added = true;
+                }
+            }
+            if added {
+                r.save_project(&ps)?;
+            }
+            Ok(())
         })
     }
 

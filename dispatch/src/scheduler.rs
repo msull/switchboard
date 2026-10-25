@@ -658,6 +658,9 @@ impl Runner {
         self.save_ticket(&mut ticket, now_ms)?;
         let mut ps = self.load_project(project)?;
         ps.queue.push(id);
+        // The supervisor follows it from here, seated or not: the cursor
+        // holds the backlog for the next one.
+        self.follow_locked(&ticket, &mut ps, now_ms)?;
         self.save_project(&ps)?;
         Ok(ticket)
     }
@@ -8135,6 +8138,9 @@ impl Runner {
         for project in self.projects()? {
             if let Err(e) = self.supervisor_intent(&project, now_ms) {
                 log::error!("project {project}: supervisor: {e:#}");
+            }
+            if let Err(e) = self.subscribe_active(&project, now_ms) {
+                log::error!("project {project}: following tickets: {e:#}");
             }
             if let Err(e) = self.deliver_subscriptions(&project, now_ms) {
                 log::error!("project {project}: subscriptions: {e:#}");
