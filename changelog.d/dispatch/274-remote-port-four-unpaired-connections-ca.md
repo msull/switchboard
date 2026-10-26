@@ -1,1 +1,0 @@
-Fixed: The remote port no longer lets one stranger on the network hold every unauthenticated connection slot: each address gets three, a slow handshake, request or body is closed at its deadline, and a connection closes after any reply to someone not yet paired, so a paired device is no longer shut out.

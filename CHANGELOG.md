@@ -10,6 +10,15 @@ publishes that section as the release notes. The format follows
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-10-26
+
+### Fixed
+
+- A paired device no longer sees secret values in a ticket's check logs, evidence text, body or events, which are masked like a session's screen, and images from an attempt that ran with environment grants are withheld.
+- The remote port no longer reads a request line or header without limit, so a stranger on the network cannot grow the app's memory; a paired device's WebSocket frame is capped at 16 KiB.
+- The remote port no longer lets one stranger on the network hold every unauthenticated connection slot: each address gets three, a slow handshake, request or body is closed at its deadline, and a connection closes after any reply to someone not yet paired, so a paired device is no longer shut out.
+- One device on the local network can no longer close your pairing window or use up the pairing limit for the others: wrong codes are counted per address, an address that sends three is locked out while the window stays open, and Remote devices shows who is locked out.
+
 ## [0.7.2] - 2026-10-25
 
 ### Changed

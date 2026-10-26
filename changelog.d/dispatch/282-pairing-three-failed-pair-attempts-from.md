@@ -1,1 +1,0 @@
-Fixed: One device on the local network can no longer close your pairing window or use up the pairing limit for the others: wrong codes are counted per address, an address that sends three is locked out while the window stays open, and Remote devices shows who is locked out.
