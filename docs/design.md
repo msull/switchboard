@@ -3737,6 +3737,21 @@ Built so far:
   in flight is cleared when it succeeds (the run prints `midflight
   text:`, with `socket:` and `polls in 9 s:`, as measurements rather
   than checks); what the box should do with it is the owner's call.
+- **A bounded request head (2026-10-25).** The request line and each
+  header are read through `read_head_line`, which takes at most what
+  is left of the 8 KiB head budget plus one byte, so a stranger who
+  never sends a newline is refused at the bound (one `BufReader` fill
+  past it at most) instead of growing a `String` until the read
+  timeout; a head of exactly 8 KiB still parses. A subscriber's
+  inbound WebSocket frame and message are capped at 16 KiB, past which
+  the subscription ends; what the port sends is not capped. Unit tests
+  count the bytes a refused head pulls from its reader, and
+  `tests/remote.rs` checks a stranger streaming 64 KiB with no newline
+  is closed within 2 s with no reply and a 20 KiB frame ends a paired
+  device's subscription. Known gaps: the 5 s deadline is per read, not
+  over the whole head and body, so a sender dripping a byte every few
+  seconds still holds an unauthenticated slot (#274); a paired headset
+  or iPad has not been checked against the frame cap.
 
 ## Versioning and updates (2026-10-15)
 

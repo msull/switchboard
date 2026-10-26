@@ -3382,6 +3382,76 @@ fn stalled_strangers_fill_their_own_pool_and_never_a_paired_clients() {
     assert_eq!(status, 200, "the slots are free again");
 }
 
+/// A pinned TLS connection that has said nothing yet, for a test that
+/// writes raw bytes.
+fn stranger_tls(
+    addr: SocketAddr,
+    config: &Arc<ClientConfig>,
+) -> StreamOwned<ClientConnection, TcpStream> {
+    let tcp = TcpStream::connect(addr).expect("connect");
+    let conn = ClientConnection::new(
+        Arc::clone(config),
+        ServerName::try_from("localhost").unwrap(),
+    )
+    .expect("client");
+    let mut s = StreamOwned::new(conn, tcp);
+    while s.conn.is_handshaking() {
+        s.conn.complete_io(&mut s.sock).expect("handshake");
+    }
+    s
+}
+
+/// A head that never ends its line is refused once it passes the head
+/// bound, well before the read timeout, and gets no reply.
+#[test]
+fn a_stranger_streaming_a_head_with_no_newline_is_closed_early_with_no_reply() {
+    let port = port();
+    let mut s = stranger_tls(port.addr, &port.client);
+    let started = std::time::Instant::now();
+    let chunk = [b'a'; 4 * 1024];
+    for _ in 0..16 {
+        // The port may close while this is still writing.
+        if s.write_all(&chunk).and_then(|()| s.flush()).is_err() {
+            break;
+        }
+    }
+    s.sock
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut buf = [0u8; 64];
+    let read = s.read(&mut buf);
+    let elapsed = started.elapsed();
+    match read {
+        Ok(n) => assert_eq!(n, 0, "no reply: {:?}", &buf[..n]),
+        Err(e) => assert!(
+            !matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            "the port was still reading: {e}"
+        ),
+    }
+    assert!(elapsed < Duration::from_secs(2), "closed after {elapsed:?}");
+}
+
+/// A paired device's frame past the inbound cap ends its subscription.
+#[test]
+fn a_paired_device_sending_an_oversize_frame_is_disconnected() {
+    let mut port = port();
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let sub = subscribe(&mut port, &token);
+    assert_eq!(port.app.subscriber_count(), 1);
+    sub.outbox
+        .send(Out::Text("a".repeat(20 * 1024)))
+        .expect("socket thread");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while port.app.subscriber_count() > 0 && std::time::Instant::now() < deadline {
+        port.app.serve_pending();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(port.app.subscriber_count(), 0, "the subscription ended");
+}
+
 // --- conversations and runs
 
 /// A Claude Code session's conversation pages by turn with `next` for
