@@ -1,1 +1,0 @@
-Added: Settings has a "Check for updates automatically" switch (on by default) that turns off the check at launch and the hourly one, and a "What's new" view that shows the changelog, with the newest release found above the running version's notes marked as not installed.

@@ -10,6 +10,17 @@ publishes that section as the release notes. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-26
+
+### Added
+
+- Settings has a "Check for updates automatically" switch (on by default) that turns off the check at launch and the hourly one, and a "What's new" view that shows the changelog, with the newest release found above the running version's notes marked as not installed.
+
+### Fixed
+
+- A ticket's file reaches a device up to 256 KiB and its body up to 64 KiB instead of being cut at 4 KiB; a ticket file over 768 KiB is refused before it is read (evidence files, previously 1 MiB, now share that bound).
+- An evidence image up to 700 KiB reaches a device whole instead of being cut at 3 KiB; an image that grew past the limit while being read is refused as too large.
+
 ## [0.7.3] - 2026-10-26
 
 ### Fixed
