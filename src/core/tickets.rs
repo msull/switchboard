@@ -120,6 +120,11 @@ pub struct TicketAttempt {
     pub checks: Option<TicketChecks>,
     pub rounds: Vec<TicketRound>,
     pub files: Vec<TicketFile>,
+    /// Whether the attempt ran with environment grants: its checks under
+    /// `switchboard-env exec`, or an agent session that holds sets now.
+    /// No mask reads pixels, so a device labels such an attempt's images
+    /// rather than losing them.
+    pub env: bool,
     /// When the evidence directory was removed, in ms.
     pub evidence_swept_ms: Option<u64>,
     pub started_ms: u64,
@@ -155,6 +160,7 @@ impl From<&AttemptView> for TicketAttempt {
                 })
                 .collect(),
             files: attempt_files(a).into_iter().map(|(f, _)| f).collect(),
+            env: false,
             evidence_swept_ms: a.evidence_swept_ms,
             started_ms: a.started_ms,
             ended_ms: a.ended_ms,
@@ -435,7 +441,14 @@ impl AppCore {
         Some(TicketDetail {
             summary: self.ticket_summary(t),
             body: t.body.clone(),
-            attempts: t.attempts.iter().map(TicketAttempt::from).collect(),
+            attempts: t
+                .attempts
+                .iter()
+                .map(|a| TicketAttempt {
+                    env: self.ran_with_env(a),
+                    ..TicketAttempt::from(a)
+                })
+                .collect(),
             lanes: t.lanes.iter().map(TicketLane::from).collect(),
             holds: t.holds.clone(),
         })
@@ -455,22 +468,25 @@ impl AppCore {
     /// Whether attempt `n` of `stage` on ticket `id` ran with
     /// environment grants: its checks under `switchboard-env exec`, or
     /// an agent session that holds sets now. Its files may then hold a
-    /// granted value in a form no text mask reaches (an image). An
-    /// attempt recorded before the checks said so reads as without.
+    /// granted value in a form no text mask reaches (an image), which
+    /// the attempt says to a device as `env`. An attempt recorded before
+    /// the checks said so reads as without.
     #[must_use]
     pub fn attempt_ran_with_env(&self, id: &str, stage: &str, n: u32) -> bool {
         self.ticket(id).is_some_and(|t| {
-            t.attempts.iter().any(|a| {
-                a.stage == stage
-                    && a.n == n
-                    && (a.checks.as_ref().is_some_and(|c| c.env)
-                        || a.session
-                            .as_deref()
-                            .and_then(|s| uuid::Uuid::parse_str(s).ok())
-                            .and_then(|s| self.session(RecordId(s)))
-                            .is_some_and(|r| !r.env_sets.is_empty()))
-            })
+            t.attempts
+                .iter()
+                .any(|a| a.stage == stage && a.n == n && self.ran_with_env(a))
         })
+    }
+
+    fn ran_with_env(&self, a: &AttemptView) -> bool {
+        a.checks.as_ref().is_some_and(|c| c.env)
+            || a.session
+                .as_deref()
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .and_then(|s| self.session(RecordId(s)))
+                .is_some_and(|r| !r.env_sets.is_empty())
     }
 
     /// A ticket's events as read so far; none before the first read.

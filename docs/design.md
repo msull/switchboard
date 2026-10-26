@@ -3830,14 +3830,18 @@ Built so far:
   variable's, which tightens the screen read as well. A gate that ran
   under `switchboard-env exec` is marked (`GateRun.env`, sent as
   `ChecksView.env`; a runner without it, and an attempt recorded
-  before it, read as `false`, so such an old attempt's images are
-  served), and an image of such an attempt, or of one whose session
-  holds sets now, is refused `withheld` (403), since no mask reads
-  pixels. The checks log, which the runner lists among the
+  before it, read as `false`), and an attempt that ran so, or whose
+  session holds sets now, says so to a device as `TicketAttempt.env`,
+  which labels its images, since no mask reads pixels. The images
+  are served: 0.7.3 withheld them, which kept every tester screenshot
+  off the headset, since a try stage runs with a set, and the owner
+  accepts that a grant may show in a tool result or a picture of the
+  app alike. The checks log, which the runner lists among the
   artifacts too, is listed once, as `checks` or the artifact's name.
   `tests/remote.rs` checks the body, the checks log, an evidence text
   and the events with a set value named, a grant taken back, a failing
-  store, a file over the cap, and a withheld image. Known gaps: the
+  store, a file over the cap, and an env attempt's image served with
+  the attempt marked. Known gaps: the
   Mac's own ticket page and the files on disk are not masked; a value
   in an encoded or `set -x`-quoted form can pass; a gate still resolves
   the runner's grants and ignores the stage's `env` names; and whether a

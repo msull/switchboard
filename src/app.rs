@@ -2645,18 +2645,9 @@ impl SwitchboardApp {
             return Served::Now(self.refuse(request, 404, "not_found", "no such file", true));
         };
         if file.image {
-            // A picture may show a granted value, and no mask reads
-            // pixels: an attempt whose checks ran with grants keeps
-            // its images on the host.
-            if self.core.attempt_ran_with_env(ticket, &file.stage, file.n) {
-                return Served::Now(self.refuse(
-                    request,
-                    403,
-                    "withheld",
-                    "this attempt ran with environment grants; open the image on the host",
-                    true,
-                ));
-            }
+            // No mask reads pixels; the attempt's `env` tells the
+            // device it ran with grants, and the owner accepted that
+            // when granting the set, as with a tool result.
             return Served::Now(self.remote_ticket_image(request, &file, &path));
         }
         if !file.inline {
