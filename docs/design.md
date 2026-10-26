@@ -3748,10 +3748,39 @@ Built so far:
   count the bytes a refused head pulls from its reader, and
   `tests/remote.rs` checks a stranger streaming 64 KiB with no newline
   is closed within 2 s with no reply and a 20 KiB frame ends a paired
-  device's subscription. Known gaps: the 5 s deadline is per read, not
-  over the whole head and body, so a sender dripping a byte every few
-  seconds still holds an unauthenticated slot (#274); a paired headset
-  or iPad has not been checked against the frame cap.
+  device's subscription. Known gaps: a paired headset or iPad has not
+  been checked against the frame cap.
+- **The unauthenticated pool per source (2026-10-25).** One address
+  holds at most 3 of the 4 unauthenticated slots
+  (`MAX_UNAUTHENTICATED_PER_SOURCE`), counted by `Admission` on the
+  peer's canonical address (an IPv4-mapped address is its IPv4 form);
+  past its share or past the total a stranger is closed at accept with
+  a debug log line. The slot is a drop guard (`Slot`) moved into the
+  connection's thread, so it is given back when the connection ends,
+  when the thread panics, and when the spawn fails. Before a
+  connection is paired it runs on absolute deadlines, checked on every
+  socket read beneath rustls (`Timed`): the handshake within 5 s of the
+  accept, the head within 5 s of the handshake, the body within 10 s
+  of the head; on promotion the deadline is dropped and the 30 s idle
+  timeout set. Every reply on a connection that is not yet paired says
+  `Connection: close` and the host closes after it, `/info` and
+  `/pair` included, so a stranger holds a slot for one request at
+  most; a paired device's own 401 or 429 keeps its connection. Unit
+  tests drive `Admission` with made-up addresses (one source refused
+  past its share, another admitted up to the total) and the guard
+  through a drop, a promotion and a panic, and run a listener with
+  300 ms deadlines against a handshake, a head and a body trickled a
+  byte every 100 ms below TLS, each closed in time and its slot freed;
+  `tests/remote.rs` checks the share from one address, a paired call
+  beside two stalled strangers, and the close after `/info`, a 403, a
+  401 and a 429 while a paired connection answers twice. Known gaps:
+  strangers on several addresses can still fill the 4 (3 from one, 1
+  from another), and whether a paired LAN device is shut out that way
+  in practice is unchecked; a stranger's frames still queue to the
+  frame before `authenticate`; there is no cool-off for a refused
+  address (#282); a paired connection's head and body have no
+  deadline; how many connections Safari and Chrome open per page load
+  is unmeasured, so the share of 3 is unconfirmed on a device.
 
 ## Versioning and updates (2026-10-15)
 

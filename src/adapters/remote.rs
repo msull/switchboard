@@ -9,14 +9,14 @@
 //! `app.rs`; this file only moves bytes and enforces the bounds that
 //! need no state: pools, deadlines and rate limits.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -502,11 +502,23 @@ fn read_head_line<R: BufRead>(reader: &mut R, used: usize) -> io::Result<Option<
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-/// The head of one HTTP/1.1 request: method, target, lowercased
-/// headers, body. `None` at a clean end of stream before any byte; an
-/// oversized or malformed request is an error that closes the
-/// connection.
+/// One HTTP/1.1 request: its head, then its body. `None` at a clean
+/// end of stream before any byte; an oversized or malformed request is
+/// an error that closes the connection.
+#[cfg(test)]
 fn read_request<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<RemoteRequest>> {
+    let Some((mut request, length)) = read_head(reader)? else {
+        return Ok(None);
+    };
+    request.body = read_body(reader, length)?;
+    Ok(Some(request))
+}
+
+/// The head of one HTTP/1.1 request: method, target, lowercased
+/// headers, and the body's declared length, which `read_body` reads.
+/// The two are apart so a connection can give the body a deadline of
+/// its own once the head is in.
+fn read_head<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<(RemoteRequest, usize)>> {
     let Some(line) = read_head_line(reader, 0)? else {
         return Ok(None);
     };
@@ -564,19 +576,25 @@ fn read_request<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<RemoteR
             (n.to_owned(), v.to_owned())
         })
         .collect();
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body)?;
-    Ok(Some(RemoteRequest {
+    let request = RemoteRequest {
         method: method.to_owned(),
         path: path.to_owned(),
         query,
-        body,
+        body: Vec::new(),
         bearer,
         upgrade,
         cookie,
         origin,
         host,
-    }))
+    };
+    Ok(Some((request, length)))
+}
+
+/// The `length` bytes of body that follow a head.
+fn read_body<R: Read>(reader: &mut BufReader<R>, length: usize) -> io::Result<Vec<u8>> {
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    Ok(body)
 }
 
 /// The 101 that switches a connection to WebSocket. The request was
@@ -591,12 +609,14 @@ fn respond_upgrade<W: Write>(w: &mut W, key: &str) -> io::Result<()> {
     w.flush()
 }
 
-/// Write one JSON response.
+/// Write one JSON response, announcing whether the connection stays
+/// open after it.
 fn respond<W: Write>(
     w: &mut W,
     status: u16,
     body: &[u8],
     headers: &[(&'static str, String)],
+    keep_alive: bool,
 ) -> io::Result<()> {
     // No client reads `Cache-Control` or `nosniff`; they are there so a
     // browser neither keeps a reply nor reads it as anything but JSON.
@@ -604,8 +624,31 @@ fn respond<W: Write>(
     for (name, value) in headers {
         let _ = write!(lines, "{name}: {value}\r\n");
     }
-    lines.push_str("Connection: keep-alive\r\n");
+    lines.push_str(if keep_alive {
+        "Connection: keep-alive\r\n"
+    } else {
+        "Connection: close\r\n"
+    });
     write_reply(w, status, "application/json", body, &lines)
+}
+
+/// Write one JSON response and, on a connection that is not paired,
+/// end the TLS session after it: a stranger gets one answer per
+/// connection and so never holds a slot between requests. `true` when
+/// the connection stays open for another request.
+fn answer(
+    stream: &mut Tls,
+    paired: bool,
+    status: u16,
+    body: &[u8],
+    headers: &[(&'static str, String)],
+) -> io::Result<bool> {
+    respond(stream, status, body, headers, paired)?;
+    if !paired {
+        stream.conn.send_close_notify();
+        stream.flush()?;
+    }
+    Ok(paired)
 }
 
 /// Write one of the page's files with the headers that hold it to
@@ -674,8 +717,21 @@ fn rate_limited() -> Vec<u8> {
 /// paired device's.
 pub const MAX_UNAUTHENTICATED: usize = 4;
 pub const MAX_PAIRED: usize = 12;
-/// The TLS handshake and the first request line within this.
+/// How many of the unauthenticated slots one address may hold, so one
+/// stranger cannot take all four. A page load opens up to three
+/// connections in parallel from one address (spike 23); how many a
+/// browser opens is unmeasured, and the owner may lower this once one
+/// is measured.
+pub const MAX_UNAUTHENTICATED_PER_SOURCE: usize = 3;
+/// How long an unpaired connection has to finish the TLS handshake,
+/// counted from the accept.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long an unpaired connection has to deliver the request head,
+/// counted from the end of the handshake.
+const HEAD_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long an unpaired connection has to deliver the request body,
+/// counted from the end of the head.
+const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 /// A paired device polling on a kept connection may sit idle this long
 /// between requests.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -696,11 +752,206 @@ const PAGE_PER_MINUTE: usize = 120;
 const PAIR_PATH: &str = "/api/v1/pair";
 const INFO_PATH: &str = "/api/v1/info";
 
-#[derive(Default)]
+/// The deadlines of a connection that is not paired; the tests use
+/// short ones.
+#[derive(Clone, Copy)]
+struct Timeouts {
+    handshake: Duration,
+    head: Duration,
+    body: Duration,
+}
+
+impl Timeouts {
+    const DEFAULT: Self = Self {
+        handshake: HANDSHAKE_TIMEOUT,
+        head: HEAD_TIMEOUT,
+        body: BODY_TIMEOUT,
+    };
+}
+
+/// Why a connection was closed at accept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// The unauthenticated pool is full.
+    Total,
+    /// Its address holds its share of the pool already.
+    Source,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Total => "total",
+            Self::Source => "source",
+        })
+    }
+}
+
+/// The unauthenticated pool's count, in all and per peer address. It
+/// takes addresses and holds no clock, so it is tested with made-up
+/// ones. A source is one address, not a prefix.
+struct Admission {
+    total: usize,
+    by_source: HashMap<IpAddr, usize>,
+    max_total: usize,
+    max_per_source: usize,
+}
+
+impl Admission {
+    fn new(max_total: usize, max_per_source: usize) -> Self {
+        Self {
+            total: 0,
+            by_source: HashMap::new(),
+            max_total,
+            max_per_source,
+        }
+    }
+
+    /// Count one connection from `ip`, or say why not.
+    fn admit(&mut self, ip: IpAddr) -> Result<(), Refusal> {
+        // An IPv4-mapped IPv6 address is the same peer as its IPv4 form.
+        let ip = ip.to_canonical();
+        if self.total >= self.max_total {
+            return Err(Refusal::Total);
+        }
+        let held = self.by_source.entry(ip).or_insert(0);
+        if *held >= self.max_per_source {
+            return Err(Refusal::Source);
+        }
+        *held += 1;
+        self.total += 1;
+        Ok(())
+    }
+
+    /// Give back one connection `admit` counted for `ip`.
+    fn release(&mut self, ip: IpAddr) {
+        let ip = ip.to_canonical();
+        if let Some(held) = self.by_source.get_mut(&ip) {
+            *held -= 1;
+            if *held == 0 {
+                self.by_source.remove(&ip);
+            }
+            self.total = self.total.saturating_sub(1);
+        }
+    }
+}
+
 struct Pools {
-    unauthenticated: AtomicUsize,
+    unauthenticated: Mutex<Admission>,
     paired: AtomicUsize,
 }
+
+impl Pools {
+    fn new() -> Self {
+        Self {
+            unauthenticated: Mutex::new(Admission::new(
+                MAX_UNAUTHENTICATED,
+                MAX_UNAUTHENTICATED_PER_SOURCE,
+            )),
+            paired: AtomicUsize::new(0),
+        }
+    }
+
+    /// A poisoned lock refuses, never admits.
+    fn admit(&self, ip: IpAddr) -> Result<(), Refusal> {
+        self.unauthenticated
+            .lock()
+            .map_or(Err(Refusal::Total), |mut a| a.admit(ip))
+    }
+
+    /// A poisoned lock still releases, so no count is stranded.
+    fn release(&self, ip: IpAddr) {
+        self.unauthenticated
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .release(ip);
+    }
+}
+
+/// One connection's place in a pool, given back when it drops: when
+/// the connection ends, when its thread panics, and when the thread is
+/// never made (a failed spawn drops the closure that holds it).
+struct Slot {
+    pools: Arc<Pools>,
+    ip: IpAddr,
+    paired: bool,
+}
+
+impl Slot {
+    /// An unauthenticated slot for `ip`, if the pool admits it.
+    fn take(pools: &Arc<Pools>, ip: IpAddr) -> Result<Self, Refusal> {
+        pools.admit(ip)?;
+        Ok(Self {
+            pools: Arc::clone(pools),
+            ip,
+            paired: false,
+        })
+    }
+
+    fn is_paired(&self) -> bool {
+        self.paired
+    }
+
+    /// Move from the unauthenticated pool to the paired one.
+    fn promote(&mut self) {
+        if !self.paired {
+            self.pools.paired.fetch_add(1, Ordering::SeqCst);
+            self.pools.release(self.ip);
+            self.paired = true;
+        }
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if self.paired {
+            self.pools.paired.fetch_sub(1, Ordering::SeqCst);
+        } else {
+            self.pools.release(self.ip);
+        }
+    }
+}
+
+/// The socket under a connection's TLS, with the deadline the current
+/// phase must end by. The deadline is enforced on every socket read,
+/// beneath rustls: one read of plaintext may take many reads of the
+/// socket while a record trickles in, so a timeout set once above it
+/// would bound each byte and never the whole.
+struct Timed {
+    sock: TcpStream,
+    deadline: Option<Instant>,
+}
+
+impl Timed {
+    fn into_inner(self) -> TcpStream {
+        self.sock
+    }
+}
+
+impl Read for Timed {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(deadline) = self.deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "deadline passed"));
+            }
+            self.sock.set_read_timeout(Some(left))?;
+        }
+        self.sock.read(buf)
+    }
+}
+
+impl Write for Timed {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.sock.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.sock.flush()
+    }
+}
+
+type Tls = StreamOwned<ServerConnection, Timed>;
 
 /// Allows `max` events per `per`, counted on a sliding window.
 struct RateWindow {
@@ -760,8 +1011,9 @@ struct Shared {
     requests: SyncSender<RemoteIncoming>,
     frames: SyncSender<SubscriberFrame>,
     wake: Arc<dyn Fn() + Send + Sync>,
-    pools: Pools,
+    pools: Arc<Pools>,
     limits: Limits,
+    timeouts: Timeouts,
     next_subscriber: AtomicU64,
 }
 
@@ -785,6 +1037,15 @@ impl RemotePort {
         tls: Arc<ServerConfig>,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> io::Result<Self> {
+        Self::bind_with(addr, tls, wake, Timeouts::DEFAULT)
+    }
+
+    fn bind_with(
+        addr: SocketAddr,
+        tls: Arc<ServerConfig>,
+        wake: impl Fn() + Send + Sync + 'static,
+        timeouts: Timeouts,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
         let addr = listener.local_addr()?;
         let (tx, requests) = mpsc::sync_channel(INBOX);
@@ -795,12 +1056,13 @@ impl RemotePort {
             requests: tx,
             frames: frames_tx,
             wake: Arc::new(wake),
-            pools: Pools::default(),
+            pools: Arc::new(Pools::new()),
             limits: Limits {
                 pair: Mutex::new(RateWindow::new(PAIR_PER_MINUTE, Duration::from_secs(60))),
                 info: Mutex::new(RateWindow::new(INFO_PER_MINUTE, Duration::from_secs(60))),
                 page: Mutex::new(RateWindow::new(PAGE_PER_MINUTE, Duration::from_secs(60))),
             },
+            timeouts,
             next_subscriber: AtomicU64::new(1),
         });
         let thread = {
@@ -813,29 +1075,36 @@ impl RemotePort {
                             break;
                         }
                         let Ok(stream) = stream else { continue };
-                        // Past the pool a stranger is closed at once:
-                        // dropping the stream is the close.
-                        if shared.pools.unauthenticated.load(Ordering::SeqCst)
-                            >= MAX_UNAUTHENTICATED
-                        {
-                            drop(stream);
-                            continue;
-                        }
-                        shared.pools.unauthenticated.fetch_add(1, Ordering::SeqCst);
+                        // Past the pool, or past its address's share of
+                        // it, a stranger is closed at once: dropping the
+                        // stream is the close.
+                        let ip = match stream.peer_addr() {
+                            Ok(peer) => peer.ip(),
+                            Err(e) => {
+                                log::debug!("remote: refused a peer with no address: {e}");
+                                continue;
+                            }
+                        };
+                        let mut slot = match Slot::take(&shared.pools, ip) {
+                            Ok(slot) => slot,
+                            Err(refusal) => {
+                                log::debug!("remote: refused {ip}: {refusal}");
+                                continue;
+                            }
+                        };
                         let shared = Arc::clone(&shared);
-                        let _ = std::thread::Builder::new()
+                        // The slot moves into the closure, so a spawn
+                        // that fails drops it and frees its place.
+                        if let Err(e) = std::thread::Builder::new()
                             .name("switchboard-remote-conn".into())
                             .spawn(move || {
-                                let paired = AtomicBool::new(false);
-                                if let Err(e) = connection(stream, &shared, &paired) {
+                                if let Err(e) = connection(stream, &shared, &mut slot) {
                                     log::debug!("remote connection: {e}");
                                 }
-                                if paired.load(Ordering::SeqCst) {
-                                    shared.pools.paired.fetch_sub(1, Ordering::SeqCst);
-                                } else {
-                                    shared.pools.unauthenticated.fetch_sub(1, Ordering::SeqCst);
-                                }
-                            });
+                            })
+                        {
+                            log::warn!("remote: no thread for {ip}: {e}");
+                        }
                     }
                 })?
         };
@@ -882,41 +1151,79 @@ impl Drop for RemotePort {
     }
 }
 
-/// One connection: the handshake, then a request and a reply at a time
-/// until the device hangs up or a deadline passes.
-fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::Result<()> {
-    tcp.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+/// The TLS session over an accepted socket, its handshake done within
+/// the handshake deadline.
+fn handshake(tcp: TcpStream, shared: &Shared) -> io::Result<Tls> {
     tcp.set_write_timeout(Some(WRITE_TIMEOUT))?;
     // A reply is one record and goes out at once; Nagle with the
     // device's delayed ACK would otherwise add milliseconds per request.
     tcp.set_nodelay(true)?;
     let conn = ServerConnection::new(Arc::clone(&shared.tls)).map_err(io::Error::other)?;
-    let mut stream = StreamOwned::new(conn, tcp);
+    let sock = Timed {
+        sock: tcp,
+        deadline: Some(Instant::now() + shared.timeouts.handshake),
+    };
+    let mut stream = StreamOwned::new(conn, sock);
     while stream.conn.is_handshaking() {
         stream.conn.complete_io(&mut stream.sock)?;
     }
-    let mut reader = BufReader::new(stream);
-    let mut first = true;
-    while let Some(request) = read_request(&mut reader)? {
-        if first {
-            reader.get_ref().sock.set_read_timeout(Some(IDLE_TIMEOUT))?;
-            first = false;
-        }
+    Ok(stream)
+}
+
+/// The next request, `None` once the device hangs up. On a connection
+/// that is not paired the head and then the body each run on a deadline
+/// of their own; a paired one reads under its idle timeout alone.
+fn next_request(
+    reader: &mut BufReader<Tls>,
+    paired: bool,
+    timeouts: Timeouts,
+) -> io::Result<Option<RemoteRequest>> {
+    if !paired {
+        reader.get_mut().sock.deadline = Some(Instant::now() + timeouts.head);
+    }
+    let Some((mut request, length)) = read_head(reader)? else {
+        return Ok(None);
+    };
+    if !paired {
+        reader.get_mut().sock.deadline = Some(Instant::now() + timeouts.body);
+    }
+    request.body = read_body(reader, length)?;
+    Ok(Some(request))
+}
+
+/// One connection: the handshake, then a request and a reply at a time
+/// until the device hangs up or a deadline passes. Until it is paired
+/// it runs on the absolute deadlines in `shared.timeouts` and is closed
+/// after its first reply; once paired it may idle `IDLE_TIMEOUT`
+/// between requests.
+fn connection(tcp: TcpStream, shared: &Arc<Shared>, slot: &mut Slot) -> io::Result<()> {
+    let mut reader = BufReader::new(handshake(tcp, shared)?);
+    while let Some(request) = next_request(&mut reader, slot.is_paired(), shared.timeouts)? {
         // The page's files are constant bytes, answered here so a load
-        // never waits on a busy frame. A query on them is ignored.
-        if let Some(page) = web::page(&request.method, &request.path) {
-            if Limits::over(&shared.limits.page) {
-                respond(reader.get_mut(), 429, &rate_limited(), &[])?;
+        // never waits on a busy frame. A query on them is ignored. They
+        // have a rate window of their own; `/pair` and `/info` theirs.
+        let page = web::page(&request.method, &request.path);
+        let over = match page {
+            Some(_) => Limits::over(&shared.limits.page),
+            None => shared.limits.limited(&request.path),
+        };
+        if over {
+            if answer(
+                reader.get_mut(),
+                slot.is_paired(),
+                429,
+                &rate_limited(),
+                &[],
+            )? {
                 continue;
             }
+            return Ok(());
+        }
+        if let Some(page) = page {
             let stream = reader.get_mut();
             respond_page(stream, page)?;
             stream.conn.send_close_notify();
             return stream.flush();
-        }
-        if shared.limits.limited(&request.path) {
-            respond(reader.get_mut(), 429, &rate_limited(), &[])?;
-            continue;
         }
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         let upgrade_key = request.upgrade.clone();
@@ -941,13 +1248,16 @@ fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::
             })
             .is_err()
         {
-            respond(
+            if answer(
                 reader.get_mut(),
+                slot.is_paired(),
                 503,
                 &error_body("busy", "the host is busy; try again"),
                 &[],
-            )?;
-            continue;
+            )? {
+                continue;
+            }
+            return Ok(());
         }
         (shared.wake)();
         let reply = match reply_rx.recv_timeout(ANSWER_TIMEOUT) {
@@ -958,27 +1268,16 @@ fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::
                 false,
             ),
         };
-        if reply.authenticated && !paired.load(Ordering::SeqCst) {
-            // The device moves from the unauthenticated pool to the
-            // paired one on its first authenticated request.
-            if shared.pools.paired.load(Ordering::SeqCst) >= MAX_PAIRED {
-                respond(
-                    reader.get_mut(),
-                    503,
-                    &error_body("full", "too many paired connections"),
-                    &[],
-                )?;
-                return Ok(());
-            }
-            shared.pools.paired.fetch_add(1, Ordering::SeqCst);
-            shared.pools.unauthenticated.fetch_sub(1, Ordering::SeqCst);
-            paired.store(true, Ordering::SeqCst);
+        if reply.authenticated && !slot.is_paired() && !promote(&mut reader, slot, shared)? {
+            return Ok(());
         }
         if reply.status == SUBSCRIBED
             && let (Some(key), Some((id, q_rx, overflow))) = (upgrade_key, queue)
         {
             respond_upgrade(reader.get_mut(), &key)?;
-            let out = subscriber(reader.into_inner(), &q_rx, &overflow, id, shared);
+            let StreamOwned { conn, sock } = reader.into_inner();
+            let stream = StreamOwned::new(conn, sock.into_inner());
+            let out = subscriber(stream, &q_rx, &overflow, id, shared);
             let ended = SubscriberFrame {
                 subscriber: id,
                 text: None,
@@ -988,9 +1287,39 @@ fn connection(tcp: TcpStream, shared: &Arc<Shared>, paired: &AtomicBool) -> io::
             }
             return out;
         }
-        respond(reader.get_mut(), reply.status, &reply.body, &reply.headers)?;
+        if !answer(
+            reader.get_mut(),
+            slot.is_paired(),
+            reply.status,
+            &reply.body,
+            &reply.headers,
+        )? {
+            return Ok(());
+        }
     }
     Ok(())
+}
+
+/// Move a connection whose request authenticated from the
+/// unauthenticated pool to the paired one, and from the deadlines to
+/// the idle timeout. `false` when the paired pool is full: the device
+/// has been told so and the connection is to close.
+fn promote(reader: &mut BufReader<Tls>, slot: &mut Slot, shared: &Shared) -> io::Result<bool> {
+    if shared.pools.paired.load(Ordering::SeqCst) >= MAX_PAIRED {
+        answer(
+            reader.get_mut(),
+            false,
+            503,
+            &error_body("full", "too many paired connections"),
+            &[],
+        )?;
+        return Ok(false);
+    }
+    slot.promote();
+    let sock = &mut reader.get_mut().sock;
+    sock.deadline = None;
+    sock.sock.set_read_timeout(Some(IDLE_TIMEOUT))?;
+    Ok(true)
 }
 
 /// Feed one WebSocket from its queue until the frame drops the queue
@@ -1281,5 +1610,228 @@ mod tests {
         assert!(rest.is_empty());
         assert!(der_element(&[0x30, 0x05, 0x00]).is_none(), "a cut element");
         assert!(spki_sha256_of_cert(b"not a certificate").is_none());
+    }
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn one_source_holds_its_share_and_another_is_admitted_up_to_the_total() {
+        let mut a = Admission::new(MAX_UNAUTHENTICATED, MAX_UNAUTHENTICATED_PER_SOURCE);
+        let stranger = ip("192.168.1.50");
+        for _ in 0..MAX_UNAUTHENTICATED_PER_SOURCE {
+            assert_eq!(a.admit(stranger), Ok(()));
+        }
+        assert_eq!(a.admit(stranger), Err(Refusal::Source));
+        // A fresh device on another address still finds a slot.
+        assert_eq!(a.admit(ip("192.168.1.20")), Ok(()));
+        assert_eq!(a.admit(ip("192.168.1.21")), Err(Refusal::Total));
+        a.release(stranger);
+        assert_eq!(a.admit(ip("192.168.1.21")), Ok(()));
+        assert_eq!(a.admit(stranger), Err(Refusal::Total));
+        a.release(ip("192.168.1.20"));
+        a.release(ip("192.168.1.21"));
+        assert_eq!(a.admit(stranger), Ok(()), "its own share is back");
+        assert_eq!(a.admit(stranger), Err(Refusal::Source));
+    }
+
+    #[test]
+    fn a_mapped_ipv4_address_and_its_plain_form_are_one_source() {
+        let mut a = Admission::new(MAX_UNAUTHENTICATED, 2);
+        assert_eq!(a.admit(ip("::ffff:10.0.0.7")), Ok(()));
+        assert_eq!(a.admit(ip("10.0.0.7")), Ok(()));
+        assert_eq!(a.admit(ip("::ffff:10.0.0.7")), Err(Refusal::Source));
+        a.release(ip("10.0.0.7"));
+        a.release(ip("::ffff:10.0.0.7"));
+        assert_eq!((a.total, a.by_source.len()), (0, 0));
+        // A release of what was never admitted changes nothing.
+        a.release(ip("10.0.0.8"));
+        assert_eq!(a.total, 0);
+    }
+
+    fn unauthenticated(pools: &Pools) -> usize {
+        pools.unauthenticated.lock().unwrap().total
+    }
+
+    #[test]
+    fn a_slot_gives_back_whichever_pool_it_is_in() {
+        let pools = Arc::new(Pools::new());
+        let source = ip("10.0.0.7");
+        let slot = Slot::take(&pools, source).unwrap();
+        assert_eq!(unauthenticated(&pools), 1);
+        drop(slot);
+        assert_eq!(unauthenticated(&pools), 0);
+
+        let mut slot = Slot::take(&pools, source).unwrap();
+        slot.promote();
+        assert!(slot.is_paired());
+        assert_eq!(unauthenticated(&pools), 0);
+        assert_eq!(pools.paired.load(Ordering::SeqCst), 1);
+        drop(slot);
+        assert_eq!(pools.paired.load(Ordering::SeqCst), 0);
+        assert_eq!(unauthenticated(&pools), 0);
+
+        let slot = Slot::take(&pools, source).unwrap();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _held = slot;
+            panic!("a connection thread panics");
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(unauthenticated(&pools), 0, "the unwind gave the slot back");
+    }
+
+    /// A listener on loopback with 300 ms deadlines, and a client
+    /// pinned to it.
+    fn short_port() -> (RemotePort, Arc<ClientConfig>) {
+        let (identity, key) = make_identity(None, "Test Mac", Listen::default()).unwrap();
+        let tls = tls_config(&identity, &key).unwrap();
+        let ms = Duration::from_millis(300);
+        let timeouts = Timeouts {
+            handshake: ms,
+            head: ms,
+            body: ms,
+        };
+        let port =
+            RemotePort::bind_with("127.0.0.1:0".parse().unwrap(), tls, || {}, timeouts).unwrap();
+        (port, pinned_client(&identity.spki_sha256).unwrap())
+    }
+
+    type Client = StreamOwned<rustls::ClientConnection, TcpStream>;
+
+    fn client(config: &Arc<ClientConfig>, tcp: TcpStream) -> Client {
+        let conn = rustls::ClientConnection::new(
+            Arc::clone(config),
+            ServerName::try_from("localhost").unwrap(),
+        )
+        .unwrap();
+        StreamOwned::new(conn, tcp)
+    }
+
+    fn handshaken(addr: SocketAddr, config: &Arc<ClientConfig>) -> Client {
+        let mut s = client(config, TcpStream::connect(addr).unwrap());
+        while s.conn.is_handshaking() {
+            s.conn.complete_io(&mut s.sock).unwrap();
+        }
+        s
+    }
+
+    /// The TLS bytes that carry `plain` over `s`, to be written by hand.
+    fn sealed(s: &mut Client, plain: &[u8]) -> Vec<u8> {
+        s.conn.writer().write_all(plain).unwrap();
+        let mut out = Vec::new();
+        while s.conn.wants_write() {
+            s.conn.write_tls(&mut out).unwrap();
+        }
+        out
+    }
+
+    /// Write `bytes` to `tcp` one every 100 ms, on its own thread, and
+    /// wait for the port to close: how long it took from `from`, or
+    /// `None` if the port was still reading after three seconds.
+    fn trickled(tcp: &TcpStream, bytes: Vec<u8>, from: Instant) -> Option<Duration> {
+        let mut writer = tcp.try_clone().unwrap();
+        std::thread::spawn(move || {
+            for b in bytes {
+                if writer.write_all(&[b]).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let mut reader = tcp.try_clone().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => return Some(from.elapsed()),
+                // A TLS 1.3 server sends its tickets after the
+                // handshake; anything else read is not a close yet.
+                Ok(_) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return None;
+                }
+                Err(_) => return Some(from.elapsed()),
+            }
+        }
+    }
+
+    #[test]
+    fn a_trickled_handshake_head_or_body_is_closed_at_its_deadline_and_frees_its_slot() {
+        let (port, config) = short_port();
+        let addr = port.addr();
+        let handshake = std::thread::spawn({
+            let config = Arc::clone(&config);
+            move || {
+                let tcp = TcpStream::connect(addr).unwrap();
+                let mut hello = Vec::new();
+                client(&config, tcp.try_clone().unwrap())
+                    .conn
+                    .write_tls(&mut hello)
+                    .unwrap();
+                trickled(&tcp, hello, Instant::now())
+            }
+        });
+        let head = std::thread::spawn({
+            let config = Arc::clone(&config);
+            move || {
+                let mut s = handshaken(addr, &config);
+                let from = Instant::now();
+                let bytes = sealed(&mut s, b"GET /app.css HTTP/1.1\r\nHost: localhost\r\n\r\n");
+                trickled(&s.sock, bytes, from)
+            }
+        });
+        let body = std::thread::spawn({
+            let config = Arc::clone(&config);
+            move || {
+                let mut s = handshaken(addr, &config);
+                write!(
+                    s,
+                    "POST /api/v1/pair HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1024\r\n\r\n"
+                )
+                .unwrap();
+                s.flush().unwrap();
+                let from = Instant::now();
+                let bytes = sealed(&mut s, &[b'a'; 1024]);
+                trickled(&s.sock, bytes, from)
+            }
+        });
+        // The three hold their address's share, so a fourth is closed
+        // at once.
+        std::thread::sleep(Duration::from_millis(100));
+        let mut fourth = TcpStream::connect(addr).unwrap();
+        fourth
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut buf = [0u8; 1];
+        assert!(
+            matches!(fourth.read(&mut buf), Ok(0) | Err(_)),
+            "a fourth from the address was closed at accept"
+        );
+        drop(fourth);
+        for (phase, held) in [("handshake", handshake), ("head", head), ("body", body)] {
+            let closed = held.join().unwrap();
+            let elapsed = closed.unwrap_or_else(|| panic!("the {phase} was still being read"));
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "the {phase} was closed after {elapsed:?}"
+            );
+        }
+        // Each gave its slot back: a page load from the address is
+        // served.
+        std::thread::sleep(Duration::from_millis(50));
+        let mut s = handshaken(addr, &config);
+        write!(s, "GET /app.css HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        s.flush().unwrap();
+        let mut all = Vec::new();
+        s.read_to_end(&mut all).unwrap();
+        assert!(String::from_utf8_lossy(&all).starts_with("HTTP/1.1 200"));
     }
 }

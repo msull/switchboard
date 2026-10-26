@@ -388,11 +388,13 @@ if (typeof document !== 'undefined') {
   }
 
   /**
-   * Run `work` after every request queued before it: one at a time, on
-   * the one kept connection, since requests in parallel would open new
-   * connections and the host holds four that have not yet
-   * authenticated before it refuses a fifth. Work already in the queue
-   * calls the inner functions directly, never `serial` again.
+   * Run `work` after every request queued before it: one at a time,
+   * since requests in parallel would open new connections and the host
+   * holds three from one address that have not yet authenticated before
+   * it refuses a fourth. After pairing the calls ride one kept
+   * connection; before, the host closes after each reply, so each is
+   * its own. Work already in the queue calls the inner functions
+   * directly, never `serial` again.
    */
   function serial(work) {
     const run = state.chain.then(() => work());
