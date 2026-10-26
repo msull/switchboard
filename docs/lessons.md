@@ -80,5 +80,8 @@ The rule since: comments say why.
   dev-only fallback.
 - Two monitors: `screencapture -x a.png b.png` captures both; one path
   only gives the primary display.
-- Linux CI for eframe needs `libxkbcommon-dev libgtk-3-dev libssl-dev`;
-  audio adds `libasound2-dev`, whisper adds `cmake`.
+- Linux CI for eframe needs only `libxkbcommon-dev`; audio adds
+  `libasound2-dev`, whisper adds `cmake`. GTK and OpenSSL were on the
+  list for a year without anything linking them (the file dialog uses
+  the desktop portal, TLS is ring), and GTK's 100-odd packages were
+  where the Azure mirror's stalls landed.
