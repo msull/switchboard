@@ -110,7 +110,7 @@ pub fn settings_menu(
             if ui
                 .checkbox(&mut check, "Check for updates automatically")
                 .on_hover_text(
-                    "Off: no check at launch or hourly. the Check for updates button still works",
+                    "Off: no check at launch or hourly. The Check for updates button still works",
                 )
                 .changed()
             {
