@@ -22,7 +22,9 @@ use switchboard::adapters::fakes::{
     self, FakeAdvertiser, FakeDispatch, FakeHost, FakeOperations, FakeRemoteStore, FakeSecrets,
     FakeTranscripts, MemoryStore,
 };
-use switchboard::adapters::remote::{self, MAX_UNAUTHENTICATED, pinned_client};
+use switchboard::adapters::remote::{
+    self, MAX_UNAUTHENTICATED, MAX_UNAUTHENTICATED_PER_SOURCE, pinned_client,
+};
 use switchboard::app::Services;
 use switchboard::content::ContentKey;
 use switchboard::core::{AppAction, Ask, RecordId};
@@ -3343,30 +3345,33 @@ fn unwatch_a_closed_socket_and_a_revocation_each_drop_their_watches() {
     assert_eq!(port.app.subscriber_count(), 0);
 }
 
-/// Strangers that connect and say nothing fill the unauthenticated
-/// pool and no more: the fifth is closed at once, a paired subscriber
-/// keeps receiving meanwhile, and the slots are free once they hang up.
+/// Strangers on one address that connect and say nothing take that
+/// address's share of the unauthenticated pool and no more: the next is
+/// closed at once, a paired subscriber keeps receiving meanwhile, and
+/// the slots are free once they hang up. (Each would also be closed at
+/// the handshake deadline, five seconds on; the test is done sooner.)
 #[test]
 fn stalled_strangers_fill_their_own_pool_and_never_a_paired_clients() {
     let mut port = port();
     let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
     let sub = subscribe(&mut port, &token);
-    let strangers: Vec<TcpStream> = (0..MAX_UNAUTHENTICATED)
+    let strangers: Vec<TcpStream> = (0..MAX_UNAUTHENTICATED_PER_SOURCE)
         .map(|_| TcpStream::connect(port.addr).expect("connect"))
         .collect();
     // The listener has handed each to a thread before it accepts more.
     std::thread::sleep(Duration::from_millis(100));
-    let mut fifth = TcpStream::connect(port.addr).expect("connect");
-    fifth
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    let mut next = TcpStream::connect(port.addr).expect("connect");
+    next.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let mut buf = [0u8; 1];
-    let closed = matches!(fifth.read(&mut buf), Ok(0) | Err(_));
-    assert!(closed, "the fifth stranger was closed at once");
-    // A page load is a stranger too, and gets no slot past the four.
+    let closed = matches!(next.read(&mut buf), Ok(0) | Err(_));
+    assert!(
+        closed,
+        "the next stranger from the address was closed at once"
+    );
+    // A page load is a stranger too, and gets no slot past the share.
     assert!(
         http_head(port.addr, &port.client, "GET", "/", &[], "").is_err(),
-        "a page request past the pool fails at accept"
+        "a page request past the share fails at accept"
     );
 
     let (_, _, session) = seed(&mut port, "");
@@ -3380,6 +3385,110 @@ fn stalled_strangers_fill_their_own_pool_and_never_a_paired_clients() {
     std::thread::sleep(Duration::from_millis(100));
     let (status, _) = get(&mut port, "/api/v1/waiting", Some(&token));
     assert_eq!(status, 200, "the slots are free again");
+}
+
+/// Two strangers stalled on an address leave room in its share for a
+/// paired device's fresh connection, which starts unauthenticated. A
+/// third would make that connection the fourth from the address, which
+/// is refused by design; that strangers on one address never shut out
+/// a device on another is the `Admission` unit test, since a second
+/// loopback address needs root on macOS.
+#[test]
+fn a_fresh_paired_connection_finds_room_beside_stalled_strangers() {
+    let mut port = port();
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let strangers: Vec<TcpStream> = (0..MAX_UNAUTHENTICATED_PER_SOURCE - 1)
+        .map(|_| TcpStream::connect(port.addr).expect("connect"))
+        .collect();
+    std::thread::sleep(Duration::from_millis(100));
+    let (status, reply) = get(&mut port, "/api/v1/waiting", Some(&token));
+    assert_eq!(status, 200, "{reply}");
+    drop(strangers);
+}
+
+/// Requests in turn over one pinned connection, each written once the
+/// one before is answered, served by the app on this thread: the
+/// answers, and whether the host then ended the connection.
+fn on_one_connection(port: &mut Port, requests: &[&str]) -> (Vec<Answer>, bool) {
+    let addr = port.addr;
+    let config = Arc::clone(&port.client);
+    let requests: Vec<String> = requests.iter().map(|r| (*r).to_owned()).collect();
+    let client = std::thread::spawn(move || -> std::io::Result<(Vec<Answer>, bool)> {
+        let mut reader = BufReader::new(stranger_tls(addr, &config));
+        reader
+            .get_ref()
+            .sock
+            .set_read_timeout(Some(Duration::from_secs(5)))?;
+        let mut answers = Vec::new();
+        for request in requests {
+            reader.get_mut().write_all(request.as_bytes())?;
+            reader.get_mut().flush()?;
+            answers.push(read_answer(&mut reader)?);
+        }
+        reader
+            .get_ref()
+            .sock
+            .set_read_timeout(Some(Duration::from_millis(300)))?;
+        let mut buf = [0u8; 1];
+        let ended = match reader.read(&mut buf) {
+            Ok(n) => n == 0,
+            Err(e) => !matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+        };
+        Ok((answers, ended))
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !client.is_finished() {
+        assert!(std::time::Instant::now() < deadline, "no reply");
+        port.app.serve_pending();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    client.join().unwrap().expect("http")
+}
+
+/// A stranger gets one answer per connection, whatever it is, and is
+/// told so; a paired device keeps its connection for the next request.
+#[test]
+fn every_reply_to_a_stranger_closes_its_connection_and_a_paired_one_stays_open() {
+    let mut port = port();
+    // Pairing first spends one of `/pair`'s six a minute.
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let info = "GET /api/v1/info HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    let pair_request =
+        "POST /api/v1/pair HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}";
+    let bad_bearer =
+        "GET /api/v1/waiting HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer nope\r\n\r\n";
+    for (request, status) in [(info, 200), (pair_request, 403), (bad_bearer, 401)] {
+        let (answers, ended) = on_one_connection(&mut port, &[request]);
+        assert_eq!(answers[0].0, status, "{request}: {}", answers[0].2);
+        assert_eq!(
+            header(&answers[0].1, "connection"),
+            Some("close"),
+            "{request}"
+        );
+        assert!(ended, "{request}: the host closed after its reply");
+    }
+    // `/pair` has been asked twice above; four more fill its window.
+    for _ in 0..4 {
+        let (status, _) = call(&mut port, "POST", "/api/v1/pair", None, "{}");
+        assert_eq!(status, 403);
+    }
+    let (answers, ended) = on_one_connection(&mut port, &[pair_request]);
+    assert_eq!(answers[0].0, 429);
+    assert_eq!(header(&answers[0].1, "connection"), Some("close"));
+    assert!(ended, "the 429 closed too");
+
+    let waiting = format!(
+        "GET /api/v1/waiting HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
+    );
+    let (answers, ended) = on_one_connection(&mut port, &[&waiting, &waiting]);
+    for (status, head, body) in &answers {
+        assert_eq!(*status, 200, "{body}");
+        assert_eq!(header(head, "connection"), Some("keep-alive"));
+    }
+    assert!(!ended, "a paired connection stays open");
 }
 
 /// A pinned TLS connection that has said nothing yet, for a test that
@@ -3827,7 +3936,12 @@ fn http_head(
         body.len()
     )?;
     s.flush()?;
-    let mut reader = BufReader::new(s);
+    read_answer(&mut BufReader::new(s))
+}
+
+/// One reply off a connection: the status, the headers with lowercased
+/// names, and the body.
+fn read_answer<R: Read>(reader: &mut BufReader<R>) -> std::io::Result<Answer> {
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let status: u16 = line
@@ -3973,7 +4087,8 @@ fn the_page_is_served_to_anyone_with_its_headers() {
     let (_, head, _) = call_head(&mut port, "GET", "/api/v1/info", &[], "");
     assert_eq!(header(&head, "cache-control"), Some("no-store"));
     assert_eq!(header(&head, "x-content-type-options"), Some("nosniff"));
-    assert_eq!(header(&head, "connection"), Some("keep-alive"));
+    // A stranger's reply ends its connection.
+    assert_eq!(header(&head, "connection"), Some("close"));
 }
 
 /// Every route in the page's table is one the host serves: for a
@@ -4193,8 +4308,9 @@ fn me_follows_the_dialog_and_a_revoked_cookie_leaves_info_unchanged() {
 }
 
 /// A page load closes its connection, so it frees its stranger's slot
-/// at once rather than after the idle timeout: four loads whose
-/// clients keep their sockets still leave room for a fifth.
+/// at once rather than at a deadline: four loads from one address,
+/// more than its share, whose clients keep their sockets still leave
+/// room for a fifth.
 #[test]
 fn a_page_load_frees_its_slot_at_once() {
     let port = port();
