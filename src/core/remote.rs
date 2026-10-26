@@ -79,7 +79,7 @@ impl AppCore {
                     self.error("Pairing closed after too many failed attempts.".to_owned());
                 } else if count_failure(&mut p.sources, ip) >= PAIRING_ATTEMPTS {
                     self.error(format!(
-                        "Pairing locked out {ip} after three failed attempts."
+                        "Pairing locked out {ip} after {PAIRING_ATTEMPTS} failed attempts."
                     ));
                 }
             }

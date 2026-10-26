@@ -3814,12 +3814,13 @@ Built so far:
   to the content worker as a `ContentKey::TicketText` job with a
   `Source::Json` value, which masks every string in it before it is
   serialized, so a value holding a quote or a backslash is found as it
-  is. The policy is the union of one spec per project, each with
-  every stored set granted (not only the sets granted now, so text a
+  is. The policy is the union of one spec per project and per stored
+  set, each set resolved alone so two sets' values of one name both
+  mask (every stored set, not only the ones granted now, so text a
   child printed under a grant stays masked after the grant is taken
   back or its session is gone), carried in `ContentJob.policies`; any
-  that fails to resolve refuses the read `policy` (503), so a stale
-  set name in any project's grants refuses ticket text until it is
+  that fails to resolve refuses the read `policy` (503), so a set
+  whose secret the store cannot read refuses ticket text until it is
   fixed. The worker caches the masked value per key under the hash of
   its input and the policy's fingerprint. A text file over 768 KiB is
   refused `too_large` rather than masked and cut (a file between 256

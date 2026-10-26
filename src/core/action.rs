@@ -973,11 +973,12 @@ pub const TYPED_HOLD: Duration = Duration::from_mins(1);
 /// Why `switchboard-env`'s setup commands are refused outside the window.
 pub const ENV_SETUP_LOCKED: &str = "environment setup is locked: choose Unlock environment setup in Switchboard's settings menu, then run this again within five minutes";
 
-/// How long the pairing window stays open, and how many wrong codes
-/// lock one address out of it. Three tries at a 40-bit code is no odds
-/// at all, and locking the address rather than closing the window
-/// means one host on the network cannot shut it for everyone.
+/// How long the pairing window stays open.
 pub const PAIRING_WINDOW: Duration = Duration::from_mins(5);
+/// How many wrong codes lock one address out of the window. Three
+/// tries at a 40-bit code is no odds at all, and locking the address
+/// rather than closing the window means one host on the network
+/// cannot shut it for everyone.
 pub const PAIRING_ATTEMPTS: u32 = 3;
 /// How many source addresses one window tracks. Past it the oldest
 /// unlocked one is forgotten; a locked one never is, so rotating
@@ -998,7 +999,8 @@ pub struct PairingSource {
 
 /// The pairing window while it is open: the code the QR carries, what
 /// a pairing made through it grants, how many attempts failed in all
-/// (`PAIRING_FAILURES_MAX` closes it), and the failures per source address in first-seen order.
+/// (`PAIRING_FAILURES_MAX` closes it), and the failures per source
+/// address in first-seen order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingWindow {
     pub until: Duration,

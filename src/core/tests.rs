@@ -12601,9 +12601,11 @@ mod remote {
             vec![a],
             "locked lists only the address at the limit"
         );
-        assert!(core.notice().is_some_and(
-            |n| n.text == "Pairing locked out 192.168.1.9 after three failed attempts."
-        ));
+        assert!(
+            core.notice().is_some_and(
+                |n| n.text == "Pairing locked out 192.168.1.9 after 3 failed attempts."
+            )
+        );
         core.dispatch(AppAction::PairingFailedFrom(a), Clock::at(1_030));
         assert_eq!(
             source_failures(&core, a),

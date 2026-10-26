@@ -9,7 +9,7 @@ use egui::{Context, RichText, Ui};
 use super::{DrawCtx, GAP, cards::since_text, theme};
 use crate::adapters::remote;
 use crate::core::remote::{invite_address, invite_url};
-use crate::core::{AppAction, AppCore};
+use crate::core::{AppAction, AppCore, PAIRING_ATTEMPTS};
 use crate::ports::remote::Scope;
 
 /// What the dialog edits between frames: the name and port fields, the
@@ -191,7 +191,7 @@ fn pairing(cx: &mut DrawCtx<'_>, ui: &mut Ui, draft: &mut RemoteDraft) {
                 ui.label(theme::meta_text(
                     ui,
                     format!(
-                        "Scan, or type the key and the code. Grants {} scope. Open for five minutes. An address that sends three wrong codes is locked out until you reopen pairing.",
+                        "Scan, or type the key and the code. Grants {} scope. Open for five minutes. An address that sends {PAIRING_ATTEMPTS} wrong codes is locked out until you reopen pairing.",
                         window.scope.word()
                     ),
                 ));

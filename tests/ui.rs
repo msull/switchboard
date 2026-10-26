@@ -7575,7 +7575,7 @@ fn remote_devices_dialog_lists_the_addresses_locked_out_of_pairing() {
     click(&mut harness, "Remote devices…");
     harness.run_steps(2);
     harness.get_by_label(
-        "Scan, or type the key and the code. Grants read scope. Open for five minutes. An address that sends three wrong codes is locked out until you reopen pairing.",
+        "Scan, or type the key and the code. Grants read scope. Open for five minutes. An address that sends 3 wrong codes is locked out until you reopen pairing.",
     );
     assert!(harness.query_by_label(locked).is_none(), "none locked yet");
     let ip: std::net::IpAddr = "192.168.1.9".parse().unwrap();
