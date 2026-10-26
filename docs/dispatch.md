@@ -861,6 +861,10 @@ name = "decisions"
 gate = { kind = "human", decision = "decisions", question = "Open decisions are in {inputs.notes}. Answer each in the note, or proceed with none to take the recommendations." }
 ```
 
+A file that sets a dial other than `ask` for a human gate's decision is
+refused at take and at restart, naming the stage, so the owner does not
+believe the gate automated.
+
 ## The pipeline file
 
 One file per project, TOML, in Dispatch's data directory (a repository

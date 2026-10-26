@@ -15514,6 +15514,62 @@ fn a_restart_is_refused_for_a_closed_ticket() {
     assert!(e.contains("retake"), "{e}");
 }
 
+/// A dial on `inspect`, which only the human gate of that name asks.
+const INSPECT_DIAL: (&str, &str) = (
+    "decisions = { lanes = \"auto\", finalize = \"ask\" }",
+    "decisions = { lanes = \"auto\", finalize = \"ask\", inspect = \"auto\" }",
+);
+
+/// A take of a file dialling a human gate's decision is refused before
+/// anything is written: no ticket record and no copy of the file.
+#[test]
+fn a_take_is_refused_for_a_dial_on_a_human_gates_decision() {
+    let mut env = Env::new();
+    live_edit(&env, INSPECT_DIAL.0, INSPECT_DIAL.1);
+    let now = env.tick();
+    let e = take_issue(&mut env.runner, &env.data, 31, now).unwrap_err();
+    let e = format!("{e:#}");
+    assert!(
+        e.contains("stage \"inspect\" is a human gate and always asks"),
+        "{e}"
+    );
+    assert!(env.data.ticket_files().unwrap().is_empty());
+    assert!(env.runner.tickets().unwrap().is_empty());
+}
+
+/// A restart onto a live file dialling a human gate's decision is
+/// refused; a running copy carrying the same dial still parses and
+/// runs on, since only adopting a file is refused.
+#[test]
+fn a_restart_is_refused_for_a_dial_on_a_human_gates_decision() {
+    let mut env = Env::new();
+    let (id, _) = at_implement(&mut env);
+    let t = env.ticket(&id);
+    let copy = std::fs::read_to_string(&t.pipeline_file).unwrap();
+    assert!(copy.contains(INSPECT_DIAL.0));
+    std::fs::write(
+        &t.pipeline_file,
+        copy.replacen(INSPECT_DIAL.0, INSPECT_DIAL.1, 1),
+    )
+    .unwrap();
+    env.runner.pipeline_of(&t).unwrap();
+    env.step();
+    assert!(
+        !matches!(env.ticket(&id).state, TicketState::Parked { .. }),
+        "{:?}",
+        env.ticket(&id).state
+    );
+
+    live_edit(&env, INSPECT_DIAL.0, INSPECT_DIAL.1);
+    let before = env.ticket(&id);
+    let e = restart_refused(&mut env, &id, None);
+    assert!(
+        e.contains("stage \"inspect\" is a human gate and always asks"),
+        "{e}"
+    );
+    assert_eq!(env.ticket(&id), before, "nothing written");
+}
+
 /// A ticket still parking for its own reasons is refused: the park
 /// sequence owns it until it reads parked.
 #[test]

@@ -1757,7 +1757,11 @@ impl Pipeline {
     /// running, which is parsed every pass and would park on a new
     /// rule: no code review stage holds a `[[resources]]` entry, since
     /// its rounds take hours and every other ticket would wait through
-    /// them.
+    /// them; and no `[policy.decisions]` dial other than `ask` names a
+    /// decision a human gate of the file asks, since a human gate reads
+    /// no dial and the owner would believe it automated. `lanes` is
+    /// excepted: a human gate deciding it reaches the branch that reads
+    /// its dial.
     pub fn validate_for_take(&self) -> Result<()> {
         for s in &self.stages {
             if s.kind() != StageKind::Review {
@@ -1767,6 +1771,20 @@ impl Pipeline {
                 bail!(
                     "stage {:?} is a code review stage and may not hold {r:?}: its rounds would hold it for every other ticket",
                     s.name
+                );
+            }
+        }
+        for (name, value) in &self.policy.decisions {
+            if value == "ask" || name == "lanes" {
+                continue;
+            }
+            let asked_by = self.stages.iter().find(
+                |s| matches!(&s.gate, Some(Gate::Human { decision, .. }) if decision == name),
+            );
+            if let Some(stage) = asked_by {
+                let stage = &stage.name;
+                bail!(
+                    "stage {stage:?} is a human gate and always asks: [policy.decisions] {name} = {value:?} does nothing for it; remove the dial, or name {name:?} in a supervisor's `decides` to answer it automatically"
                 );
             }
         }
@@ -3767,6 +3785,65 @@ without_lane = "base"
             &p.stages.last().unwrap().gate,
             Some(Gate::Human { question: None, .. })
         ));
+    }
+
+    /// The Switchboard pipeline with its dials set to `decisions` and a
+    /// root human gate `sign` deciding `decision` appended.
+    fn dialled(decisions: &str, decision: &str) -> Pipeline {
+        let dials = "decisions = { lanes = \"auto\", finalize = \"ask\", budget = \"ask\" }";
+        assert!(SWITCHBOARD.contains(dials));
+        let file = SWITCHBOARD.replace(dials, decisions);
+        Pipeline::parse(&format!(
+            "{file}\n[[stages]]\nname = \"sign\"\ngate = {{ kind = \"human\", decision = \"{decision}\" }}\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_dial_on_a_human_gates_decision_is_refused_at_take() {
+        // The file parses, so a running copy carrying the dial keeps
+        // asking rather than parking; only adopting it is refused.
+        let p = dialled("decisions = { signoff = \"auto\" }", "signoff");
+        let err = p.validate_for_take().unwrap_err().to_string();
+        assert!(
+            err.contains("stage \"sign\" is a human gate and always asks"),
+            "{err}"
+        );
+        assert!(err.contains("decides"), "{err}");
+        let p = dialled("decisions = { signoff = \"recommend\" }", "signoff");
+        assert!(p.validate_for_take().is_err());
+    }
+
+    #[test]
+    fn a_dial_on_a_name_dispatch_also_asks_is_refused_for_a_human_gate() {
+        // The gate's question of that name reads no dial.
+        let p = dialled("decisions = { finalize = \"auto\" }", "finalize");
+        assert!(p.validate_for_take().is_err());
+    }
+
+    #[test]
+    fn a_human_gate_with_no_dial_or_an_ask_dial_is_accepted_at_take() {
+        dialled("decisions = { signoff = \"ask\" }", "signoff")
+            .validate_for_take()
+            .unwrap();
+        dialled("", "signoff").validate_for_take().unwrap();
+    }
+
+    #[test]
+    fn a_dial_no_human_gate_asks_is_not_refused_at_take() {
+        dialled(
+            "decisions = { pr = \"auto\", sginoff = \"auto\" }",
+            "signoff",
+        )
+        .validate_for_take()
+        .unwrap();
+    }
+
+    #[test]
+    fn a_human_gate_deciding_lanes_may_be_dialled() {
+        dialled("decisions = { lanes = \"auto\" }", "lanes")
+            .validate_for_take()
+            .unwrap();
     }
 
     #[test]
