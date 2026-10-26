@@ -42,6 +42,11 @@ pub enum Network {
 pub trait Repo: Send {
     /// A clone of `url` at `dir`, made if it is not there yet.
     fn ensure_clone(&mut self, url: &str, dir: &Path) -> Result<()>;
+    /// `core.hooksPath=.githooks` stored in the clone at `dir` when its
+    /// checkout has a `.githooks` directory and the clone has no value of
+    /// its own, so a commit in any of its worktrees runs that worktree's
+    /// copy of the project's hooks.
+    fn enable_hooks(&mut self, dir: &Path) -> Result<()>;
     /// `git fetch <remote> --prune` in `dir`, so a cut starts from what
     /// the remote has now.
     fn fetch(&mut self, dir: &Path, remote: &str) -> Result<()>;
@@ -492,10 +497,19 @@ fn with_header(
     Ok(wrapped)
 }
 
+/// A `core.hooksPath` that names no directory, so a git call carrying it
+/// runs no hook.
+const NO_HOOKS: &str = "/nonexistent/switchboard-no-hooks";
+
 /// A `git` command with the caller's own `GIT_*` variables removed: run
-/// from a hook, those point at the hook's repository, not ours.
+/// from a hook, those point at the hook's repository, not ours. It also
+/// runs no hook: a project's hooks are for the agent's and the owner's
+/// commits, and Dispatch's own worktree adds, rebases, ref moves and
+/// pushes would otherwise fire its `post-checkout`, `pre-rebase`,
+/// `reference-transaction` and `pre-push`.
 fn git() -> Command {
     let mut cmd = command("git");
+    cmd.args(["-c", &format!("core.hooksPath={NO_HOOKS}")]);
     for (k, _) in std::env::vars_os() {
         if k.to_string_lossy().starts_with("GIT_") {
             cmd.env_remove(k);
@@ -526,12 +540,47 @@ fn output(cmd: &mut Command) -> Result<String> {
 impl Repo for GitCli {
     fn ensure_clone(&mut self, url: &str, dir: &Path) -> Result<()> {
         if dir.join(".git").exists() {
+            // A clone made before Dispatch set the hooks path gets it now.
+            // Best effort: a clone that works must still be cut from.
+            let _ = self.enable_hooks(dir);
             return Ok(());
         }
         if let Some(parent) = dir.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // Set after the clone, never on its command line, so no hook from
+        // the fetched tree runs during `git clone` itself.
         output(git().args(["clone", "--quiet", url]).arg(dir))?;
+        self.enable_hooks(dir)
+    }
+
+    fn enable_hooks(&mut self, dir: &Path) -> Result<()> {
+        if !dir.join(".git").exists() {
+            return Ok(());
+        }
+        // The clone's checkout is never updated, so a `.githooks` added
+        // upstream after the clone shows only in the fetched default branch.
+        let on_default = git_in(dir)
+            .args(["cat-file", "-e", "origin/HEAD:.githooks"])
+            .output()
+            .with_context(|| format!("git in {}", dir.display()))?
+            .status
+            .success();
+        if !on_default && !dir.join(".githooks").is_dir() {
+            return Ok(());
+        }
+        // `--local` reads the stored value, not the `-c` override `git()`
+        // adds; an owner's own setting is kept.
+        let stored = git_in(dir)
+            .args(["config", "--local", "--get", "core.hooksPath"])
+            .output()
+            .with_context(|| format!("git in {}", dir.display()))?;
+        if stored.status.success() {
+            return Ok(());
+        }
+        // Relative, so each linked worktree resolves it against its own
+        // top level and runs its own checked-out hooks.
+        output(git_in(dir).args(["config", "--local", "core.hooksPath", ".githooks"]))?;
         Ok(())
     }
 
@@ -1662,6 +1711,10 @@ impl Gate {
 #[derive(Debug, Default)]
 pub struct FakeRepo {
     pub clones: Vec<(String, PathBuf)>,
+    /// Clones `enable_hooks` was called on.
+    pub hooks_enabled: Vec<PathBuf>,
+    /// Makes the next `enable_hooks` fail with this message.
+    pub fail_hooks: Option<String>,
     pub fetched: Vec<(PathBuf, String)>,
     pub worktrees: Vec<(PathBuf, PathBuf, String, String)>,
     /// Worktrees of someone else's branch: repo, dir, branch, remote.
@@ -1902,6 +1955,13 @@ impl Repo for FakeRepo {
     fn ensure_clone(&mut self, url: &str, dir: &Path) -> Result<()> {
         std::fs::create_dir_all(dir)?;
         self.clones.push((url.to_owned(), dir.to_path_buf()));
+        Ok(())
+    }
+    fn enable_hooks(&mut self, dir: &Path) -> Result<()> {
+        if let Some(why) = self.fail_hooks.take() {
+            bail!("{why}");
+        }
+        self.hooks_enabled.push(dir.to_path_buf());
         Ok(())
     }
     fn ensure_remote(&mut self, dir: &Path, remote: &str, url: &str) -> Result<()> {
@@ -2436,6 +2496,9 @@ impl Repo for FakeRepo {
 impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     fn ensure_clone(&mut self, url: &str, dir: &Path) -> Result<()> {
         self.lock().unwrap().ensure_clone(url, dir)
+    }
+    fn enable_hooks(&mut self, dir: &Path) -> Result<()> {
+        self.lock().unwrap().enable_hooks(dir)
     }
     fn fetch(&mut self, dir: &Path, remote: &str) -> Result<()> {
         self.lock().unwrap().fetch(dir, remote)
@@ -3239,6 +3302,202 @@ mod tests {
         let mut cli = GitCli::default();
         cli.ensure_clone(origin.to_str().unwrap(), &clone).unwrap();
         clone
+    }
+
+    /// The hooks the origin in `hooked_origin_and_clone` carries: each
+    /// appends its name and working directory to the log.
+    const LOGGED_HOOKS: &[&str] = &[
+        "pre-commit",
+        "post-commit",
+        "post-checkout",
+        "reference-transaction",
+        "pre-push",
+        "pre-rebase",
+        "post-rewrite",
+    ];
+
+    /// An origin whose tree carries `.githooks` with `LOGGED_HOOKS`
+    /// writing to `log`, and Dispatch's clone of it.
+    fn hooked_origin_and_clone(root: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let origin = root.join("h-origin");
+        let hooks = origin.join(".githooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        sh(&origin, &["init", "-q", "-b", "main"]);
+        for name in LOGGED_HOOKS {
+            let path = hooks.join(name);
+            let body = format!("#!/bin/sh\necho \"{name} $(pwd)\" >> '{}'\n", log.display());
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        sh(&origin, &["add", "."]);
+        sh(&origin, &["commit", "-q", "-m", "hooks"]);
+        let clone = root.join("h-clone");
+        GitCli::default()
+            .ensure_clone(origin.to_str().unwrap(), &clone)
+            .unwrap();
+        // `rebase_onto` replays a pick as the committer and sets no
+        // identity of its own; a CI runner has none to auto-detect.
+        sh(&clone, &["config", "--local", "user.name", "t"]);
+        sh(&clone, &["config", "--local", "user.email", "t@t"]);
+        clone
+    }
+
+    /// The stored `core.hooksPath` of the clone at `dir`, if any.
+    fn stored_hooks_path(dir: &Path) -> Option<String> {
+        let out = git_in(dir)
+            .args(["config", "--local", "--get", "core.hooksPath"])
+            .output()
+            .unwrap();
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    }
+
+    /// `git commit --allow-empty` in `dir` as an agent or the owner runs
+    /// it: no override, so the clone's hooks run. The caller's `GIT_*`
+    /// are dropped, as `git()` drops them, for a test run from a hook.
+    fn plain_commit(dir: &Path) -> std::process::Output {
+        let mut cmd = command("git");
+        for (k, _) in std::env::vars_os() {
+            if k.to_string_lossy().starts_with("GIT_") {
+                cmd.env_remove(k);
+            }
+        }
+        cmd.arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(["commit", "-q", "--allow-empty", "-m", "by hand"])
+            .output()
+            .unwrap()
+    }
+
+    fn read_log(log: &Path) -> String {
+        std::fs::read_to_string(log).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_fresh_clone_gets_the_hooks_path_when_the_tree_has_githooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("hooks.log");
+        let clone = hooked_origin_and_clone(dir.path(), &log);
+        assert_eq!(stored_hooks_path(&clone).as_deref(), Some(".githooks"));
+        // Set after the clone, so no hook ran while cloning.
+        assert_eq!(read_log(&log), "");
+    }
+
+    #[test]
+    fn a_githooks_added_upstream_after_the_clone_is_found_on_the_default_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let clone = origin_and_clone(dir.path(), "p");
+        assert_eq!(stored_hooks_path(&clone), None);
+        let origin = dir.path().join("p-origin");
+        std::fs::create_dir_all(origin.join(".githooks")).unwrap();
+        std::fs::write(origin.join(".githooks/pre-commit"), "#!/bin/sh\n").unwrap();
+        sh(&origin, &["add", "."]);
+        sh(&origin, &["commit", "-q", "-m", "hooks"]);
+        let mut cli = GitCli::default();
+        cli.fetch(&clone, "origin").unwrap();
+        cli.ensure_clone(origin.to_str().unwrap(), &clone).unwrap();
+        assert_eq!(stored_hooks_path(&clone).as_deref(), Some(".githooks"));
+    }
+
+    #[test]
+    fn enable_hooks_leaves_a_directory_that_is_no_clone_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".githooks")).unwrap();
+        GitCli::default().enable_hooks(dir.path()).unwrap();
+        assert!(!dir.path().join(".git").exists());
+    }
+
+    #[test]
+    fn a_clone_without_githooks_gets_no_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let clone = origin_and_clone(dir.path(), "p");
+        assert_eq!(stored_hooks_path(&clone), None);
+    }
+
+    #[test]
+    fn an_existing_clone_is_repaired_and_a_set_value_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("hooks.log");
+        let clone = hooked_origin_and_clone(dir.path(), &log);
+        let origin = dir.path().join("h-origin");
+        let url = origin.to_str().unwrap();
+        // A clone made before Dispatch set the path.
+        sh(&clone, &["config", "--local", "--unset", "core.hooksPath"]);
+        assert_eq!(stored_hooks_path(&clone), None);
+        let mut cli = GitCli::default();
+        cli.ensure_clone(url, &clone).unwrap();
+        assert_eq!(stored_hooks_path(&clone).as_deref(), Some(".githooks"));
+        // The owner's own value is theirs.
+        sh(
+            &clone,
+            &["config", "--local", "core.hooksPath", "elsewhere"],
+        );
+        cli.ensure_clone(url, &clone).unwrap();
+        assert_eq!(stored_hooks_path(&clone).as_deref(), Some("elsewhere"));
+    }
+
+    #[test]
+    fn a_commit_in_a_lane_worktree_runs_the_projects_pre_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("hooks.log");
+        let clone = hooked_origin_and_clone(dir.path(), &log);
+        let mut cli = GitCli::default();
+        let lane = dir.path().join("wt").join("t1");
+        cli.worktree_add(&clone, &lane, "dispatch/1-x", "main")
+            .unwrap();
+        let out = plain_commit(&lane);
+        assert!(out.status.success(), "{out:?}");
+        let lane = std::fs::canonicalize(&lane).unwrap();
+        let text = read_log(&log);
+        assert!(
+            text.lines()
+                .any(|l| l == format!("pre-commit {}", lane.display())),
+            "{text}"
+        );
+
+        // The lane's own copy runs: one that fails blocks the commit.
+        let before = sh(&lane, &["rev-parse", "HEAD"]);
+        std::fs::write(lane.join(".githooks/pre-commit"), "#!/bin/sh\nexit 1\n").unwrap();
+        let out = plain_commit(&lane);
+        assert!(!out.status.success(), "{out:?}");
+        assert_eq!(sh(&lane, &["rev-parse", "HEAD"]), before);
+    }
+
+    #[test]
+    fn dispatchs_own_git_calls_run_no_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("hooks.log");
+        let clone = hooked_origin_and_clone(dir.path(), &log);
+        let origin = dir.path().join("h-origin");
+        let mut cli = GitCli::default();
+        assert_eq!(stored_hooks_path(&clone).as_deref(), Some(".githooks"));
+
+        let lane = dir.path().join("wt").join("t1");
+        cli.worktree_add(&clone, &lane, "dispatch/1-x", "main")
+            .unwrap();
+        let detached = dir.path().join("wt").join("d");
+        let main = cli.head(&clone).unwrap();
+        cli.worktree_detached(&clone, &detached, &main).unwrap();
+        cli.worktree_detached(&clone, &detached, &main).unwrap();
+
+        // A rebase that replays a pick onto a moved main.
+        sh(&lane, &["commit", "-q", "--allow-empty", "-m", "work"]);
+        sh(&origin, &["commit", "-q", "--allow-empty", "-m", "moved"]);
+        cli.fetch(&lane, "origin").unwrap();
+        assert!(cli.rebase_onto(&lane, "origin/main").unwrap());
+
+        let head = cli.head(&lane).unwrap();
+        let onto = cli.rev_parse(&lane, "origin/main").unwrap();
+        cli.set_head(&lane, &onto, &head).unwrap();
+        assert_eq!(
+            cli.push_with_lease(&lane, "origin", "dispatch/1-x", "")
+                .unwrap(),
+            Push::Pushed
+        );
+        assert_eq!(read_log(&log), "");
     }
 
     #[test]

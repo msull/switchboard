@@ -1,0 +1,36 @@
+--- set config (nothing expected)
+--- worktree add, with hooksPath
+   1 post-checkout /privateT/wt
+  14 reference-transaction /privateT/wt
+   6 reference-transaction T/clone
+--- commit in linked worktree (cwd = worktree top)
+   1 pre-commit T/wt
+   7 reference-transaction T/wt
+--- commit --amend
+   1 post-rewrite T/wt
+   1 pre-commit T/wt
+   7 reference-transaction T/wt
+--- commit from a subdirectory
+   1 pre-commit /privateT/wt
+   7 reference-transaction /privateT/wt
+--- commit-tree
+--- merge-tree --write-tree
+--- update-ref
+   3 reference-transaction T/wt
+--- checkout --detach
+   1 post-checkout T/wt
+  11 reference-transaction T/wt
+--- rebase main (lane has 2 picks)
+   1 post-checkout T/wt
+  19 reference-transaction T/wt
+--- commit with -c core.hooksPath=/nonexistent/x
+--- rebase with -c missing
+--- checkout+update-ref with -c missing
+--- worktree add with -c missing
+--- push with -c missing
+--- push with hooksPath (pre-push)
+   1 pre-push T/wt
+   3 reference-transaction T/wt
+--- hooksPath naming a missing relative dir (no error?)
+--- clone with -c hooksPath=.githooks (post-checkout runs in clone?)
+   1 post-checkout /privateT/c2
