@@ -80,5 +80,16 @@ The rule since: comments say why.
   dev-only fallback.
 - Two monitors: `screencapture -x a.png b.png` captures both; one path
   only gives the primary display.
-- Linux CI for eframe needs `libxkbcommon-dev libgtk-3-dev libssl-dev`;
-  audio adds `libasound2-dev`, whisper adds `cmake`.
+- Linux CI for eframe needs only `libxkbcommon-dev`; audio adds
+  `libasound2-dev`, whisper adds `cmake`, which the runner image ships.
+  GTK and OpenSSL were on the list for a year without anything linking
+  them (the file dialog uses the desktop portal, TLS is ring), and
+  GTK's 100-odd packages were where the Azure mirror's stalls landed.
+  The mirror also dribbles (cmake's 12 MB took over six minutes once)
+  and stalls outright: apt's acquire timeout does not end a stall where
+  the mirror holds the connection open and sends nothing (an `update`
+  sat 86 minutes). So `scripts/ci-apt.sh` installs the two small
+  packages from the image's own lists, bounds each call with `timeout`
+  and retries, and fetches the 12 MB of indexes only on a 404; the jobs
+  carry `timeout-minutes` so nothing holds a runner for the six-hour
+  default.
