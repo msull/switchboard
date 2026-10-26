@@ -10,6 +10,12 @@ publishes that section as the release notes. The format follows
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-26
+
+### Fixed
+
+- A paired device sees the screenshots of an attempt that ran with environment grants again (0.7.3 withheld them, which hid every tester screenshot); the attempt now says it ran with grants, so a client can label them.
+
 ## [0.8.0] - 2026-10-26
 
 ### Added
