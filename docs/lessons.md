@@ -84,4 +84,8 @@ The rule since: comments say why.
   `libasound2-dev`, whisper adds `cmake`. GTK and OpenSSL were on the
   list for a year without anything linking them (the file dialog uses
   the desktop portal, TLS is ring), and GTK's 100-odd packages were
-  where the Azure mirror's stalls landed.
+  where the Azure mirror's stalls landed. apt's acquire timeout does
+  not end a stall where the mirror holds the connection open and sends
+  nothing (an `update` sat 86 minutes), so `scripts/ci-apt.sh` bounds
+  each call with `timeout` and retries, and the jobs carry
+  `timeout-minutes` so nothing holds a runner for the six-hour default.

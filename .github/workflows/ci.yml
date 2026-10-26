@@ -8,20 +8,16 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# A job never needs ten minutes of Rust; the bound is for a stalled step,
+# which otherwise holds the runner for the six-hour default.
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      # Only what the lock file links: xkbcommon for the window crate,
-      # ALSA for the audio crate, cmake for the whisper build. The file
-      # dialog uses the desktop portal and TLS is ring, so no GTK or
-      # OpenSSL. A short acquire timeout with retries: the Azure mirror
-      # stalls single downloads for minutes at the 30 s default.
       - name: Install Linux build dependencies
-        run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 install -y --no-install-recommends libxkbcommon-dev libasound2-dev cmake
+        run: ./scripts/ci-apt.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -36,17 +32,11 @@ jobs:
 
   msrv:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      # Only what the lock file links: xkbcommon for the window crate,
-      # ALSA for the audio crate, cmake for the whisper build. The file
-      # dialog uses the desktop portal and TLS is ring, so no GTK or
-      # OpenSSL. A short acquire timeout with retries: the Azure mirror
-      # stalls single downloads for minutes at the 30 s default.
       - name: Install Linux build dependencies
-        run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 install -y --no-install-recommends libxkbcommon-dev libasound2-dev cmake
+        run: ./scripts/ci-apt.sh
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4

@@ -459,6 +459,7 @@ tests/live.rs            ignored: real claude / codex / Ghostty runs
 tests/gate.rs            Milestone 1 gate: real store, tmux, hooks; agents ignored
 tests/changelog_fold.rs  scripts/fold-changelog.sh on a scratch changelog: the old insertion with no fragments, the groups' order, Unreleased lines kept, fragments removed, a bad line changing nothing
 scripts/test-times.sh    every test's time, serially, through libtest's `--report-time`; the slowest ten, each binary's total, the 5 s budget
+scripts/ci-apt.sh        CI's apt step: the three Linux packages the build links, each call bounded by `timeout` and retried
 scripts/ci-test.sh       CI's test step: the workspace, then one retry of the failed tests, warning `flaky:` for each that passes on it
 scripts/bump.sh          the next version into Cargo.toml and Cargo.lock, and the changelog fragments and Unreleased section dated under it
 scripts/fold-changelog.sh  the fold bump.sh runs: `changelog.d/` fragments grouped Added, Changed, Fixed into a new version section of CHANGELOG.md, then removed; every line checked before anything is written
