@@ -477,15 +477,39 @@ const FRAMES: usize = 64;
 pub const MAX_HEAD: usize = 8 * 1024;
 pub const MAX_BODY: usize = 64 * 1024;
 
+/// The most a subscriber's inbound WebSocket frame or message may be. A
+/// device only sends `watch` and `unwatch` JSON, so anything near this
+/// is not a client of ours; the library's defaults (16 MiB a frame)
+/// would let one socket hold that much.
+const SUBSCRIBER_FRAME_MAX: usize = 16 * 1024;
+
+/// One line of the head, `None` at end of stream. `used` is what the
+/// head has taken so far; the read stops one byte past what is left of
+/// `MAX_HEAD`, so a line with no newline costs at most that much memory
+/// and is refused rather than read until the peer stops.
+fn read_head_line<R: BufRead>(reader: &mut R, used: usize) -> io::Result<Option<String>> {
+    let mut buf = Vec::new();
+    let budget = MAX_HEAD.saturating_sub(used) as u64 + 1;
+    let n = reader.by_ref().take(budget).read_until(b'\n', &mut buf)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if used + n > MAX_HEAD {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "head too large"));
+    }
+    String::from_utf8(buf)
+        .map(Some)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
 /// The head of one HTTP/1.1 request: method, target, lowercased
 /// headers, body. `None` at a clean end of stream before any byte; an
 /// oversized or malformed request is an error that closes the
 /// connection.
 fn read_request<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<RemoteRequest>> {
-    let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
+    let Some(line) = read_head_line(reader, 0)? else {
         return Ok(None);
-    }
+    };
     let mut parts = line.split_whitespace();
     let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
         return Err(io::Error::new(
@@ -496,14 +520,10 @@ fn read_request<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<RemoteR
     let mut headers: Vec<(String, String)> = Vec::new();
     let mut total = line.len();
     loop {
-        let mut h = String::new();
-        if reader.read_line(&mut h)? == 0 {
+        let Some(h) = read_head_line(reader, total)? else {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "headers cut"));
-        }
+        };
         total += h.len();
-        if total > MAX_HEAD {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "head too large"));
-        }
         let h = h.trim_end();
         if h.is_empty() {
             break;
@@ -990,8 +1010,14 @@ fn subscriber(
     shared: &Shared,
 ) -> io::Result<()> {
     stream.sock.set_nonblocking(true)?;
-    let mut ws =
-        tungstenite::WebSocket::from_raw_socket(stream, tungstenite::protocol::Role::Server, None);
+    let config = tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(SUBSCRIBER_FRAME_MAX))
+        .max_frame_size(Some(SUBSCRIBER_FRAME_MAX));
+    let mut ws = tungstenite::WebSocket::from_raw_socket(
+        stream,
+        tungstenite::protocol::Role::Server,
+        Some(config),
+    );
     loop {
         match events.recv_timeout(SUBSCRIBER_POLL) {
             Ok(text) => {
@@ -1165,6 +1191,70 @@ mod tests {
             read_request(&mut r).is_err(),
             "an oversized body is refused before it is read"
         );
+    }
+
+    /// A source that serves `prefix` and then `fill` bytes of `a`, and
+    /// counts what was taken from it.
+    struct Counting {
+        prefix: Vec<u8>,
+        fill: usize,
+        taken: usize,
+    }
+
+    impl Read for Counting {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let total = self.prefix.len() + self.fill;
+            let n = buf.len().min(total - self.taken);
+            for (i, b) in buf[..n].iter_mut().enumerate() {
+                *b = self.prefix.get(self.taken + i).copied().unwrap_or(b'a');
+            }
+            self.taken += n;
+            Ok(n)
+        }
+    }
+
+    /// The most a refused head may pull from the stream: the head budget,
+    /// the byte that proves it over, and one `BufReader` fill.
+    const HEAD_READ_MAX: usize = MAX_HEAD + 1 + 8 * 1024;
+
+    fn refused_head(prefix: &[u8]) {
+        let mut r = BufReader::new(Counting {
+            prefix: prefix.to_vec(),
+            fill: 1024 * 1024,
+            taken: 0,
+        });
+        let err = read_request(&mut r).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let taken = r.get_ref().taken;
+        assert!(taken <= HEAD_READ_MAX, "read {taken} bytes of the head");
+    }
+
+    #[test]
+    fn a_request_line_with_no_newline_stops_at_the_head_bound() {
+        refused_head(b"");
+    }
+
+    #[test]
+    fn a_header_with_no_newline_stops_at_the_head_bound() {
+        refused_head(b"GET /x HTTP/1.1\r\nX-Pad: ");
+    }
+
+    #[test]
+    fn a_head_of_exactly_the_bound_parses_and_one_byte_more_does_not() {
+        let head = |pad: usize| {
+            let mut text = b"GET /x HTTP/1.1\r\nX-Pad: ".to_vec();
+            text.extend(std::iter::repeat_n(b'a', pad));
+            text.extend_from_slice(b"\r\n\r\n");
+            text
+        };
+        let pad = MAX_HEAD - head(0).len();
+        let exact = head(pad);
+        assert_eq!(exact.len(), MAX_HEAD);
+        let mut r = BufReader::new(&exact[..]);
+        assert!(read_request(&mut r).unwrap().is_some());
+        let over = head(pad + 1);
+        let mut r = BufReader::new(&over[..]);
+        assert!(read_request(&mut r).is_err());
     }
 
     #[test]
