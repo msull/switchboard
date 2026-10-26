@@ -1,13 +1,18 @@
 #!/bin/bash
-# CI's apt step: the three packages the build links, with every apt call
-# bounded by wall clock and retried. apt's own acquire timeout does not
-# end a stall where the Azure mirror holds the connection open and sends
-# nothing (one `update` sat behind it for 86 minutes), so the bound is
-# `timeout` around the whole call; the next call usually lands on a
-# different mirror node. A healthy run takes about ten seconds.
+# CI's apt step: the two packages the build links that the runner image
+# lacks (cmake, which the whisper build needs, ships on it), with every
+# apt call bounded by wall clock and retried. The Azure mirror dribbles
+# or stalls: apt's own acquire timeout does not end a stall where the
+# mirror holds the connection open and sends nothing (one `update` sat
+# behind it for 86 minutes), and a 12 MB package once trickled through
+# three two-minute tries. So the bound is `timeout` around the whole
+# call, the packages are the two small ones, and the install reads the
+# image's own package lists first: they are days old at most, and only a
+# package that moved since the image was built (a 404) costs the 12 MB
+# index fetch. A healthy run takes a few seconds.
 set -euo pipefail
 
-packages=(libxkbcommon-dev libasound2-dev cmake)
+packages=(libxkbcommon-dev libasound2-dev)
 opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=10)
 
 bounded() {
@@ -23,5 +28,12 @@ bounded() {
     return 1
 }
 
-bounded update
-bounded install -y --no-install-recommends "${packages[@]}"
+install() {
+    bounded install -y --no-install-recommends "${packages[@]}"
+}
+
+if ! install; then
+    echo "installing from the image's lists failed; refreshing them" >&2
+    bounded update
+    install
+fi
