@@ -359,6 +359,8 @@ pub enum AppAction {
     SetFilesOpen(bool),
     /// Whether an agent's terminal window opens as it starts or resumes.
     SetOpenTerminalOnLaunch(bool),
+    /// Whether the update check runs on its own at launch and hourly.
+    SetCheckForUpdates(bool),
     /// Whether agent sessions get the Prompt Box editor as their message box.
     SetPromptBox(bool),
     /// The embedded Prompt Box's trigger word, model, and captions.
@@ -1261,6 +1263,7 @@ impl AppCore {
             | AppAction::SetExclusive(_)
             | AppAction::SetFilesOpen(_)
             | AppAction::SetOpenTerminalOnLaunch(_)
+            | AppAction::SetCheckForUpdates(_)
             | AppAction::SetPromptBox(_)
             | AppAction::SetVoiceSettings(_)
             | AppAction::StoreVoiceKey(_)
@@ -3041,6 +3044,9 @@ impl AppCore {
             AppAction::SetFilesOpen(on) => self.update_settings(out, |s| s.files_open = on),
             AppAction::SetOpenTerminalOnLaunch(on) => {
                 self.update_settings(out, |s| s.open_terminal_on_launch = on);
+            }
+            AppAction::SetCheckForUpdates(on) => {
+                self.update_settings(out, |s| s.check_for_updates = on);
             }
             AppAction::SetPromptBox(on) => self.update_settings(out, |s| s.prompt_box = on),
             AppAction::SetVoiceSettings(voice) => self.update_settings(out, |s| s.voice = voice),

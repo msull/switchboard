@@ -90,6 +90,7 @@ const EXTRA_LINES: &[&str] = &[
     "discard-to",
     "undo-discard",
     "open-terminal",
+    "update-check",
     "prompt-box",
     "theme",
     "sleep",
@@ -454,6 +455,7 @@ fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> 
         ["open-terminal", on] => {
             app.dispatch(AppAction::SetOpenTerminalOnLaunch(*on == "on"));
         }
+        ["update-check", on] => app.dispatch(AppAction::SetCheckForUpdates(*on == "on")),
         ["prompt-box", on] => app.dispatch(AppAction::SetPromptBox(*on == "on")),
         ["clone-session", name, turn] => {
             let (id, before, prompt) = turn_of(app, name, turn)?;

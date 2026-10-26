@@ -3873,6 +3873,25 @@ the bundle after the process exits, keeps the old one aside for a
 failed copy, and relaunches. A pre-release or unparsable tag is never
 offered; a bare binary or an unsigned bundle refuses to install.
 
+`Settings::check_for_updates` (on by default; a `settings.json` from
+before it reads as on, so it needs no schema step) gates only the
+scheduled check: off, the tick at launch and the hourly one do nothing,
+while Check for updates in the Settings menu still looks and a release
+it finds is offered, downloaded and installed as before. The schedule
+counts from launch and from the last check of either kind, so turning
+the setting back on checks at once unless one ran within the hour.
+
+Settings' "What's new" shows the changelog. The built-in one is
+`CHANGELOG.md` compiled in (`core::changelog`, `include_str!`), from the
+running version down; Unreleased and any section above the running
+version are left out, so nothing reads as installed that is not, and
+`changelog.d/` fragments appear only once a release folds them. While a
+release is on offer its notes come first, marked not installed, with its
+`published_at` date; they are the release body read as groups up to the
+`Built from` footer `scripts/release.sh` writes, which never shows. Only
+the newest release is fetched, so the sections between the running
+version and it appear in the view after the update installs them.
+
 ## Token and time accounting (2026-10-20)
 
 `dispatch report` and the ticket page's Usage tab show every session a

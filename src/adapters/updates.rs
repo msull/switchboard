@@ -81,6 +81,7 @@ pub fn parse_latest(json: &str) -> Result<Option<Release>, String> {
         asset_url,
         asset_name,
         digest_url,
+        published_at: value["published_at"].as_str().map(str::to_owned),
     }))
 }
 
@@ -292,6 +293,7 @@ mod tests {
 
     const LISTING: &str = r###"{
       "tag_name": "v0.3.0", "draft": false, "prerelease": false,
+      "published_at": "2026-10-26T18:04:11Z",
       "body": "## [0.3.0]\n- A thing.",
       "assets": [
         {"name": "Switchboard-0.3.0.zip.sha256", "browser_download_url": "https://x/s.sha256"},
@@ -307,6 +309,19 @@ mod tests {
         assert_eq!(release.asset_url, "https://x/s.zip");
         assert_eq!(release.digest_url.as_deref(), Some("https://x/s.sha256"));
         assert!(release.notes.contains("A thing"));
+        assert_eq!(
+            release.published_at.as_deref(),
+            Some("2026-10-26T18:04:11Z")
+        );
+    }
+
+    #[test]
+    fn a_release_without_a_publish_time_has_no_date() {
+        let undated = LISTING.replace(r#""published_at": "2026-10-26T18:04:11Z","#, "");
+        let release = parse_latest(&undated).unwrap().unwrap();
+        assert_eq!(release.published_at, None);
+        let null = LISTING.replace(r#""2026-10-26T18:04:11Z""#, "null");
+        assert_eq!(parse_latest(&null).unwrap().unwrap().published_at, None);
     }
 
     #[test]

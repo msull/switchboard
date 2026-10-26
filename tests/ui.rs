@@ -300,6 +300,7 @@ fn the_rail_offers_a_newer_release_and_the_settings_menu_names_the_version() {
         asset_url: "https://x/Switchboard.zip".into(),
         asset_name: "Switchboard.zip".into(),
         digest_url: None,
+        published_at: None,
     };
     harness
         .state_mut()
@@ -648,6 +649,98 @@ fn a_project_moves_to_another_workspace_from_its_board() {
     // way to the switchboard.
     assert_eq!(harness.query_all_by_label("alpha").count(), 0);
     assert!(harness.query_all_by_label("beta").count() > 0);
+}
+
+#[test]
+fn the_settings_menu_turns_the_scheduled_update_check_off() {
+    let (mut harness, _) = harness();
+    assert!(harness.state().core().settings().check_for_updates);
+    click(&mut harness, "Settings");
+    harness.get_by_label("What's new");
+    click(&mut harness, "Check for updates automatically");
+    assert!(actions(&harness).contains(&AppAction::SetCheckForUpdates(false)));
+    assert!(!harness.state().core().settings().check_for_updates);
+}
+
+/// A harness tall enough that the Settings menu's last row is on screen.
+fn tall_harness() -> Harness<'static, SwitchboardApp> {
+    let services = fake_services(
+        FakeOpener::default(),
+        FakeSecrets::default(),
+        FakeHost::default(),
+    );
+    harness_sized(services, egui::vec2(1200.0, 1400.0)).0
+}
+
+/// The running version's heading as the dialog writes it.
+fn running_heading() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let sections =
+        switchboard::core::changelog::parse_changelog(switchboard::core::changelog::BUILT_IN);
+    let date = sections
+        .iter()
+        .find(|s| s.version == version)
+        .and_then(|s| s.date.clone())
+        .expect("the running version has a dated section");
+    format!("{version} · {date}")
+}
+
+#[test]
+fn whats_new_shows_a_found_release_above_the_running_version() {
+    let mut harness = tall_harness();
+    let release = switchboard::ports::updates::Release {
+        version: "99.0.0".into(),
+        notes: "### Fixed\n\n- A found fix.\n\nBuilt from abc. Install by hand:\n".into(),
+        asset_url: "https://x/Switchboard.zip".into(),
+        asset_name: "Switchboard.zip".into(),
+        digest_url: None,
+        published_at: Some("2099-01-02T03:04:05Z".into()),
+    };
+    harness
+        .state_mut()
+        .dispatch(AppAction::UpdateChecked(Ok(Some(release))));
+    harness.run_steps(2);
+    click(&mut harness, "Settings");
+    click(&mut harness, "What's new");
+    let found = harness.get_by_label("99.0.0 · 2099-01-02").rect().top();
+    harness.get_by_label("NOT INSTALLED");
+    harness.get_by_label("•  A found fix.");
+    assert_eq!(harness.query_all_by_label_contains("Built from").count(), 0);
+    let running = harness
+        .get_by_label(running_heading().as_str())
+        .rect()
+        .top();
+    assert!(found < running, "the found release comes first");
+    harness.get_by_label("RUNNING");
+    let mut fixed: Vec<f32> = harness
+        .query_all_by_label("FIXED")
+        .map(|n| n.rect().top())
+        .collect();
+    fixed.sort_by(f32::total_cmp);
+    assert!(fixed.len() >= 2, "{fixed:?}");
+    assert!(found < fixed[0] && fixed[0] < running && running < fixed[1]);
+    // A window just shown takes a pointer click only once it has
+    // settled, a few frames on.
+    harness.run_steps(10);
+    click(&mut harness, "Close");
+    assert!(!harness.state().ui_state.whats_new_dialog);
+    assert_eq!(harness.query_all_by_label("RUNNING").count(), 0);
+}
+
+#[test]
+fn whats_new_with_nothing_found_shows_only_the_built_in_changelog() {
+    let mut harness = tall_harness();
+    click(&mut harness, "Settings");
+    click(&mut harness, "What's new");
+    harness.get_by_label(running_heading().as_str());
+    harness.get_by_label("RUNNING");
+    assert_eq!(harness.query_all_by_label("NOT INSTALLED").count(), 0);
+    assert_eq!(
+        harness
+            .query_all_by_label_contains("Earlier changes since your version")
+            .count(),
+        0
+    );
 }
 
 #[test]

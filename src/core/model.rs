@@ -164,6 +164,10 @@ pub struct Settings {
     /// Named environment sets, granted to projects, sessions and the
     /// Dispatch runner and resolved only by `switchboard-env`.
     pub env_sets: Vec<EnvSet>,
+    /// Look for a newer release on a schedule: once the app has
+    /// settled, then hourly. Off, only "Check for updates" looks; a
+    /// file written before this field existed reads as on.
+    pub check_for_updates: bool,
 }
 
 /// A page (not a session) in a window of its own.
@@ -199,6 +203,7 @@ impl Default for Settings {
             dispatch_runner: None,
             dispatch_window: None,
             env_sets: Vec::new(),
+            check_for_updates: true,
         }
     }
 }

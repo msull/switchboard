@@ -1,6 +1,7 @@
 //! Deterministic application core: no egui, no threads, no I/O.
 
 pub mod action;
+pub mod changelog;
 mod control;
 mod controller;
 mod definitions;
