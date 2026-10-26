@@ -1,0 +1,1 @@
+Fixed: A paired device sees the screenshots of an attempt that ran with environment grants again (0.7.3 withheld them, which hid every tester screenshot); the attempt now says it ran with grants, so a client can label them.

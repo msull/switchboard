@@ -4882,8 +4882,11 @@ fn a_tickets_long_body_reaches_a_device_whole() {
     );
 }
 
+/// A tester's screenshots reach the device whether or not the try ran
+/// with grants (the client pipeline's always does); the attempt says
+/// so, and a client labels them rather than losing them.
 #[test]
-fn an_image_of_an_attempt_that_ran_with_grants_is_withheld() {
+fn an_image_of_an_attempt_that_ran_with_grants_is_served_and_the_attempt_says_so() {
     let mut status = tickets_status();
     status.tickets[1].attempts[0].checks.as_mut().unwrap().env = true;
     let mut port = port_dispatching(status);
@@ -4891,13 +4894,15 @@ fn an_image_of_an_attempt_that_ran_with_grants_is_withheld() {
     let shot = file_key_named(&mut port, &token, "shot.png");
     let read = format!("/api/v1/dispatch/tickets/t1/files/{shot}");
     let (status, reply) = get(&mut port, &read, Some(&token));
-    assert_eq!((status, code(&reply)), (403, "withheld"), "{reply}");
-    // The same attempt without grants sends it.
-    port.app
-        .dispatch(AppAction::DispatchStatus(Some(tickets_status())));
-    let (status, reply) = get(&mut port, &read, Some(&token));
     assert_eq!(status, 200, "{reply}");
     assert_eq!(reply["body"]["media"], "image/png");
+    let (_, ticket) = get(&mut port, "/api/v1/dispatch/tickets/t1", Some(&token));
+    assert_eq!(ticket["body"]["attempts"][0]["env"], true, "{ticket}");
+    // The same attempt without grants is unmarked.
+    port.app
+        .dispatch(AppAction::DispatchStatus(Some(tickets_status())));
+    let (_, ticket) = get(&mut port, "/api/v1/dispatch/tickets/t1", Some(&token));
+    assert_eq!(ticket["body"]["attempts"][0]["env"], false, "{ticket}");
 }
 
 /// A port whose `shot.png` evidence is `bytes` at a path of its own,
