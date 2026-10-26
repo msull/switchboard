@@ -10821,6 +10821,42 @@ mod dispatch_page {
         assert_eq!(core.dispatch(read, Clock::at(11)).len(), 1, "a click");
     }
 
+    /// A re-read refused because the file grew past the bound drops the
+    /// text held for it, so the page shows why rather than an old copy.
+    #[test]
+    fn an_artifact_refused_as_too_large_drops_its_held_text() {
+        let mut core = connected();
+        let path = std::path::PathBuf::from("/dispatch/t1/investigate/1/root/checks.log");
+        let read = AppAction::DispatchReadArtifact {
+            ticket: "t1".into(),
+            path: path.clone(),
+        };
+        let replied = |result| AppAction::DispatchReplied {
+            body: Body::Artifact {
+                ticket: "t1".into(),
+                path: path.clone(),
+            },
+            result,
+        };
+        let text = |core: &AppCore| core.dispatch_state().artifacts.get(&path).cloned();
+        core.dispatch(read.clone(), Clock::at(1));
+        core.dispatch(
+            replied(Ok(Reply::Artifact { text: "v1".into() })),
+            Clock::at(2),
+        );
+        assert_eq!(text(&core).as_deref(), Some("v1"));
+
+        core.dispatch(read, Clock::at(3));
+        let reason = dispatch_control::too_large_reason(&path, 900_000);
+        core.dispatch(replied(Ok(Reply::failed(reason.clone()))), Clock::at(4));
+        assert_eq!(text(&core), None);
+        assert!(!core.dispatch_state().artifacts_at.contains_key(&path));
+        assert_eq!(
+            core.artifact_read(&path).and_then(|r| r.failed.as_deref()),
+            Some(reason.as_str())
+        );
+    }
+
     #[test]
     fn a_secret_artifact_is_never_due_for_a_read() {
         let core = connected();

@@ -248,7 +248,8 @@ pub struct FakeDispatch {
     /// The paths a single-ticket reply carries.
     pub paths: PathsView,
     /// The text an artifact read answers, by path; any other path is
-    /// `no such file`.
+    /// `no such file`, and a text over `FILE_TEXT_MAX` is refused with
+    /// its size, as Dispatch refuses it.
     pub artifacts: HashMap<PathBuf, String>,
     /// What a usage read answers, by ticket; any other ticket is
     /// answered as a runner from before usage was served.
@@ -256,6 +257,18 @@ pub struct FakeDispatch {
 }
 
 impl FakeDispatch {
+    /// The text held for `path`, refused with its size past the bound
+    /// as Dispatch refuses it, else `no such file`.
+    fn artifact_reply(&self, path: &Path) -> DispatchReply {
+        match self.artifacts.get(path) {
+            None => DispatchReply::failed("no such file"),
+            Some(text) if text.len() as u64 > dispatch_control::FILE_TEXT_MAX => {
+                DispatchReply::failed(dispatch_control::too_large_reason(path, text.len() as u64))
+            }
+            Some(text) => DispatchReply::Artifact { text: text.clone() },
+        }
+    }
+
     /// The usage set for `ticket`, else the answer of a runner from
     /// before usage was served.
     fn usage_reply(&self, ticket: &str) -> DispatchReply {
@@ -314,10 +327,7 @@ impl DispatchPort for FakeDispatch {
                 })
             }
             DispatchBody::Usage { ticket } => self.usage_reply(ticket),
-            DispatchBody::Artifact { path, .. } => self.artifacts.get(path).map_or_else(
-                || DispatchReply::failed("no such file"),
-                |text| DispatchReply::Artifact { text: text.clone() },
-            ),
+            DispatchBody::Artifact { path, .. } => self.artifact_reply(path),
             DispatchBody::Decide {
                 ticket, decision, ..
             } => status

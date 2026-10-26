@@ -1496,8 +1496,14 @@ impl AppCore {
                 }
             }
             // The page says why under the artifact's name; a notes file
-            // not written yet is no reason for a notice.
+            // not written yet is no reason for a notice. A file grown past
+            // the bound drops the text held for it, so the page shows the
+            // refusal rather than an old copy above it.
             (Body::Artifact { path, .. }, Ok(Reply::Failed { reason })) => {
+                if dispatch_control::too_large_len(&reason).is_some() {
+                    self.dispatch.artifacts.remove(&path);
+                    self.dispatch.artifacts_at.remove(&path);
+                }
                 self.dispatch.artifact_reads.entry(path).or_default().failed = Some(reason);
             }
             (_, Err(e)) => {

@@ -7,7 +7,7 @@
 //! loop and a request never interleave inside a record.
 
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,8 +16,9 @@ use std::thread::JoinHandle;
 
 use anyhow::{Context, Result, bail};
 use dispatch_control::{
-    AttemptView, Body, DecisionView, EventView, EventsView, LaneFile, LaneView, PathsView,
-    PlanRevision, PlanRoundView, ProjectView, Reply, Request, SOCKET_FILE, Status, TicketView,
+    AttemptView, Body, DecisionView, EventView, EventsView, FILE_TEXT_MAX, LaneFile, LaneView,
+    PathsView, PlanRevision, PlanRoundView, ProjectView, Reply, Request, SOCKET_FILE, Status,
+    TicketView, too_large_reason,
 };
 
 use crate::epoch_ms;
@@ -103,21 +104,26 @@ impl Handler {
                 if let Some(name) = t.secret_at(&file) {
                     bail!("{name} is secret; Dispatch never reads it");
                 }
-                // An agent fills its evidence directory with whatever it
-                // likes, so a file there is read only up to a bound.
-                if under_evidence(&t, &file) {
-                    let len = fs::metadata(&file)
-                        .with_context(|| format!("read {}", file.display()))?
-                        .len();
-                    if len > EVIDENCE_TEXT_MAX {
-                        bail!(
-                            "{} is {len} bytes, over the {EVIDENCE_TEXT_MAX} shown inline; open it instead",
-                            path.display()
-                        );
-                    }
-                }
-                let text = fs::read_to_string(&file)
+                // An agent fills its directories with whatever it likes,
+                // so every file is read only up to the bound, and no more
+                // than one byte past it is ever held. `Read::take(&f, ..)`
+                // borrows the file, so `f` is still ours to ask its length.
+                let f =
+                    fs::File::open(&file).with_context(|| format!("read {}", file.display()))?;
+                let mut buf = Vec::new();
+                Read::take(&f, FILE_TEXT_MAX + 1)
+                    .read_to_end(&mut buf)
                     .with_context(|| format!("read {}", file.display()))?;
+                let read = buf.len() as u64;
+                if read > FILE_TEXT_MAX {
+                    // Report the real size; the file may have grown since the read.
+                    let len = f.metadata().map_or(read, |m| m.len().max(read));
+                    bail!("{}", too_large_reason(path, len));
+                }
+                // The length is checked first, so a character cut at the
+                // bound never reaches this conversion.
+                let text =
+                    String::from_utf8(buf).with_context(|| format!("read {}", file.display()))?;
                 Reply::Artifact { text }
             }
             Body::Decide {
@@ -736,21 +742,6 @@ pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
     }
 }
 
-/// The most of an evidence file `Body::Artifact` reads inline.
-pub const EVIDENCE_TEXT_MAX: u64 = 1024 * 1024;
-
-/// Whether `file`, already canonical, lies under one of the ticket's
-/// evidence directories.
-fn under_evidence(t: &crate::ticket::Ticket, file: &Path) -> bool {
-    t.attempts
-        .iter()
-        .filter_map(|a| a.evidence.as_ref())
-        .any(|e| {
-            let dir = e.dir.canonicalize().unwrap_or_else(|_| e.dir.clone());
-            file.starts_with(dir)
-        })
-}
-
 /// An evidence directory's recorded files, each with its absolute path.
 fn evidence_views(ev: &crate::ticket::Evidence) -> Vec<dispatch_control::EvidenceView> {
     ev.files
@@ -1237,7 +1228,7 @@ slots = 1
     }
 
     #[test]
-    fn evidence_reads_inline_up_to_a_bound_and_other_artifacts_do_not() {
+    fn evidence_reads_inline_up_to_the_bound() {
         let dir = tempfile::tempdir().unwrap();
         let mut h = handler(dir.path());
         let (id, ev) = with_evidence(&mut h);
@@ -1248,7 +1239,7 @@ slots = 1
                 text: "# steps".into()
             }
         );
-        let big = usize::try_from(EVIDENCE_TEXT_MAX).unwrap() + 1;
+        let big = usize::try_from(FILE_TEXT_MAX).unwrap() + 1;
         fs::write(ev.join("big.txt"), "x".repeat(big)).unwrap();
         let refused = read(&mut h, &id, ev.join("big.txt"));
         assert!(
@@ -1264,17 +1255,6 @@ slots = 1
             read(&mut h, &id, ev.join("out.md")),
             Reply::Failed { .. }
         ));
-        // A checks log is not evidence: read whole, past both bounds.
-        let log = h
-            .runner
-            .data
-            .ticket_dir(&id)
-            .join("investigate/1/root/checks.log");
-        fs::write(&log, "y".repeat(big)).unwrap();
-        let Reply::Artifact { text } = read(&mut h, &id, log) else {
-            panic!("a checks log reads")
-        };
-        assert_eq!(text.len(), big);
     }
 
     /// A close through the port: only the intent in the reply, the

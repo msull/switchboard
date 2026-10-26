@@ -1692,13 +1692,17 @@ impl SwitchboardApp {
             // the port's current revision, as every other JSON read does.
             Ok((_, body)) if matches!(key, ContentKey::TicketText(..)) => {
                 if let Some(reply) = reply {
-                    let cap = match &key {
-                        ContentKey::TicketText(_, TicketPart::Detail) => NOTES_CAP_ALONE,
-                        ContentKey::TicketText(_, TicketPart::File(_)) => FILE_CAP,
-                        _ => STRING_CAP,
+                    // Named per read: an event's `text` in the detail is
+                    // a short string, a file's `text` is the file.
+                    let longs: &[(&str, usize)] = match &key {
+                        ContentKey::TicketText(_, TicketPart::Detail) => {
+                            &[("notes", LONG_TEXT_CAP), ("body", LONG_TEXT_CAP)]
+                        }
+                        ContentKey::TicketText(_, TicketPart::File(_)) => &[("text", FILE_CAP)],
+                        _ => &[],
                     };
                     let label = format!("{} {}", key.kind(), key.id());
-                    let _ = reply.try_send(self.bounded_reply(&label, body, cap));
+                    let _ = reply.try_send(self.bounded_reply(&label, body, longs));
                 }
             }
             Ok((source, body)) => {
@@ -2420,7 +2424,7 @@ impl SwitchboardApp {
             return bad("answer is the option chosen, or the options joined by commas");
         }
         let note = field("note").filter(|n| !n.is_empty()).map(str::to_owned);
-        if note.as_ref().is_some_and(|n| n.len() > NOTES_CAP_ALONE) {
+        if note.as_ref().is_some_and(|n| n.len() > LONG_TEXT_CAP) {
             return bad("the note is over 64 KiB");
         }
         let Some(d) = t.decisions.iter().find(|d| d.id == decision) else {
@@ -2541,7 +2545,16 @@ impl SwitchboardApp {
             }
             return;
         }
+        // Dispatch refuses a file over the bound before reading it; a
+        // device hears that as the worker's own refusal would read.
         let answer = match (body, result) {
+            (Body::Artifact { .. }, Ok(Reply::Failed { reason }))
+                if let Some(len) = dispatch_control::too_large_len(reason) =>
+            {
+                let (status, code, reason) = content::ContentError::TooLarge(len).refusal();
+                self.count_refusal(code);
+                RemoteReply::new(status, self.error_json(code, &reason), true)
+            }
             (_, Ok(Reply::Failed { reason })) => {
                 let (status, code) = if reason.starts_with("no such") {
                     (404, "not_found")
@@ -2721,25 +2734,35 @@ impl SwitchboardApp {
             "media": crate::core::tickets::image_media(path).unwrap_or("application/octet-stream"),
             "data": base64::engine::general_purpose::STANDARD.encode(bytes),
         });
-        self.remote_json(request, value, BODY_CAP)
+        self.remote_json(request, value, &[])
     }
 
-    /// A JSON body for a device: strings bounded, the envelope put
-    /// round it, and a body over the cap refused rather than cut.
+    /// A JSON body for a device: strings bounded, the fields in `longs`
+    /// to their own caps, the envelope put round it, and a body over the
+    /// cap refused rather than cut.
     fn remote_json(
         &self,
         request: &RemoteRequest,
         value: serde_json::Value,
-        cap: usize,
+        longs: &[(&str, usize)],
     ) -> RemoteReply {
-        self.bounded_reply(&format!("{} {}", request.method, request.path), value, cap)
+        self.bounded_reply(
+            &format!("{} {}", request.method, request.path),
+            value,
+            longs,
+        )
     }
 
     /// The half of [`Self::remote_json`] after any mask: strings
     /// bounded, the envelope, and a body over the cap refused; `label`
     /// names the read in the log.
-    fn bounded_reply(&self, label: &str, mut value: serde_json::Value, cap: usize) -> RemoteReply {
-        bound_strings(&mut value, cap);
+    fn bounded_reply(
+        &self,
+        label: &str,
+        mut value: serde_json::Value,
+        longs: &[(&str, usize)],
+    ) -> RemoteReply {
+        bound_strings(&mut value, longs);
         let out = self.envelope(200, &value, true);
         if out.body.len() > BODY_CAP {
             log::warn!("remote: {label} is {} bytes, over the cap", out.body.len());
@@ -3233,7 +3256,7 @@ impl SwitchboardApp {
             return Served::Now(self.remote_subscribe(request, device.id, subscriber));
         }
         let notes_cap = if matches!(segments.as_slice(), ["sessions", _]) {
-            NOTES_CAP_ALONE
+            LONG_TEXT_CAP
         } else {
             STRING_CAP
         };
@@ -3809,7 +3832,7 @@ impl SwitchboardApp {
             "limits": {
                 "body_bytes": BODY_CAP,
                 "string_bytes": STRING_CAP,
-                "notes_bytes": NOTES_CAP_ALONE,
+                "notes_bytes": LONG_TEXT_CAP,
                 "screen_lines": SCREEN_LINES_CAP,
                 "run_lines": RUN_LINES_CAP,
                 "conversation_turns": PAGE_TURNS_CAP,
@@ -3981,7 +4004,7 @@ impl SwitchboardApp {
         if let serde_json::Value::Object(map) = &mut value {
             map.remove("reply");
         }
-        self.remote_json(request, value, notes_cap)
+        self.remote_json(request, value, &[("notes", notes_cap)])
     }
 
     /// A content reply at the revision its key holds.
@@ -4568,7 +4591,9 @@ const NAME_CAP: usize = 128;
 const DICTATION_EVENTS_CAP: usize = 256;
 /// How often the drafts are fingerprinted for `changed` events.
 const DRAFT_PASS_EVERY: Duration = Duration::from_millis(150);
-const NOTES_CAP_ALONE: usize = 64 * 1024;
+/// The most of a session's notes, or a ticket's notes and body, read
+/// alone.
+const LONG_TEXT_CAP: usize = 64 * 1024;
 /// The most of a ticket's file a device reads as text: a plan or a
 /// review's findings run long, and a device shows them whole.
 const FILE_CAP: usize = 256 * 1024;
@@ -4610,22 +4635,24 @@ fn body_ticket(body: &Body) -> Option<&str> {
     }
 }
 
-/// Cut every string in `value` to its cap, `notes` to `notes_cap` and
-/// the rest to `STRING_CAP`, naming each cut field in a `truncated`
-/// list on its object, so no field leaves unbounded and a client can
-/// tell a short value from a cut one.
-fn bound_strings(value: &mut serde_json::Value, notes_cap: usize) {
+/// Cut every string in `value` to its cap, a field named in `longs` to
+/// the cap beside its name, at any depth, and the rest to `STRING_CAP`,
+/// naming each cut field in a `truncated` list on its object, so no
+/// field leaves unbounded and a client can tell a short value from a
+/// cut one. The table is per read because one name means different
+/// things in different replies: a file's `text` is the file, an event's
+/// is a line.
+fn bound_strings(value: &mut serde_json::Value, longs: &[(&str, usize)]) {
     match value {
         serde_json::Value::Object(map) => {
             let mut cut = Vec::new();
             for (name, field) in map.iter_mut() {
                 match field {
                     serde_json::Value::String(s) => {
-                        let cap = if name == "notes" {
-                            notes_cap
-                        } else {
-                            STRING_CAP
-                        };
+                        let cap = longs
+                            .iter()
+                            .find(|(long, _)| long == name)
+                            .map_or(STRING_CAP, |&(_, cap)| cap);
                         if s.len() > cap {
                             let mut end = cap;
                             while !s.is_char_boundary(end) {
@@ -4635,7 +4662,7 @@ fn bound_strings(value: &mut serde_json::Value, notes_cap: usize) {
                             cut.push(name.clone());
                         }
                     }
-                    other => bound_strings(other, notes_cap),
+                    other => bound_strings(other, longs),
                 }
             }
             if !cut.is_empty() {
@@ -4644,7 +4671,7 @@ fn bound_strings(value: &mut serde_json::Value, notes_cap: usize) {
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                bound_strings(item, notes_cap);
+                bound_strings(item, longs);
             }
         }
         _ => {}
@@ -4666,6 +4693,41 @@ mod tests {
     use crate::core::{AppAction, ControlAction, Launch};
     use crate::core::{RECORD_TOKEN_ENV, token_hash};
     use crate::ports::host::SpawnSpec;
+
+    /// A ticket read alone keeps its notes and body to the long cap,
+    /// while a `text` in the same reply, an event's, stays short.
+    #[test]
+    fn bound_strings_gives_the_long_cap_only_to_the_fields_named() {
+        let long = "n".repeat(super::LONG_TEXT_CAP);
+        let mut value = serde_json::json!({
+            "notes": long.clone(),
+            "body": long.clone(),
+            "events": [{ "text": long.clone() }],
+        });
+        super::bound_strings(
+            &mut value,
+            &[
+                ("notes", super::LONG_TEXT_CAP),
+                ("body", super::LONG_TEXT_CAP),
+            ],
+        );
+        assert_eq!(value["notes"], long.as_str());
+        assert_eq!(value["body"], long.as_str());
+        assert!(value["truncated"].is_null(), "{}", value["truncated"]);
+        let event = &value["events"][0];
+        assert_eq!(event["text"].as_str().unwrap().len(), super::STRING_CAP);
+        assert_eq!(event["truncated"], serde_json::json!(["text"]));
+    }
+
+    /// With no table, as the ticket list is bounded, every string is
+    /// cut to the short cap.
+    #[test]
+    fn bound_strings_with_no_table_cuts_every_string_short() {
+        let mut value = serde_json::json!({ "body": "b".repeat(20 * 1024) });
+        super::bound_strings(&mut value, &[]);
+        assert_eq!(value["body"].as_str().unwrap().len(), super::STRING_CAP);
+        assert_eq!(value["truncated"], serde_json::json!(["body"]));
+    }
 
     /// Refusals are counted per cause and come out as one line each
     /// once a minute has passed since the first, then start again.

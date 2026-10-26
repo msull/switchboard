@@ -1,0 +1,1 @@
+Fixed: A ticket's file reaches a device up to 256 KiB and its body up to 64 KiB instead of being cut at 4 KiB; a ticket file over 768 KiB is refused before it is read (evidence files, previously 1 MiB, now share that bound).
