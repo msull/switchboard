@@ -3852,6 +3852,15 @@ Built so far:
   stable reason prefix; the port maps that refusal to `too_large`
   (413, naming source bytes), and the Mac's page drops the text it
   held and says `Not read:` with the size.
+- Evidence image whole (2026-10-26): the image route named no long
+  field, so an evidence image was cut at 4 KiB of base64 (3 KiB of
+  bytes); its `data` now takes the body cap, an image up to 700 KiB is
+  sent whole, and the length is checked again after the read so a file
+  that grew past the limit gets the documented 413 `too_large`.
+  `tests/remote.rs` reads a 200 KiB image and one at the limit whole
+  and refuses one a byte over. Known gaps: the evidence path is read as
+  Dispatch's status names it, with no containment check in the core; a
+  real runner's image and a paired device were not run.
 
 ## Versioning and updates (2026-10-15)
 

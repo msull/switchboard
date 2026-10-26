@@ -4899,3 +4899,73 @@ fn an_image_of_an_attempt_that_ran_with_grants_is_withheld() {
     assert_eq!(status, 200, "{reply}");
     assert_eq!(reply["body"]["media"], "image/png");
 }
+
+/// A port whose `shot.png` evidence is `bytes` at a path of its own,
+/// so tests running in parallel never share the file.
+fn port_with_a_shot_of(bytes: &[u8], name: &str) -> Port {
+    let mut status = tickets_status();
+    let path = format!("/tmp/switchboard-remote-tests/{name}.png");
+    std::fs::create_dir_all("/tmp/switchboard-remote-tests").unwrap();
+    std::fs::write(&path, bytes).unwrap();
+    let shot = status.tickets[1].attempts[0]
+        .evidence
+        .iter_mut()
+        .find(|e| e.rel == "shot.png")
+        .unwrap();
+    shot.path = path.into();
+    port_dispatching(status)
+}
+
+/// `len` bytes: a PNG signature and then a pattern that does not repeat
+/// soon, so a cut or shifted copy cannot compare equal.
+fn shot_bytes(len: usize) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend((0..len - bytes.len()).map(|i| u8::try_from(i * 31 % 251).unwrap()));
+    bytes
+}
+
+/// The `shot.png` evidence of `bytes` as a device reads it.
+fn shot_read(bytes: &[u8], name: &str) -> (u16, serde_json::Value) {
+    let mut port = port_with_a_shot_of(bytes, name);
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let shot = file_key_named(&mut port, &token, "shot.png");
+    get(
+        &mut port,
+        &format!("/api/v1/dispatch/tickets/t1/files/{shot}"),
+        Some(&token),
+    )
+}
+
+fn assert_shot_whole(bytes: &[u8], status: u16, reply: &serde_json::Value) {
+    use base64::Engine as _;
+    assert_eq!(status, 200, "{}", code(reply));
+    assert_eq!(reply["body"]["media"], "image/png");
+    assert!(
+        reply["body"]["truncated"].is_null(),
+        "{}",
+        reply["body"]["truncated"]
+    );
+    let data = reply["body"]["data"].as_str().unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .unwrap();
+    assert!(decoded == bytes, "decoded {} bytes", decoded.len());
+}
+
+#[test]
+fn an_evidence_image_of_a_realistic_size_reaches_a_device_whole() {
+    let bytes = shot_bytes(200 * 1024);
+    let (status, reply) = shot_read(&bytes, "shot-realistic");
+    assert_shot_whole(&bytes, status, &reply);
+}
+
+#[test]
+fn an_evidence_image_at_the_limit_is_served_and_one_byte_over_is_refused() {
+    let bytes = shot_bytes(700 * 1024);
+    let (status, reply) = shot_read(&bytes, "shot-at-limit");
+    assert_shot_whole(&bytes, status, &reply);
+
+    let bytes = shot_bytes(700 * 1024 + 1);
+    let (status, reply) = shot_read(&bytes, "shot-over-limit");
+    assert_eq!((status, code(&reply)), (413, "too_large"), "{reply}");
+}

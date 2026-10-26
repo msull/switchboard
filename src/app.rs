@@ -2706,35 +2706,44 @@ impl SwitchboardApp {
 
     /// An evidence image as base64 with its media type, read from the
     /// disk here: the file is one the runner recorded under the ticket,
-    /// and the app opens the same path for the owner on the Mac.
+    /// and the app opens the same path for the owner on the Mac. The
+    /// base64 is a long field up to the body cap, and the length is
+    /// checked again after the read because the file can grow between
+    /// the stat and the read.
     fn remote_ticket_image(
         &self,
         request: &RemoteRequest,
         file: &crate::core::tickets::TicketFile,
         path: &Path,
     ) -> RemoteReply {
-        let len = match std::fs::metadata(path) {
-            Ok(m) => m.len(),
-            Err(_) => return self.refuse(request, 404, "not_found", "the file is gone", true),
-        };
-        if len > IMAGE_CAP {
-            return self.refuse(
+        let too_large = || {
+            self.refuse(
                 request,
                 413,
                 "too_large",
                 "the image is over what the port serves; open it on the host",
                 true,
-            );
+            )
+        };
+        let len = match std::fs::metadata(path) {
+            Ok(m) => m.len(),
+            Err(_) => return self.refuse(request, 404, "not_found", "the file is gone", true),
+        };
+        if len > IMAGE_CAP {
+            return too_large();
         }
         let Ok(bytes) = std::fs::read(path) else {
             return self.refuse(request, 404, "not_found", "the file is gone", true);
         };
+        if bytes.len() as u64 > IMAGE_CAP {
+            return too_large();
+        }
         let value = serde_json::json!({
             "key": file.key,
             "media": crate::core::tickets::image_media(path).unwrap_or("application/octet-stream"),
             "data": base64::engine::general_purpose::STANDARD.encode(bytes),
         });
-        self.remote_json(request, value, &[])
+        self.remote_json(request, value, &[("data", BODY_CAP)])
     }
 
     /// A JSON body for a device: strings bounded, the fields in `longs`
