@@ -940,15 +940,21 @@ mod tests {
         let Some(s) = server() else { return };
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("typed.txt");
+        let ready = dir.path().join("ready");
         let id = HostId("long".into());
         s.host
             .spawn(&SpawnSpec {
                 command: Some(vec![
                     "/bin/sh".into(),
                     "-c".into(),
-                    // Canonical mode caps a line at 1024 bytes; a TUI turns it
-                    // off, and so does this.
-                    format!("stty -icanon; cat > {}", out.display()),
+                    // Canonical mode caps a line's length; a TUI turns it
+                    // off, and so does this. The test needs it off before
+                    // the text arrives, so the pane says when `stty` has run.
+                    format!(
+                        "stty -icanon; echo ok > {}; cat > {}",
+                        ready.display(),
+                        out.display()
+                    ),
                 ]),
                 ..shell_spec("long", dir.path(), None)
             })
@@ -959,11 +965,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.len() > 20_000);
+        poll_on(Some(&s), "the pane's stty", &mut || ready.exists());
+        // Multi-line text goes through `paste`, not `send-keys`, so this
+        // covers the paste path.
         s.host.write_line(&id, &text).unwrap();
         // `cat` writes as lines complete; the Enter after the text ends the
-        // last one.
+        // last one. The text is a little over 20 000 bytes, so a further
+        // 20 s on top of `poll_on`'s 20 s (a millisecond a byte) keeps a slow
+        // but progressing paste from being cut off.
         let mut last = String::new();
-        let arrived = try_poll_on(Some(&s), &mut || {
+        let arrived = poll_for(Some(&s), Duration::from_secs(40), &mut || {
             last = std::fs::read_to_string(&out).unwrap_or_default();
             last.trim_end() == text.trim_end()
         });
