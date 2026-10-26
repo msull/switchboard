@@ -7546,3 +7546,53 @@ fn remote_devices_dialog_opens_pairing_and_revokes_a_device() {
     click(&mut harness, "Close");
     assert!(harness.state().ui_state.remote_dialog.is_none());
 }
+
+/// While pairing is open the dialog lists each address locked out of
+/// it, and says what locks one out; with none locked, no such line.
+#[test]
+fn remote_devices_dialog_lists_the_addresses_locked_out_of_pairing() {
+    use switchboard::ports::remote::{Identity, Listen, Scope};
+    let (mut harness, _) = harness();
+    harness.state_mut().dispatch(AppAction::IdentityLoaded {
+        identity: Identity {
+            schema_version: 1,
+            server_id: uuid::Uuid::new_v4(),
+            server_name: "Studio".into(),
+            certificate: "MIIB".into(),
+            spki_sha256: "cd".repeat(32),
+            created: at(0),
+            listen: Listen::default(),
+        },
+        devices: Vec::new(),
+        rotated: false,
+    });
+    harness.state_mut().dispatch(AppAction::OpenPairing {
+        code: "ABCD2345".into(),
+        scope: Scope::Read,
+    });
+    let locked = "Locked out: 192.168.1.9 (3 failed attempts)";
+    click(&mut harness, "Settings");
+    click(&mut harness, "Remote devices…");
+    harness.run_steps(2);
+    harness.get_by_label(
+        "Scan, or type the key and the code. Grants read scope. Open for five minutes. An address that sends three wrong codes is locked out until you reopen pairing.",
+    );
+    assert!(harness.query_by_label(locked).is_none(), "none locked yet");
+    let ip: std::net::IpAddr = "192.168.1.9".parse().unwrap();
+    for _ in 0..3 {
+        harness
+            .state_mut()
+            .dispatch(AppAction::PairingFailedFrom(ip));
+    }
+    harness.state_mut().dispatch(AppAction::PairingFailedFrom(
+        "192.168.1.20".parse().unwrap(),
+    ));
+    harness.run_steps(2);
+    harness.get_by_label(locked);
+    assert!(
+        harness
+            .query_by_label("Locked out: 192.168.1.20 (1 failed attempts)")
+            .is_none(),
+        "one failure is not a lockout"
+    );
+}

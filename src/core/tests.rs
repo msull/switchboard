@@ -12318,9 +12318,12 @@ fn evidence_opens_documents_and_images_and_refuses_what_would_run() {
 mod remote {
     //! The remote port's state: identity, devices, the pairing window.
     use super::*;
-    use crate::core::{PAIRING_ATTEMPTS, PAIRING_WINDOW};
+    use crate::core::{
+        PAIRING_ATTEMPTS, PAIRING_FAILURES_MAX, PAIRING_SOURCES_MAX, PAIRING_WINDOW,
+    };
     use crate::ports::remote::{Identity, Listen, PairedDevice, Scope};
     use crate::ports::store::Loaded;
+    use std::net::IpAddr;
 
     fn identity() -> Identity {
         Identity {
@@ -12440,6 +12443,7 @@ mod remote {
             code: "ABCD2345".into(),
             scope: Scope::Read,
             failures: 0,
+            sources: Vec::new(),
         };
         let lan: IpAddr = "192.168.1.9".parse().unwrap();
         identity.listen.lan = true;
@@ -12486,7 +12490,7 @@ mod remote {
     }
 
     #[test]
-    fn the_pairing_window_opens_with_its_code_closes_on_time_and_after_three_failures() {
+    fn the_pairing_window_opens_with_its_code_and_closes_on_time_or_when_stopped() {
         let mut core = loaded_core();
         assert!(core.pairing().is_none());
         let e = core.dispatch(
@@ -12517,16 +12521,16 @@ mod remote {
             },
             Clock::at(2_000),
         );
-        for n in 1..PAIRING_ATTEMPTS {
+        for n in 1..=PAIRING_ATTEMPTS + 1 {
             core.dispatch(AppAction::PairingFailed, Clock::at(2_000 + u64::from(n)));
-            assert_eq!(core.pairing().unwrap().failures, n);
+            assert_eq!(
+                core.pairing().unwrap().failures,
+                n,
+                "no source never closes"
+            );
         }
-        core.dispatch(AppAction::PairingFailed, Clock::at(2_100));
-        assert!(core.pairing().is_none(), "the third failure closes it");
-        assert!(
-            core.notice()
-                .is_some_and(|n| n.text.contains("Pairing closed"))
-        );
+        assert!(core.pairing().unwrap().sources.is_empty());
+        core.dispatch(AppAction::ClosePairing, Clock::at(2_100));
         core.dispatch(AppAction::PairingFailed, Clock::at(2_200));
         assert!(
             core.pairing().is_none(),
@@ -12541,6 +12545,184 @@ mod remote {
             Clock::at(3_000),
         );
         core.dispatch(AppAction::ClosePairing, Clock::at(3_001));
+        assert!(core.pairing().is_none());
+    }
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().unwrap()
+    }
+
+    fn open_pairing(core: &mut AppCore, at: u64) {
+        core.dispatch(
+            AppAction::OpenPairing {
+                code: "ABCD2345".into(),
+                scope: Scope::Read,
+            },
+            Clock::at(at),
+        );
+    }
+
+    fn source_failures(core: &AppCore, ip: IpAddr) -> Option<u32> {
+        let p = core.pairing()?;
+        p.sources.iter().find(|s| s.ip == ip).map(|s| s.failures)
+    }
+
+    /// Three failures from one address lock that address out and name
+    /// it; the window stays open, and another address is untouched.
+    #[test]
+    fn three_failures_lock_their_address_out_and_leave_the_window_open() {
+        let mut core = loaded_core();
+        open_pairing(&mut core, 1_000);
+        let a = ip("192.168.1.9");
+        let b = ip("192.168.1.20");
+        for n in 1..PAIRING_ATTEMPTS {
+            core.dispatch(
+                AppAction::PairingFailedFrom(a),
+                Clock::at(1_000 + u64::from(n)),
+            );
+            assert!(!core.pairing().unwrap().is_locked(a));
+        }
+        core.dispatch(AppAction::PairingFailedFrom(b), Clock::at(1_010));
+        core.dispatch(AppAction::PairingFailedFrom(b), Clock::at(1_011));
+        assert!(core.notice().is_none(), "no lockout yet");
+        // The IPv4-mapped form is the same peer.
+        let mapped = ip("::ffff:192.168.1.9");
+        let e = core.dispatch(AppAction::PairingFailedFrom(mapped), Clock::at(1_020));
+        assert!(e.is_empty(), "the window is never saved: {e:?}");
+        let window = core.pairing().expect("the window stays open");
+        assert!(window.is_locked(a));
+        assert!(window.is_locked(mapped));
+        assert!(!window.is_locked(b), "two from b is not a lockout");
+        assert_eq!(source_failures(&core, b), Some(2));
+        assert_eq!(window.failures, 5, "the total of every source");
+        let locked: Vec<IpAddr> = window.locked().map(|s| s.ip).collect();
+        assert_eq!(
+            locked,
+            vec![a],
+            "locked lists only the address at the limit"
+        );
+        assert!(core.notice().is_some_and(
+            |n| n.text == "Pairing locked out 192.168.1.9 after three failed attempts."
+        ));
+        core.dispatch(AppAction::PairingFailedFrom(a), Clock::at(1_030));
+        assert_eq!(
+            source_failures(&core, a),
+            Some(PAIRING_ATTEMPTS),
+            "not counted further"
+        );
+        assert_eq!(core.pairing().unwrap().failures, 5);
+        assert!(core.pairing_at(Clock::at(1_030)).is_some());
+    }
+
+    /// Reopening clears every lockout; stopping, pairing and the tick's
+    /// expiry drop them with the window.
+    #[test]
+    fn a_lockout_lasts_only_as_long_as_its_window() {
+        let a = ip("192.168.1.9");
+        let lock = |core: &mut AppCore| {
+            for n in 0..PAIRING_ATTEMPTS {
+                core.dispatch(
+                    AppAction::PairingFailedFrom(a),
+                    Clock::at(1_100 + u64::from(n)),
+                );
+            }
+            assert!(core.pairing().unwrap().is_locked(a));
+        };
+        let mut core = loaded_core();
+        open_pairing(&mut core, 1_000);
+        lock(&mut core);
+        open_pairing(&mut core, 1_200);
+        assert!(
+            core.pairing().unwrap().sources.is_empty(),
+            "reopening clears it"
+        );
+
+        lock(&mut core);
+        core.dispatch(AppAction::ClosePairing, Clock::at(1_300));
+        assert!(core.pairing().is_none());
+
+        open_pairing(&mut core, 1_000);
+        lock(&mut core);
+        let made = core.new_device("iPad", "h".into(), Clock::at(1_400).wall);
+        core.dispatch(AppAction::Paired(made), Clock::at(1_400));
+        assert!(core.pairing().is_none());
+
+        open_pairing(&mut core, 1_000);
+        lock(&mut core);
+        let end = 1_000 + u64::try_from(PAIRING_WINDOW.as_millis()).unwrap();
+        core.dispatch(AppAction::Tick, Clock::at(end));
+        assert!(core.pairing().is_none(), "the expiry drops it");
+        core.dispatch(AppAction::PairingFailedFrom(a), Clock::at(end + 1));
+        assert!(
+            core.pairing().is_none(),
+            "a failure with no window is nothing"
+        );
+    }
+
+    /// The source list is bounded: a new address pushes out the oldest
+    /// unlocked one, never a locked one.
+    #[test]
+    fn the_source_list_is_bounded_and_never_forgets_a_lockout() {
+        let source = |n: usize| -> IpAddr {
+            let n = u8::try_from(n).unwrap();
+            IpAddr::from([10, 0, 0, n])
+        };
+        let mut core = loaded_core();
+        open_pairing(&mut core, 1_000);
+        // The first is locked, the rest have one failure each.
+        for _ in 0..PAIRING_ATTEMPTS {
+            core.dispatch(AppAction::PairingFailedFrom(source(0)), Clock::at(1_001));
+        }
+        for n in 1..PAIRING_SOURCES_MAX {
+            core.dispatch(AppAction::PairingFailedFrom(source(n)), Clock::at(1_002));
+        }
+        assert_eq!(core.pairing().unwrap().sources.len(), PAIRING_SOURCES_MAX);
+        core.dispatch(AppAction::PairingFailedFrom(source(200)), Clock::at(1_003));
+        let window = core.pairing().unwrap();
+        assert_eq!(window.sources.len(), PAIRING_SOURCES_MAX);
+        assert!(window.is_locked(source(0)), "the locked one stays");
+        assert_eq!(
+            source_failures(&core, source(1)),
+            None,
+            "the oldest unlocked went"
+        );
+        assert_eq!(source_failures(&core, source(200)), Some(1));
+    }
+
+    /// Rotating addresses must not turn into unlimited guesses: with
+    /// all but one source locked the window is still open for others,
+    /// and the failure that fills the list of lockouts closes it.
+    #[test]
+    fn the_total_of_failures_closes_the_window() {
+        let source = |n: usize| -> IpAddr {
+            let n = u8::try_from(n).unwrap();
+            IpAddr::from([10, 0, 0, n])
+        };
+        let mut core = loaded_core();
+        open_pairing(&mut core, 1_000);
+        for n in 0..PAIRING_SOURCES_MAX - 1 {
+            for _ in 0..PAIRING_ATTEMPTS {
+                core.dispatch(AppAction::PairingFailedFrom(source(n)), Clock::at(1_001));
+            }
+        }
+        for _ in 0..PAIRING_ATTEMPTS - 1 {
+            core.dispatch(AppAction::PairingFailedFrom(source(200)), Clock::at(1_002));
+        }
+        let window = core.pairing().expect("still open for other addresses");
+        assert_eq!(window.locked().count(), PAIRING_SOURCES_MAX - 1);
+        assert!(!window.is_locked(source(200)));
+        core.dispatch(AppAction::PairingFailedFrom(source(200)), Clock::at(1_003));
+        assert!(core.pairing().is_none(), "the total closed it");
+
+        // Addresses that fail once each and are pushed out never add up
+        // to a lockout, but their total still closes the window.
+        let mut core = loaded_core();
+        open_pairing(&mut core, 1_000);
+        for n in 0..PAIRING_FAILURES_MAX {
+            assert!(core.pairing().is_some(), "open before failure {n}");
+            let ip = IpAddr::from([10, 1, 0, u8::try_from(n).unwrap()]);
+            core.dispatch(AppAction::PairingFailedFrom(ip), Clock::at(1_001));
+        }
         assert!(core.pairing().is_none());
     }
 

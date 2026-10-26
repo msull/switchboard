@@ -10,7 +10,7 @@
 #![allow(clippy::assert_is_empty)]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -582,7 +582,7 @@ fn a_set_is_read_by_its_id_across_spaces() {
 }
 
 #[test]
-fn a_pairing_with_another_hosts_key_or_the_wrong_code_counts_and_three_close_the_window() {
+fn a_pairing_with_another_hosts_key_or_the_wrong_code_counts_and_three_lock_the_address_out() {
     let mut port = port();
     port.app.dispatch(AppAction::OpenPairing {
         code: "ABCD2345".into(),
@@ -622,16 +622,79 @@ fn a_pairing_with_another_hosts_key_or_the_wrong_code_counts_and_three_close_the
     );
     let (status, reply) = call(&mut port, "POST", "/api/v1/pair", None, &wrong.to_string());
     assert_eq!((status, code(&reply)), (403, "wrong_code"), "{reply}");
-    assert!(
-        port.app.core().pairing().is_none(),
-        "three failures close the window"
-    );
-    // The right code, too late.
+    let window = port
+        .app
+        .core()
+        .pairing()
+        .expect("three failures leave the window open")
+        .clone();
+    let locked: Vec<_> = window.locked().map(|s| (s.ip, s.failures)).collect();
+    assert_eq!(locked, vec![(IpAddr::from([127, 0, 0, 1]), 3)]);
+    // The right code, from the locked address.
     let right = serde_json::json!({ "code": "abcd2345", "device_name": "x", "spki_sha256": spki });
     let (status, reply) = call(&mut port, "POST", "/api/v1/pair", None, &right.to_string());
-    assert_eq!((status, code(&reply)), (403, "pairing_closed"), "{reply}");
+    assert_eq!((status, code(&reply)), (403, "pairing_locked"), "{reply}");
     assert!(port.remote.state().devices.is_empty());
     assert!(port.app.core().devices().is_empty());
+    let (status, info) = get(&mut port, "/api/v1/info", None);
+    assert_eq!(status, 200);
+    assert_eq!(info["body"]["pairing_open"], true, "still open for others");
+}
+
+/// A body with no key never saw the QR: it is refused without
+/// spending an attempt, so empty knocks cannot lock an address out.
+#[test]
+fn a_pair_body_with_no_key_is_refused_and_not_counted() {
+    let mut port = port();
+    port.app.dispatch(AppAction::OpenPairing {
+        code: "ABCD2345".into(),
+        scope: Scope::Read,
+    });
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({ "code": "ZZZZZZZZ", "spki_sha256": "  " }),
+        serde_json::json!({ "code": "ZZZZZZZZ", "spki_sha256": 7 }),
+    ] {
+        let (status, reply) = call(&mut port, "POST", "/api/v1/pair", None, &body.to_string());
+        assert_eq!((status, code(&reply)), (400, "bad_request"), "{reply}");
+    }
+    let window = port.app.core().pairing().unwrap();
+    assert_eq!(window.failures, 0);
+    assert!(window.sources.is_empty());
+}
+
+/// Reopening pairing clears a lockout: the owner's own mistyped codes
+/// cost them a reopen, no more.
+#[test]
+fn reopening_pairing_lets_a_locked_address_pair() {
+    let mut port = port();
+    let open = |port: &mut Port| {
+        port.app.dispatch(AppAction::OpenPairing {
+            code: "ABCD2345".into(),
+            scope: Scope::Read,
+        });
+    };
+    open(&mut port);
+    let spki = port
+        .remote
+        .state()
+        .identity
+        .as_ref()
+        .unwrap()
+        .spki_sha256
+        .clone();
+    let wrong = serde_json::json!({ "code": "ZZZZZZZZ", "device_name": "x", "spki_sha256": spki });
+    for _ in 0..3 {
+        let (status, reply) = call(&mut port, "POST", "/api/v1/pair", None, &wrong.to_string());
+        assert_eq!((status, code(&reply)), (403, "wrong_code"), "{reply}");
+    }
+    let right = serde_json::json!({ "code": "ABCD2345", "device_name": "x", "spki_sha256": spki });
+    let (status, reply) = call(&mut port, "POST", "/api/v1/pair", None, &right.to_string());
+    assert_eq!((status, code(&reply)), (403, "pairing_locked"), "{reply}");
+    open(&mut port);
+    let (status, reply) = call(&mut port, "POST", "/api/v1/pair", None, &right.to_string());
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(port.app.core().devices().len(), 1);
 }
 
 #[test]
@@ -1515,7 +1578,7 @@ fn a_wrong_pin_fails_at_the_handshake_before_any_request() {
 }
 
 #[test]
-fn pair_is_rate_limited_per_listener() {
+fn pair_is_rate_limited_per_source() {
     let mut port = port();
     let mut statuses = Vec::new();
     for _ in 0..7 {
