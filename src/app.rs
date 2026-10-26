@@ -26,7 +26,7 @@ use crate::content::{
     self, ACTIVITY_BYTES_CAP, ContentJob, ContentKey, ContentVersion, ContentView, ContentWorker,
     ConversationCache, FILE_BYTES_CAP, Observed, PAGE_TURNS_CAP, PAGE_TURNS_DEFAULT, PageFrom,
     Policy, PolicySpec, RUN_LINES_CAP, SCREEN_LINES_CAP, SCREEN_SLACK_LINES, Source,
-    TURN_BYTES_CAP, WATCH_CAP, WATCH_IDLE, Watch, redact,
+    TURN_BYTES_CAP, TicketPart, WATCH_CAP, WATCH_IDLE, Watch, redact,
 };
 use crate::core::model::PinTarget;
 use crate::core::revision::Fingerprints;
@@ -1688,6 +1688,19 @@ impl SwitchboardApp {
             reply,
         } = observation;
         match result {
+            // Ticket text has no record to version: the reply carries
+            // the port's current revision, as every other JSON read does.
+            Ok((_, body)) if matches!(key, ContentKey::TicketText(..)) => {
+                if let Some(reply) = reply {
+                    let cap = match &key {
+                        ContentKey::TicketText(_, TicketPart::Detail) => NOTES_CAP_ALONE,
+                        ContentKey::TicketText(_, TicketPart::File(_)) => FILE_CAP,
+                        _ => STRING_CAP,
+                    };
+                    let label = format!("{} {}", key.kind(), key.id());
+                    let _ = reply.try_send(self.bounded_reply(&label, body, cap));
+                }
+            }
             Ok((source, body)) => {
                 if self.content_present(&key) {
                     let moved = self
@@ -1866,6 +1879,8 @@ impl SwitchboardApp {
                     lines: RUN_LINES_CAP,
                 },
                 ContentKey::File(..) => ContentView::Whole,
+                // Ticket text is read once per request, never watched.
+                ContentKey::TicketText(..) => continue,
             };
             if let Ok(job) = self.content_job(&key, view, None) {
                 jobs.push(job);
@@ -1906,7 +1921,7 @@ impl SwitchboardApp {
                     relative: path.clone(),
                 },
                 view,
-                policy: self.policy_spec(*project, None),
+                policies: vec![self.policy_spec(*project, None)],
                 reply,
             });
         }
@@ -1954,15 +1969,99 @@ impl SwitchboardApp {
                 };
                 Source::Log(scrollback_dir(&self.services.store.data_dir()).join(&run.log))
             }
-            ContentKey::File(..) => unreachable!("handled above"),
+            // A file is handled above, and ticket text has no record.
+            ContentKey::File(..) | ContentKey::TicketText(..) => unreachable!("no record"),
         };
         Ok(ContentJob {
             key: key.clone(),
             source,
             view,
-            policy: self.policy_spec(record.project, Some(record)),
+            policies: vec![self.policy_spec(record.project, Some(record))],
             reply,
         })
+    }
+
+    /// The policies ticket text is masked with: one per project and
+    /// stored environment set, not only the sets granted now, so text a
+    /// child printed under a grant stays masked once the grant is taken
+    /// back or its session is gone. Each set resolves alone, because
+    /// resolving several as one overlay lets a later set's variable
+    /// replace an earlier one's of the same name and leave that value
+    /// unmasked. No ticket names the project it runs in, so every
+    /// project is masked, which over-masks rather than leaks. The set
+    /// loses its AWS method, which masks nothing and would make two
+    /// methods an error.
+    fn ticket_policy_specs(&self) -> Vec<PolicySpec> {
+        let mut projects: Vec<PolicySpec> = self
+            .core
+            .workspaces()
+            .iter()
+            .map(|w| self.policy_spec(w.project.id, None))
+            .collect();
+        if projects.is_empty() {
+            projects.push(self.policy_spec(ProjectId(uuid::Uuid::nil()), None));
+        }
+        let mut specs = Vec::new();
+        for mut spec in projects {
+            let sets = std::mem::take(&mut spec.sets);
+            spec.project_sets = Vec::new();
+            // The project's own and the global variables, with no set,
+            // so a store with no sets still has a policy to resolve.
+            specs.push(spec.clone());
+            for mut set in sets {
+                set.aws = None;
+                let mut one = spec.clone();
+                one.project_sets = vec![set.name.clone()];
+                one.sets = vec![set];
+                specs.push(one);
+            }
+        }
+        specs
+    }
+
+    /// Send ticket text to the worker to be masked before it is
+    /// serialized; the answer goes to `reply` from `observe`. False
+    /// when the worker is missing or behind.
+    fn submit_ticket_text(
+        &self,
+        ticket: Option<&str>,
+        part: TicketPart,
+        value: serde_json::Value,
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> bool {
+        let Some(content) = &self.content else {
+            return false;
+        };
+        content.submit(ContentJob {
+            key: ContentKey::TicketText(ticket.map(str::to_owned), part),
+            source: Source::Json(value),
+            view: ContentView::Whole,
+            policies: self.ticket_policy_specs(),
+            reply: Some(reply.clone()),
+        })
+    }
+
+    /// [`Self::submit_ticket_text`] for a route: deferred, or refused
+    /// `busy`.
+    fn serve_ticket_text(
+        &self,
+        request: &RemoteRequest,
+        ticket: Option<&str>,
+        part: TicketPart,
+        value: serde_json::Value,
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> Served {
+        if self.submit_ticket_text(ticket, part, value, reply) {
+            Served::Deferred
+        } else {
+            Served::Now(self.refuse(
+                request,
+                503,
+                "busy",
+                "the content worker is behind; try again",
+                true,
+            ))
+        }
     }
 
     /// What names a policy, from the core: the project's environment
@@ -2178,21 +2277,28 @@ impl SwitchboardApp {
             .clamp(1, cap)
     }
 
-    /// A command's or service's runs as the record holds them: the
-    /// numbers, times, exits and the artifacts' names, never paths.
-    /// Dispatch's tickets as the core lists them (§4.7).
-    fn remote_tickets(&self, request: &RemoteRequest) -> RemoteReply {
+    /// Dispatch's tickets as the core lists them (§4.7), masked.
+    fn remote_tickets(
+        &self,
+        request: &RemoteRequest,
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> Served {
         let value = serde_json::to_value(self.core.ticket_listing()).unwrap_or_default();
-        self.remote_json(request, value, STRING_CAP)
+        self.serve_ticket_text(request, None, TicketPart::List, value, reply)
     }
 
-    /// One ticket with its body, attempts and lanes.
-    fn remote_ticket(&self, request: &RemoteRequest, ticket: &str) -> RemoteReply {
+    /// One ticket with its body, attempts and lanes, masked.
+    fn remote_ticket(
+        &self,
+        request: &RemoteRequest,
+        ticket: &str,
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> Served {
         let Some(detail) = self.core.ticket_detail(ticket) else {
-            return self.refuse(request, 404, "not_found", "no such ticket", true);
+            return Served::Now(self.refuse(request, 404, "not_found", "no such ticket", true));
         };
         let value = serde_json::to_value(detail).unwrap_or_default();
-        self.remote_json(request, value, NOTES_CAP_ALONE)
+        self.serve_ticket_text(request, Some(ticket), TicketPart::Detail, value, reply)
     }
 
     /// A decide, a resume or a close on a ticket under `control` scope, checked
@@ -2232,7 +2338,7 @@ impl SwitchboardApp {
             ));
         }
         let call = if verb == "decide" {
-            match self.ticket_decide_call(request, &t) {
+            match self.ticket_decide_call(request, &t, reply) {
                 Ok(call) => call,
                 Err(served) => return served,
             }
@@ -2292,6 +2398,7 @@ impl SwitchboardApp {
         &self,
         request: &RemoteRequest,
         t: &crate::ports::dispatch::TicketView,
+        reply: &mpsc::SyncSender<RemoteReply>,
     ) -> Result<Body, Served> {
         let bad = |message: &str| {
             Err(Served::Now(self.refuse(
@@ -2330,7 +2437,13 @@ impl SwitchboardApp {
                 let value = serde_json::json!({
                     "decision": crate::core::tickets::TicketDecision::from(d),
                 });
-                return Err(Served::Now(self.remote_json(request, value, STRING_CAP)));
+                return Err(self.serve_ticket_text(
+                    request,
+                    Some(&t.id),
+                    TicketPart::Detail,
+                    value,
+                    reply,
+                ));
             }
             return Err(Served::Now(self.refuse(
                 request,
@@ -2387,32 +2500,48 @@ impl SwitchboardApp {
         if pending.is_empty() {
             return;
         }
-        let answer = match (body, result) {
-            (_, Ok(Reply::Decided(d))) => {
-                let value = serde_json::json!({
+        // Ticket text goes to the worker to be masked, which answers
+        // each device; anything else is answered here.
+        let text = match (body, result) {
+            (_, Ok(Reply::Decided(d))) => Some((
+                TicketPart::Detail,
+                serde_json::json!({
                     "decision": crate::core::tickets::TicketDecision::from(d),
-                });
-                self.envelope(200, &value, true)
-            }
-            (_, Ok(Reply::Ticket(t))) => {
-                let value = serde_json::json!({ "ticket": self.core.ticket_summary(t) });
-                self.envelope(200, &value, true)
-            }
+                }),
+            )),
+            (_, Ok(Reply::Ticket(t))) => Some((
+                TicketPart::Detail,
+                serde_json::json!({ "ticket": self.core.ticket_summary(t) }),
+            )),
             (Body::Artifact { path, .. }, Ok(Reply::Artifact { text })) => {
-                let mut value = serde_json::json!({
-                    "key": crate::core::tickets::file_key(path),
-                    "text": text,
-                });
-                bound_strings(&mut value, FILE_CAP);
-                self.envelope(200, &value, true)
+                let key = crate::core::tickets::file_key(path);
+                Some((
+                    TicketPart::File(key.clone()),
+                    serde_json::json!({ "key": key, "text": text }),
+                ))
             }
             // The core has taken the events in by now, or marked them
             // unavailable from this runner; either way the cache answers.
-            (Body::Events { ticket, .. }, Ok(Reply::Events(_) | Reply::Failed { .. })) => {
-                let value =
-                    serde_json::to_value(self.core.ticket_events(ticket)).unwrap_or_default();
-                self.envelope(200, &value, true)
+            (Body::Events { ticket, .. }, Ok(Reply::Events(_) | Reply::Failed { .. })) => Some((
+                TicketPart::Events,
+                serde_json::to_value(self.core.ticket_events(ticket)).unwrap_or_default(),
+            )),
+            _ => None,
+        };
+        if let Some((part, value)) = text {
+            let ticket = body_ticket(body);
+            for r in pending {
+                if !self.submit_ticket_text(ticket, part.clone(), value.clone(), &r.reply) {
+                    let _ = r.reply.try_send(RemoteReply::new(
+                        503,
+                        self.error_json("busy", "the content worker is behind; try again"),
+                        true,
+                    ));
+                }
             }
+            return;
+        }
+        let answer = match (body, result) {
             (_, Ok(Reply::Failed { reason })) => {
                 let (status, code) = if reason.starts_with("no such") {
                     (404, "not_found")
@@ -2466,7 +2595,7 @@ impl SwitchboardApp {
                 ));
             }
             let value = serde_json::to_value(self.core.ticket_events(ticket)).unwrap_or_default();
-            return Served::Now(self.remote_json(request, value, STRING_CAP));
+            return self.serve_ticket_text(request, Some(ticket), TicketPart::Events, value, reply);
         }
         self.ticket_replies.push(TicketReply {
             call: Body::Events {
@@ -2503,6 +2632,18 @@ impl SwitchboardApp {
             return Served::Now(self.refuse(request, 404, "not_found", "no such file", true));
         };
         if file.image {
+            // A picture may show a granted value, and no mask reads
+            // pixels: an attempt whose checks ran with grants keeps
+            // its images on the host.
+            if self.core.attempt_ran_with_env(ticket, &file.stage, file.n) {
+                return Served::Now(self.refuse(
+                    request,
+                    403,
+                    "withheld",
+                    "this attempt ran with environment grants; open the image on the host",
+                    true,
+                ));
+            }
             return Served::Now(self.remote_ticket_image(request, &file, &path));
         }
         if !file.inline {
@@ -2523,7 +2664,8 @@ impl SwitchboardApp {
                 .cloned()
                 .unwrap_or_default();
             let value = serde_json::json!({ "key": file.key, "text": text });
-            return Served::Now(self.remote_json(request, value, FILE_CAP));
+            let part = TicketPart::File(file.key);
+            return self.serve_ticket_text(request, Some(ticket), part, value, reply);
         }
         if !self.core.dispatch_state().connected {
             return Served::Now(self.refuse(
@@ -2587,23 +2729,24 @@ impl SwitchboardApp {
     fn remote_json(
         &self,
         request: &RemoteRequest,
-        mut value: serde_json::Value,
+        value: serde_json::Value,
         cap: usize,
     ) -> RemoteReply {
+        self.bounded_reply(&format!("{} {}", request.method, request.path), value, cap)
+    }
+
+    /// The half of [`Self::remote_json`] after any mask: strings
+    /// bounded, the envelope, and a body over the cap refused; `label`
+    /// names the read in the log.
+    fn bounded_reply(&self, label: &str, mut value: serde_json::Value, cap: usize) -> RemoteReply {
         bound_strings(&mut value, cap);
         let out = self.envelope(200, &value, true);
         if out.body.len() > BODY_CAP {
-            log::warn!(
-                "remote: {} {} is {} bytes, over the cap",
-                request.method,
-                request.path,
-                out.body.len()
-            );
-            return self.refuse(
-                request,
+            log::warn!("remote: {label} is {} bytes, over the cap", out.body.len());
+            self.count_refusal("too_large");
+            return RemoteReply::new(
                 500,
-                "too_large",
-                "the reply is over the port's body cap",
+                self.error_json("too_large", "the reply is over the port's body cap"),
                 true,
             );
         }
@@ -3129,9 +3272,9 @@ impl SwitchboardApp {
             ("POST", ["sessions", session, "dictation"]) => {
                 return Served::Now(self.remote_dictation(request, &device, session));
             }
-            ("GET", ["dispatch", "tickets"]) => return Served::Now(self.remote_tickets(request)),
+            ("GET", ["dispatch", "tickets"]) => return self.remote_tickets(request, reply),
             ("GET", ["dispatch", "tickets", ticket]) => {
-                return Served::Now(self.remote_ticket(request, ticket));
+                return self.remote_ticket(request, ticket, reply);
             }
             (
                 "POST",
@@ -4455,6 +4598,18 @@ fn same_origin(request: &RemoteRequest) -> bool {
     }
 }
 
+/// The ticket a call to Dispatch is about.
+fn body_ticket(body: &Body) -> Option<&str> {
+    match body {
+        Body::Decide { ticket, .. }
+        | Body::Resume { ticket }
+        | Body::Close { ticket, .. }
+        | Body::Events { ticket, .. }
+        | Body::Artifact { ticket, .. } => Some(ticket),
+        _ => None,
+    }
+}
+
 /// Cut every string in `value` to its cap, `notes` to `notes_cap` and
 /// the rest to `STRING_CAP`, naming each cut field in a `truncated`
 /// list on its object, so no field leaves unbounded and a client can
@@ -4505,7 +4660,9 @@ mod tests {
     use super::{RefusalSummary, SwitchboardApp};
     use crate::adapters::fakes;
     use crate::content::redact;
-    use crate::core::model::{Project, ProjectEnv, ProjectId, SessionKind, SpaceId, Workspace};
+    use crate::core::model::{
+        EnvSet, EnvVar, Project, ProjectEnv, ProjectId, SessionKind, SpaceId, Workspace,
+    };
     use crate::core::{AppAction, ControlAction, Launch};
     use crate::core::{RECORD_TOKEN_ENV, token_hash};
     use crate::ports::host::SpawnSpec;
@@ -4533,6 +4690,59 @@ mod tests {
         summary.count("unauthorized", 1, at(300));
         assert!(summary.flush(at(359)).is_empty(), "the minute starts again");
         assert_eq!(summary.flush(at(360)).len(), 1);
+    }
+
+    /// Two sets that name the same secret each keep their own value
+    /// in the policy ticket text is masked with, not only the last.
+    #[test]
+    fn ticket_policies_mask_each_sets_value_of_a_shared_name() {
+        let services = fakes::services();
+        let secrets = services.secrets.clone();
+        let mut app = SwitchboardApp::with_services(services);
+        let set = |name: &str, secret: bool| EnvSet {
+            name: name.into(),
+            vars: vec![EnvVar {
+                name: "API_KEY".into(),
+                value: String::new(),
+                secret,
+            }],
+            aws: None,
+        };
+        // `plain` shares the name with a secret and holds no value.
+        let settings = crate::core::model::Settings {
+            env_sets: vec![set("staging", true), set("prod", true), set("plain", false)],
+            ..crate::core::model::Settings::default()
+        };
+        app.core_mut_for_seeding().dispatch(
+            AppAction::StoreLoaded(Ok(crate::ports::store::Loaded {
+                workspaces: Vec::new(),
+                notices: Vec::new(),
+                settings,
+                views: crate::core::model::Views::default(),
+            })),
+            crate::core::Clock::at(0),
+        );
+        for (name, value) in [("staging", "s-1"), ("prod", "p-2")] {
+            secrets
+                .set(
+                    &crate::core::SecretScope::Set(name.into()).account("API_KEY"),
+                    value,
+                )
+                .unwrap();
+        }
+        let mut masked: Vec<String> = app
+            .ticket_policy_specs()
+            .iter()
+            .flat_map(|spec| {
+                crate::content::resolve_policy(spec, &*secrets)
+                    .unwrap()
+                    .secrets
+            })
+            .map(|(_, value)| value)
+            .collect();
+        masked.sort();
+        masked.dedup();
+        assert_eq!(masked, ["p-2", "s-1"]);
     }
 
     /// Every spawn, a resume as much as the first, carries the

@@ -210,6 +210,7 @@ gate = { kind = "command", argv = ["true"], in = "lane" }
             exit,
             group: None,
             lost_since_ms: None,
+            env: false,
         }
     }
 

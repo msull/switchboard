@@ -1632,6 +1632,7 @@ impl Runner {
             exit: None,
             group: self.git.check_group(&check_key),
             lost_since_ms: None,
+            env: !outer.is_empty(),
         });
         attempt
             .artifacts

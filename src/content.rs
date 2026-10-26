@@ -2,9 +2,10 @@
 //! with the version it was read at: the parsed transcripts, and the
 //! content the remote port serves through one worker thread (a pane's
 //! screen, a conversation and the last response read from it, a run's
-//! output; pinned files follow). The views read the transcript cache
-//! through `DrawCtx`, and the remote port reads its own masked copy on
-//! the worker, so a transcript is parsed once per change for each.
+//! output, a file, and the text of Dispatch's tickets). The views read
+//! the transcript cache through `DrawCtx`, and the remote port reads
+//! its own masked copy on the worker, so a transcript is parsed once
+//! per change for each.
 //! Nothing here is persisted or read by the core.
 //!
 //! The worker does the read, the mask, the version and the
@@ -14,6 +15,7 @@
 //! [`WATCH_POLL`], so a watched pane or transcript moves for a device
 //! while the host shows something else or is hidden.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
@@ -81,6 +83,22 @@ pub enum ContentKey {
     /// A file some working set pins, by its project and its path under
     /// the root.
     File(ProjectId, PathBuf),
+    /// Text from Dispatch's tickets, by the ticket (`None` for the
+    /// list) and the part: masked on the worker, never watched.
+    TicketText(Option<String>, TicketPart),
+}
+
+/// Which of a ticket's texts a [`ContentKey::TicketText`] read is.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TicketPart {
+    /// Every ticket as the list shows it.
+    List,
+    /// One ticket's summary, body, attempts and lanes.
+    Detail,
+    /// One ticket's events.
+    Events,
+    /// One file of an attempt, by its key.
+    File(String),
 }
 
 impl ContentKey {
@@ -92,6 +110,7 @@ impl ContentKey {
             Self::Conversation(_) => "conversation",
             Self::RunOutput(..) => "run_output",
             Self::File(..) => "file",
+            Self::TicketText(..) => "ticket",
         }
     }
 
@@ -103,6 +122,15 @@ impl ContentKey {
             Self::Screen(id) | Self::Conversation(id) => id.0.to_string(),
             Self::RunOutput(id, n) => format!("{}/{n}", id.0),
             Self::File(project, path) => format!("{}/{}", project.0, path.display()),
+            Self::TicketText(ticket, part) => {
+                let ticket = ticket.as_deref().unwrap_or("");
+                match part {
+                    TicketPart::List => "list".to_owned(),
+                    TicketPart::Detail => ticket.to_owned(),
+                    TicketPart::Events => format!("{ticket}/events"),
+                    TicketPart::File(key) => format!("{ticket}/files/{key}"),
+                }
+            }
         }
     }
 
@@ -131,7 +159,7 @@ impl ContentKey {
     pub fn record(&self) -> Option<RecordId> {
         match self {
             Self::Screen(id) | Self::Conversation(id) | Self::RunOutput(id, _) => Some(*id),
-            Self::File(..) => None,
+            Self::File(..) | Self::TicketText(..) => None,
         }
     }
 }
@@ -180,13 +208,16 @@ pub fn resolve_policy(spec: &PolicySpec, secrets: &dyn SecretStore) -> Result<Po
     let example = std::fs::read_to_string(spec.root.join(".env.example"))
         .map(|t| crate::adapters::dotenv::names(&t))
         .unwrap_or_default();
-    let mut failed = None;
+    // `lookup` is a `Fn` closure, which may only borrow what it
+    // captures shared; the `RefCell` lets it still note the first
+    // store error, so a set's secret that cannot be read fails the
+    // policy instead of resolving as missing.
+    let lookup_failed: RefCell<Option<String>> = RefCell::new(None);
     let lookup = |account: &str| match secrets.get(account) {
         Ok(value) => value,
         Err(e) => {
-            // Closures take the environment by shared reference here;
-            // a `Cell` would be cleaner, but one failure is enough.
             log::warn!("secret {account}: {e}");
+            lookup_failed.borrow_mut().get_or_insert(e);
             None
         }
     };
@@ -218,6 +249,7 @@ pub fn resolve_policy(spec: &PolicySpec, secrets: &dyn SecretStore) -> Result<Po
     );
     // A store that answered with an error for any secret account is a
     // failure of the whole policy: nothing is sent unredacted.
+    let mut failed = lookup_failed.into_inner();
     for account in spec
         .project_env
         .vars
@@ -226,7 +258,7 @@ pub fn resolve_policy(spec: &PolicySpec, secrets: &dyn SecretStore) -> Result<Po
         .map(|v| crate::core::SecretScope::Project(spec.project).account(&v.name))
     {
         if let Err(e) = secrets.get(&account) {
-            failed = Some(e);
+            failed.get_or_insert(e);
         }
     }
     if let Some(e) = failed {
@@ -267,6 +299,32 @@ impl Policy {
     fn mask(&self, text: &str) -> String {
         redact(text, &self.secrets)
     }
+
+    /// One policy masking every value of `policies`.
+    fn union(policies: Vec<Policy>) -> Self {
+        Self::new(policies.into_iter().flat_map(|p| p.secrets).collect())
+    }
+}
+
+/// `value` with every string in it masked, before it is serialized, so
+/// a secret holding a quote, a backslash or a control character is
+/// found as it is rather than as JSON escapes it. Object keys are the
+/// view's own field names and are left alone.
+fn mask_json(value: &mut serde_json::Value, policy: &Policy) {
+    match value {
+        serde_json::Value::String(s) => *s = policy.mask(s),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                mask_json(item, policy);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for field in map.values_mut() {
+                mask_json(field, policy);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Where a job's content comes from, resolved on the frame from the
@@ -281,6 +339,9 @@ pub enum Source {
         root: PathBuf,
         relative: PathBuf,
     },
+    /// A view the frame already holds, to be masked whole: a ticket's
+    /// text, as the reply carries it.
+    Json(serde_json::Value),
 }
 
 /// Where a page is anchored. A page anchored at its start runs
@@ -321,12 +382,15 @@ pub enum ContentView {
 
 /// One read for the worker: what to read, what names the policy to
 /// mask it with, and where the reply goes (nowhere for a poll).
+/// `policies` are all masked: usually one, several for text any of
+/// several projects' children could have written; any of them failing
+/// to resolve refuses the read, and none refuses it too.
 #[derive(Clone)]
 pub struct ContentJob {
     pub key: ContentKey,
     pub source: Source,
     pub view: ContentView,
-    pub policy: PolicySpec,
+    pub policies: Vec<PolicySpec>,
     pub reply: Option<SyncSender<RemoteReply>>,
 }
 
@@ -502,15 +566,17 @@ impl Drop for ContentWorker {
 }
 
 /// What the worker keeps between jobs: the policies resolved per
-/// spec, the masked transcripts per record, and the masked files per
-/// key, each with the version it was made under, so a poll is a stat
-/// and a read of an unchanged source is served from here. Entries no
-/// longer watched or read are dropped at the next poll.
+/// spec, the masked transcripts per record, and the masked files and
+/// ticket texts per key, each with the version it was made under, so a
+/// poll is a stat and a read of an unchanged source is served from
+/// here. Entries no longer watched or read are dropped at the next
+/// poll.
 struct Cache {
     secrets: Arc<dyn SecretStore>,
     policies: HashMap<u64, (Policy, Instant)>,
     transcripts: HashMap<RecordId, ParsedEntry>,
     files: HashMap<ContentKey, FileEntry>,
+    tickets: HashMap<ContentKey, TextEntry>,
 }
 
 impl Cache {
@@ -520,8 +586,18 @@ impl Cache {
             policies: HashMap::new(),
             transcripts: HashMap::new(),
             files: HashMap::new(),
+            tickets: HashMap::new(),
         }
     }
+}
+
+/// A ticket text as masked, under the hash of what the frame sent and
+/// the policy it was masked with.
+struct TextEntry {
+    input: u64,
+    policy: u64,
+    body: serde_json::Value,
+    touched: Instant,
 }
 
 struct ParsedEntry {
@@ -550,6 +626,59 @@ impl Cache {
         let policy = resolve_policy(spec, &*self.secrets).map_err(ContentError::Policy)?;
         self.policies.insert(key, (policy.clone(), Instant::now()));
         Ok(policy)
+    }
+
+    /// The policy a job masks with: the union of its specs', each
+    /// resolved once per spec.
+    fn job_policy(&mut self, job: &ContentJob) -> Result<Policy, ContentError> {
+        let mut all = Vec::new();
+        for spec in &job.policies {
+            all.push(self.policy(spec)?);
+        }
+        match all.len() {
+            0 => Err(ContentError::Policy("the job names no policy".into())),
+            1 => Ok(all.remove(0)),
+            _ => Ok(Policy::union(all)),
+        }
+    }
+
+    /// A ticket's text under `key` masked: from here while what the
+    /// frame sent and the policy are both unchanged. A file's text over
+    /// [`FILE_BYTES_CAP`] is refused rather than masked and cut.
+    fn ticket_text(
+        &mut self,
+        key: &ContentKey,
+        value: &serde_json::Value,
+        policy: &Policy,
+    ) -> Result<(u64, serde_json::Value), ContentError> {
+        if let ContentKey::TicketText(_, TicketPart::File(_)) = key {
+            let len = value["text"].as_str().map_or(0, str::len) as u64;
+            if len > FILE_BYTES_CAP {
+                return Err(ContentError::TooLarge(len));
+            }
+        }
+        let mut h = DefaultHasher::new();
+        value.to_string().hash(&mut h);
+        let input = h.finish();
+        if let Some(entry) = self.tickets.get_mut(key)
+            && entry.input == input
+            && entry.policy == policy.fingerprint
+        {
+            entry.touched = Instant::now();
+            return Ok((input, entry.body.clone()));
+        }
+        let mut body = value.clone();
+        mask_json(&mut body, policy);
+        self.tickets.insert(
+            key.clone(),
+            TextEntry {
+                input,
+                policy: policy.fingerprint,
+                body: body.clone(),
+                touched: Instant::now(),
+            },
+        );
+        Ok((input, body))
     }
 
     /// The masked conversation for `record` under `handle`, read only
@@ -637,6 +766,7 @@ impl Cache {
             .retain(|id, e| records.contains(id) || now - e.touched < WATCH_IDLE);
         self.files
             .retain(|key, e| jobs.iter().any(|j| &j.key == key) || now - e.touched < WATCH_IDLE);
+        self.tickets.retain(|_, e| now - e.touched < WATCH_IDLE);
         self.policies
             .retain(|_, (_, touched)| now - *touched < WATCH_IDLE);
     }
@@ -657,7 +787,7 @@ fn observe(
     cache: &mut Cache,
     job: &ContentJob,
 ) -> Observed {
-    let policy = match cache.policy(&job.policy) {
+    let policy = match cache.job_policy(job) {
         Ok(policy) => policy,
         Err(e) => {
             return Observed {
@@ -699,6 +829,7 @@ fn observe(
         (Source::File { root, relative }, ContentView::Whole) => {
             cache.file(&job.key, root, relative, &policy)
         }
+        (Source::Json(value), ContentView::Whole) => cache.ticket_text(&job.key, value, &policy),
         (Source::Log(path), ContentView::Tail { lines }) => {
             scrollback::tail_masked(path, lines, &|s| policy.mask(s), policy.overlap())
                 .map_err(|e| ContentError::Failed(format!("log: {e}")))
@@ -1393,5 +1524,53 @@ mod tests {
         cache.insert(id, handle("a"), None, Conversation::default());
         assert!(cache.contains(id));
         assert_eq!(cache.error(id), None);
+    }
+
+    fn set_spec() -> PolicySpec {
+        PolicySpec {
+            epoch: 0,
+            project: ProjectId(uuid::Uuid::nil()),
+            root: PathBuf::from("/nonexistent"),
+            global: Vec::new(),
+            project_env: ProjectEnv::default(),
+            sets: vec![EnvSet {
+                name: "deploy".into(),
+                vars: vec![EnvVar {
+                    name: "KEY".into(),
+                    value: String::new(),
+                    secret: true,
+                }],
+                aws: None,
+            }],
+            project_sets: Vec::new(),
+            record_sets: vec!["deploy".into()],
+        }
+    }
+
+    #[test]
+    fn a_store_that_fails_on_a_set_secret_fails_the_policy() {
+        let secrets = crate::adapters::fakes::FakeSecrets::default();
+        secrets.state().insert(
+            crate::core::SecretScope::Set("deploy".into()).account("KEY"),
+            "v-1".into(),
+        );
+        let policy = resolve_policy(&set_spec(), &secrets).unwrap();
+        assert_eq!(policy.secrets, [("KEY".to_owned(), "v-1".to_owned())]);
+        secrets.set_failing(true);
+        assert!(resolve_policy(&set_spec(), &secrets).is_err());
+    }
+
+    #[test]
+    fn json_is_masked_in_its_strings_before_it_is_escaped() {
+        let policy = Policy::new(vec![("KEY".into(), "a\"b\\c".into())]);
+        let mut value = serde_json::json!({
+            "a\"b\\c": ["x a\"b\\c y", 3, {"text": "a\"b\\c"}],
+        });
+        mask_json(&mut value, &policy);
+        assert_eq!(
+            value,
+            serde_json::json!({ "a\"b\\c": ["x <KEY> y", 3, {"text": "<KEY>"}] }),
+            "values masked, keys left"
+        );
     }
 }
