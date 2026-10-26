@@ -176,8 +176,14 @@ impl AppCore {
         out.push(Effect::CheckForUpdate);
     }
 
-    /// The scheduled check: once the app has settled, then hourly.
+    /// The scheduled check: once the app has settled, then hourly,
+    /// while the setting allows it. The arithmetic runs from launch and
+    /// from the last check of either kind, so turning the setting on
+    /// checks at once unless one ran within the hour.
     pub(super) fn update_tick(&mut self, now: Clock, out: &mut Out) {
+        if !self.settings.check_for_updates {
+            return;
+        }
         let due = match self.last_update_check {
             None => now.mono >= UPDATE_FIRST_CHECK,
             Some(at) => now.mono >= at + UPDATE_CHECK_INTERVAL,

@@ -69,6 +69,13 @@ pub fn settings_rows(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
             }
         }
     }
+    if theme::ghost(ui, "What's new")
+        .on_hover_text("This version's changes, and a newer release's when one is found")
+        .clicked()
+    {
+        cx.state.whats_new_dialog = true;
+        ui.close();
+    }
 }
 
 /// The rail's item while an update waits on a click: its label, the

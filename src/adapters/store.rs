@@ -570,11 +570,26 @@ mod tests {
             side_tab: crate::core::SideTab::Run,
             last_view: crate::core::SavedView::Board(crate::core::ProjectId::new()),
             open_terminal_on_launch: true,
+            check_for_updates: false,
             ..Settings::default()
         };
         store.save_settings(&settings).unwrap();
         assert_eq!(store.load_all().unwrap().settings, settings);
         assert!(!dir.path().join("settings.json.tmp").exists());
+    }
+
+    #[test]
+    fn a_settings_file_from_before_the_update_switch_checks_for_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = locked_store(dir.path());
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"theme":"Dark","open_terminal_on_launch":true}"#,
+        )
+        .unwrap();
+        let settings = store.load_all().unwrap().settings;
+        assert!(settings.open_terminal_on_launch, "the file was read");
+        assert!(settings.check_for_updates);
     }
 
     #[test]

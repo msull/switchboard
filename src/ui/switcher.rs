@@ -106,6 +106,17 @@ pub fn settings_menu(
                 cx.dispatch(AppAction::SetOpenTerminalOnLaunch(open_terminal));
                 ui.close();
             }
+            let mut check = settings.check_for_updates;
+            if ui
+                .checkbox(&mut check, "Check for updates automatically")
+                .on_hover_text(
+                    "Off: no check at launch or hourly. the Check for updates button still works",
+                )
+                .changed()
+            {
+                cx.dispatch(AppAction::SetCheckForUpdates(check));
+                ui.close();
+            }
             ui.add_space(6.0);
             prompt_box_settings(cx, ui, settings);
             ui.add_space(6.0);

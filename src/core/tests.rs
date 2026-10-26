@@ -12991,6 +12991,103 @@ mod revision {
     }
 }
 
+mod changelog {
+    use crate::core::AppCore;
+    use crate::core::action::{AppAction, Clock};
+    use crate::core::changelog::{
+        BUILT_IN, NotesTag, parse_changelog, parse_notes, sections_up_to,
+    };
+    use crate::ports::updates::Release;
+
+    /// The shape of a published body: the section's groups, then the
+    /// footer `scripts/release.sh` writes.
+    const BODY: &str = "### Fixed\n\n- A paired device no longer sees secret values.\n- The remote port caps a frame at 16 KiB.\n\n\nBuilt from 2390ee2. Install by hand on a Mac that has tmux and Ghostty:\n\n```sh\ngh release download v0.7.3\n```\n\nA running Switchboard offers this release from its Settings menu. SHA-256 of the zip: `f7fb`";
+
+    #[test]
+    fn the_newest_released_section_is_the_running_version() {
+        let sections = parse_changelog(BUILT_IN);
+        let released: Vec<_> = sections.iter().filter(|s| s.date.is_some()).collect();
+        assert_eq!(
+            released[0].version,
+            env!("CARGO_PKG_VERSION"),
+            "a release folds its section before the version is bumped"
+        );
+    }
+
+    #[test]
+    fn the_view_tags_a_found_release_and_the_running_version() {
+        let mut core = AppCore::new();
+        core.set_version("0.7.2");
+        let view = core.whats_new();
+        assert_eq!(view[0].version, "0.7.2");
+        assert_eq!(view[0].tag, Some(NotesTag::Running));
+        assert!(view[1..].iter().all(|s| s.tag.is_none()));
+
+        let release = Release {
+            version: "9.0.0".into(),
+            notes: BODY.into(),
+            asset_url: "https://x/Switchboard.zip".into(),
+            asset_name: "Switchboard.zip".into(),
+            digest_url: None,
+            published_at: Some("2099-01-02T03:04:05Z".into()),
+        };
+        core.dispatch(AppAction::UpdateChecked(Ok(Some(release))), Clock::at(0));
+        let view = core.whats_new();
+        assert_eq!(view[0].version, "9.0.0");
+        assert_eq!(view[0].date.as_deref(), Some("2099-01-02"));
+        assert_eq!(view[0].tag, Some(NotesTag::NotInstalled));
+        assert_eq!(view[0].groups[0].title, "Fixed");
+        assert_eq!(view[1].tag, Some(NotesTag::Running));
+    }
+
+    #[test]
+    fn an_empty_unreleased_section_parses_without_a_date_and_wrapped_entries_join() {
+        let text = "# Changelog\n\nPreamble.\n\n## [Unreleased]\n\n## [0.2.0] - 2026-01-02\n\n### Added\n\n- One\n  wrapped.\n- Two.\n\n### Fixed\n\n- Three.\n";
+        let sections = parse_changelog(text);
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].version, "Unreleased");
+        assert_eq!(sections[0].date, None);
+        assert!(sections[0].groups.is_empty());
+        assert_eq!(sections[1].date.as_deref(), Some("2026-01-02"));
+        assert_eq!(sections[1].groups[0].items, ["One wrapped.", "Two."]);
+        assert_eq!(sections[1].groups[1].title, "Fixed");
+    }
+
+    #[test]
+    fn a_found_release_keeps_its_groups_and_drops_the_footer() {
+        let groups = parse_notes(BODY);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].title, "Fixed");
+        assert_eq!(groups[0].items.len(), 2);
+        let all = format!("{groups:?}");
+        assert!(!all.contains("Built from") && !all.contains("gh release"));
+
+        let plain = parse_notes("Thanks for waiting.\nBuilt from abc.");
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].title, "");
+        assert_eq!(plain[0].items, ["Thanks for waiting."]);
+        assert!(parse_notes("").is_empty());
+    }
+
+    #[test]
+    fn sections_newer_than_the_running_version_and_unreleased_are_hidden() {
+        let sections = parse_changelog(
+            "## [Unreleased]\n### Added\n- Soon.\n## [0.3.0] - 2026-02-01\n### Added\n- New.\n## [0.2.0] - 2026-01-01\n### Added\n- Old.\n",
+        );
+        let shown: Vec<_> = sections_up_to(&sections, "0.2.0")
+            .iter()
+            .map(|s| s.version.as_str())
+            .collect();
+        assert_eq!(shown, ["0.2.0"]);
+
+        let mut core = AppCore::new();
+        core.set_version("0.7.2");
+        let versions: Vec<_> = core.changelog().iter().map(|s| s.version.clone()).collect();
+        assert_eq!(versions.first().map(String::as_str), Some("0.7.2"));
+        assert!(!versions.contains(&"0.7.3".to_owned()));
+    }
+}
+
 mod updates {
     use super::*;
     use crate::core::updates::{UPDATE_CHECK_INTERVAL, UPDATE_FIRST_CHECK, UpdateState, is_newer};
@@ -13003,6 +13100,7 @@ mod updates {
             asset_url: "https://x/Switchboard.zip".into(),
             asset_name: "Switchboard.zip".into(),
             digest_url: Some("https://x/Switchboard.zip.sha256".into()),
+            published_at: None,
         }
     }
 
@@ -13053,6 +13151,56 @@ mod updates {
         let e = core.dispatch(AppAction::Tick, Clock::at(again - 1));
         assert!(!e.contains(&Effect::CheckForUpdate));
         let e = core.dispatch(AppAction::Tick, Clock::at(again));
+        assert!(e.contains(&Effect::CheckForUpdate));
+    }
+
+    #[test]
+    fn with_the_setting_off_no_tick_checks_but_the_manual_check_still_does() {
+        let mut core = core();
+        assert!(core.settings().check_for_updates, "on by default");
+        let e = core.dispatch(AppAction::SetCheckForUpdates(false), Clock::at(0));
+        assert!(
+            e.iter()
+                .any(|e| matches!(e, Effect::SaveSettings(s) if !s.check_for_updates))
+        );
+        let first = ms(UPDATE_FIRST_CHECK);
+        for at in [first, first + ms(UPDATE_CHECK_INTERVAL)] {
+            let e = core.dispatch(AppAction::Tick, Clock::at(at));
+            assert!(!e.contains(&Effect::CheckForUpdate), "at {at}");
+        }
+        assert_eq!(*core.update(), UpdateState::Idle);
+
+        let manual = first + ms(UPDATE_CHECK_INTERVAL) + 10;
+        let e = core.dispatch(AppAction::CheckForUpdate, Clock::at(manual));
+        assert!(e.contains(&Effect::CheckForUpdate));
+        core.dispatch(
+            AppAction::UpdateChecked(Ok(Some(release("0.3.0")))),
+            Clock::at(manual + 1),
+        );
+        assert_eq!(*core.update(), UpdateState::Available(release("0.3.0")));
+    }
+
+    #[test]
+    fn turning_the_setting_on_resumes_the_schedule_from_the_last_check() {
+        let mut core = core();
+        core.dispatch(AppAction::SetCheckForUpdates(false), Clock::at(0));
+        let first = ms(UPDATE_FIRST_CHECK);
+        core.dispatch(AppAction::Tick, Clock::at(first));
+        let e = core.dispatch(AppAction::SetCheckForUpdates(true), Clock::at(first + 5));
+        assert!(
+            e.iter()
+                .any(|e| matches!(e, Effect::SaveSettings(s) if s.check_for_updates))
+        );
+        let e = core.dispatch(AppAction::Tick, Clock::at(first + 6));
+        assert!(
+            e.contains(&Effect::CheckForUpdate),
+            "no check since launch, so one is due at once"
+        );
+        core.dispatch(AppAction::UpdateChecked(Ok(None)), Clock::at(first + 7));
+        let next = first + 6 + ms(UPDATE_CHECK_INTERVAL);
+        let e = core.dispatch(AppAction::Tick, Clock::at(next - 1));
+        assert!(!e.contains(&Effect::CheckForUpdate));
+        let e = core.dispatch(AppAction::Tick, Clock::at(next));
         assert!(e.contains(&Effect::CheckForUpdate));
     }
 

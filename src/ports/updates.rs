@@ -6,8 +6,8 @@
 use std::path::{Path, PathBuf};
 
 /// One published release newer than the running app, as the source
-/// describes it: the version (no `v`), its notes, and where its bundle
-/// and the bundle's checksum are.
+/// describes it: the version (no `v`), its notes, when it was published,
+/// and where its bundle and the bundle's checksum are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
     pub version: String,
@@ -15,6 +15,8 @@ pub struct Release {
     pub asset_url: String,
     pub asset_name: String,
     pub digest_url: Option<String>,
+    /// The RFC 3339 time GitHub gives as `published_at`, as sent.
+    pub published_at: Option<String>,
 }
 
 /// Where releases come from and how one is installed. Every method

@@ -86,8 +86,9 @@ of each bearer token, never the token; see `docs/remote-client.md`),
 `settings.json` (theme, the active workspace, editor, global variables, file
 side shown next to sessions and its tab, the directory each project's
 file side starts at when narrowed, the screen to reopen on, the
-Prompt Box switch and its trigger word, model, captions, and the screen
-its caption bar and preview panel appear on, the sessions open in
+Prompt Box switch and its trigger word, model, captions, the screen
+its caption bar and preview panel appear on, whether updates are
+checked for on a schedule, the sessions open in
 windows of their own and where each window sits, where the main
 window sits, the zoom of each display, the workflow round cap and the
 user's workflow definitions, and the environment sets: each set's
@@ -216,9 +217,10 @@ commit `v<version>` and attaches both to a GitHub release whose notes
 are the changelog's section. It refuses a dirty tree, a version without
 a changelog section, and a tag that exists.
 
-A running Switchboard checks the repository's latest release twenty
-seconds after launch and hourly (`core::updates`, the
-`adapters::updates::GitHubReleases` source over `ureq`). A newer version
+A running Switchboard checks the repository's latest release
+(`core::updates`, the `adapters::updates::GitHubReleases` source over
+`ureq`) twenty seconds after launch and hourly, unless Settings' "Check
+for updates automatically" is off; then only "Check for updates" looks. A newer version
 is a notice and an "Update" item on the rail: the click downloads the
 zip to `$TMPDIR/switchboard-update`, checks it against the published
 SHA-256, unpacks it with `ditto`, verifies the bundle's signature with
@@ -231,6 +233,12 @@ copy fails (its output is in `$TMPDIR/switchboard-update/swap.log`). A
 bare `cargo run` binary, an unsigned bundle or one outside a writable
 directory refuses to install and says so. A pre-release tag or one that
 does not parse is never offered.
+
+Settings' "What's new" opens the changelog the binary was built with
+(`core::changelog`), from the running version down. While a newer
+release is on offer, its notes come first, marked not installed, read
+from the release body with the install footer dropped; the sections
+between the running version and that one appear after the update.
 
 Another Mac installs a release by hand, with `tmux`, Ghostty and `gh`
 installed:
@@ -336,7 +344,7 @@ Dev aids, all environment variables:
   `pop-out`, `close-pop-out`, `files-root`, `zoom`, `place-pop-out`,
   `place-card`, `new-workspace`, `workspace`, `workspace-global`,
   `move-project`, `move-working-set`, `controller`,
-  `open-terminal`, `prompt-box`, `theme`, `sleep`).
+  `open-terminal`, `update-check on|off`, `prompt-box`, `theme`, `sleep`).
 - `SWITCHBOARD_CONTROLLER=<device>`: the nunchuk's serial port (default: the
   `/dev/cu.usbmodem*` whose USB product name is Feather or MagTag, waited
   for if absent; no other board is ever opened, since a port that never answers
@@ -373,7 +381,8 @@ src/core/
   workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records
   control.rs             the control port's commands run quietly under an operation id; read models in the wire's shapes; `ready_for_prompt`, the one verdict `session.prompt` and a view's `prompt_refusal` share
   remote.rs              the remote port's state: the host's identity and paired devices as loaded, the pairing window with its code, scope and failure counts per source address (three lock an address out until the window is reopened), a device's scope and revocation; `invite_url`, the page's URL with the code, key and id in its fragment that the QR carries
-  updates.rs             the app's version and its update: the scheduled check, a newer release offered, downloaded on a click and installed on another; semantic versions, pre-releases never offered
+  updates.rs             the app's version and its update: the scheduled check (off when the setting says so), a newer release offered, downloaded on a click and installed on another; semantic versions, pre-releases never offered
+  changelog.rs           the CHANGELOG.md this binary was built with, compiled in, as sections of titled groups; a found release's notes the same way with the release footer dropped; the sections at or below the running version
   tickets.rs             Dispatch's tickets as the remote port says them: each ticket's summary with its standing worded as the Mac's page words it, its decisions, and alone its body, attempts and lanes (the checks log listed once); one value for the port's fingerprint and its replies; and whether an attempt ran with grants (its checks, or a session that holds sets)
   revision.rs            the read-model fingerprints behind the remote port's revision: every exported view hashed with its time-derived fields held still, and the `changed`/`removed` diff between two passes (and a record's runs as the `runs` collection)
   diff.rs                a changed file's diff as held per ticket, lane and path, when a re-read is due, which unchanged runs fold
@@ -414,7 +423,8 @@ src/ui/
   theme.rs               the look: color tokens per theme, Source Serif 4, type scale, shared widgets (dot, kicker, buttons)
   rail.rs                left project rail (brand, All sessions, Dispatch with its pending decisions, projects with dots, Go to, Settings); a session's neighbours beside it; its list scrolls between a fixed head and Go to / Settings
   switcher.rs            Settings menu and the toasts (notice, host error)
-  updates.rs             the version and the update's state in the Settings menu, and the rail's item while a release waits on a click
+  updates.rs             the version and the update's state in the Settings menu, its What's new button, and the rail's item while a release waits on a click
+  whats_new.rs           the What's new dialog: a found release's notes marked not installed, then the built-in changelog from the running version down
   board.rs               one project's board: run bar, agent and shell cards, command and service rows, pinned documents, notes
   files.rs               Files tab of the side panel: lazy tree (from the project root or a directory chosen as its top), fuzzy finder, bottom preview pane, right-click hand-offs
   run.rs                 Run tab of the side panel: commands and services, definitions, approval, last run
