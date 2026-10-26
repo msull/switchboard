@@ -1757,12 +1757,18 @@ impl Pipeline {
     /// running, which is parsed every pass and would park on a new
     /// rule: no code review stage holds a `[[resources]]` entry, since
     /// its rounds take hours and every other ticket would wait through
-    /// them; and no `[policy.decisions]` dial other than `ask` names a
+    /// them; no `[policy.decisions]` dial other than `ask` names a
     /// decision a human gate of the file asks, since a human gate reads
-    /// no dial and the owner would believe it automated. `lanes` is
+    /// no dial and the owner would believe it automated (`lanes` is
     /// excepted: a human gate deciding it reaches the branch that reads
-    /// its dial.
+    /// its dial); and no template names a decision that no gate of the
+    /// file and nothing in Dispatch asks. A copy that stops reading skips
+    /// its ticket every pass and blocks `runner start` while it has an
+    /// open attempt, so a new rule here never strands a running ticket.
     pub fn validate_for_take(&self) -> Result<()> {
+        for stage in &self.stages {
+            self.validate_decision_vars(stage)?;
+        }
         for s in &self.stages {
             if s.kind() != StageKind::Review {
                 continue;
@@ -1975,7 +1981,6 @@ impl Pipeline {
             self.validate_stage(stage, &written)?;
             self.validate_inputs(stage, &self.stages[..i])?;
             self.validate_evidence_inputs(stage, &self.stages[..i])?;
-            self.validate_decision_vars(stage)?;
             if let Some(subject) = &stage.subject
                 && secrets.contains(&subject.as_str())
             {
@@ -2090,7 +2095,9 @@ impl Pipeline {
 
     /// Every `{decisions.X}` a template names is a decision some gate of
     /// this file or Dispatch itself asks. An unanswered one renders
-    /// empty, so a misspelt name would otherwise vanish unseen.
+    /// empty, so a misspelt name would otherwise vanish unseen. Only
+    /// `validate_for_take` calls it, so a running ticket's copy of the
+    /// file is never checked again.
     fn validate_decision_vars(&self, stage: &Stage) -> Result<()> {
         let asked = self.gate_decisions();
         for name in crate::template::decision_names(&self.templates_of(stage)) {
@@ -2098,7 +2105,7 @@ impl Pipeline {
                 && !crate::scheduler::DECISIONS.contains(&name.as_str())
             {
                 bail!(
-                    "stage {:?} names {{decisions.{name}}}, but no gate of this file and nothing in Dispatch asks a decision {name:?}",
+                    "stage {:?} names {{decisions.{name}}}, but no gate of this file asks a decision {name:?} and it is not one Dispatch asks",
                     stage.name
                 );
             }
@@ -2225,6 +2232,11 @@ impl Pipeline {
         }
         let asked = self.gate_decisions();
         for name in &sup.decides {
+            if name == crate::ticket::STUCK {
+                bail!(
+                    "[supervisor] decides: `stuck` is the owner's: its answer `released` ends a wait the stop may not have confirmed; the owner answers it"
+                );
+            }
             if crate::scheduler::DECISIONS.contains(&name.as_str())
                 || asked.contains(&name.as_str())
             {
@@ -2553,6 +2565,13 @@ gate = {{ kind = "external", check = "pr-merged" }}
         );
         // A gate of this file asks it: a human gate's own name.
         supervised("guidance = \"g\"\ndecides = [\"lanes\", \"merge\"]").unwrap();
+        // Dispatch asks `stuck`, but its answer is the owner's.
+        let e = err("guidance = \"g\"\ndecides = [\"stuck\"]");
+        assert_eq!(
+            e,
+            "[supervisor] decides: `stuck` is the owner's: its answer `released` ends a wait the stop may not have confirmed; the owner answers it"
+        );
+        supervised("guidance = \"g\"\ndecides = [\"service\"]").unwrap();
     }
 
     #[test]
@@ -3736,6 +3755,23 @@ without_lane = "base"
         }
     }
 
+    /// The Switchboard pipeline with `extra` appended, parsed and checked
+    /// as a take checks it.
+    fn with_take(extra: &str) -> Result<Pipeline> {
+        let p = with(extra)?;
+        p.validate_for_take()?;
+        Ok(p)
+    }
+
+    /// `extra` passes `parse` and a take refuses it with every
+    /// fragment in `expected`.
+    fn refused_at_take(extra: &str, expected: &[&str]) {
+        let err = with_take(extra).unwrap_err().to_string();
+        for e in expected {
+            assert!(err.contains(e), "{extra}: {err}");
+        }
+    }
+
     /// A joined agent stage `test` whose prompt is `prompt`.
     fn joined(prompt: &str) -> String {
         format!(
@@ -3863,8 +3899,8 @@ without_lane = "base"
     }
 
     #[test]
-    fn a_template_naming_a_decision_nothing_asks_is_refused() {
-        refused(
+    fn a_template_naming_a_decision_nothing_asks_is_refused_at_take() {
+        refused_at_take(
             &joined("Do {decisions.nope.note}."),
             &[
                 "stage \"test\" names {decisions.nope}",
@@ -3872,19 +3908,29 @@ without_lane = "base"
             ],
         );
         // A gate of this file asks it, wherever the gate stands.
-        with(&format!(
+        with_take(&format!(
             "{}\n{}",
             joined("Do {decisions.lead} {decisions.lead.note}."),
             asking("lead", "Go?")
         ))
         .unwrap();
-        // Dispatch asks `lanes` and `finalize` itself.
-        with(&joined("Do {decisions.lanes.note} {decisions.finalize}.")).unwrap();
+        // Dispatch asks `lanes` and `finalize` itself, and `stuck` and
+        // `service` for a service that will not stop or start.
+        with_take(&joined("Do {decisions.lanes.note} {decisions.finalize}.")).unwrap();
+        with_take(&joined("Do {decisions.stuck.note} {decisions.service}.")).unwrap();
         // A gate's own question is a template too.
-        refused(
+        refused_at_take(
             &asking("lead", "After {decisions.nope}?"),
             &["stage \"ask\" names {decisions.nope}"],
         );
+    }
+
+    #[test]
+    fn a_running_copy_naming_an_unknown_decision_still_reads() {
+        // A ticket's copy is parsed every pass; only a take refuses it.
+        let p = with(&joined("Do {decisions.nope}.")).unwrap();
+        let e = p.validate_for_take().unwrap_err().to_string();
+        assert!(e.contains("names {decisions.nope}"), "{e}");
     }
 
     #[test]

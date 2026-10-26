@@ -617,10 +617,10 @@ A file that sets a dial other than `ask` for a human gate's decision is
 refused at take and at restart, naming the stage; `lanes` is the one
 exception.
 Every `{decisions.<name>}` must name a decision some gate of the file
-or Dispatch itself asks, or the file is refused. A ticket taken before
-the stage was added gets it only through `dispatch restart <ticket>
-decisions`, and a project that works in place not at all: that restart
-is ranged and refused there.
+or Dispatch itself asks, or a take of the file is refused. A ticket
+taken before the stage was added gets it only through `dispatch
+restart <ticket> decisions`, and a project that works in place not at
+all: that restart is ranged and refused there.
 
 **Which context each stage wants.**
 
@@ -1611,11 +1611,12 @@ may = ["restart"]
   other decision is yours. A name is either one Dispatch asks of its
   own accord (`finalize`, `paused`, `rerun`, `pr`, `branch`, `lanes`,
   `refresh`, `review-cap`, `review-code`, `message`, `resolution`,
-  `lost-send`) or one a gate of this file asks. That is a human or
-  external gate's `decision`, such as `tried`, or `merge` for a
-  `pr-merged` gate that names none. A gate's decision is valid only
-  while the file has that gate, so this fragment needs step 7's
-  `merge` and `tried` stages. `decides` never takes an answer:
+  `lost-send`, `service`) or one a gate of this file asks. `stuck`
+  is never one: a template may name it, but its answer `released`
+  is always yours. A gate's name is a human or external gate's
+  `decision`, such as `tried`, or `merge` for a `pr-merged` gate that
+  names none. A gate's decision is valid only while the file has that
+  gate, so this fragment needs step 7's `merge` and `tried` stages. `decides` never takes an answer:
   `keep` or `check` in place of `rerun`, `recheck` in place of `pr`,
   `refresh` or `merge`, and `proceed` in place of a human gate's
   decision are refused, naming the decision to use.

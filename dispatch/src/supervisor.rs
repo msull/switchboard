@@ -21,11 +21,8 @@ use crate::pipeline::{OperatorKind, Pipeline, Supervisor};
 use crate::scheduler::{
     BY_SUPERVISOR, DECISIONS, Runner, SocketDown, ask_bin_beside_exe, shell_path,
 };
-use crate::services::SERVICE;
 use crate::store::{DataDir, atomic_write, read_project, read_ticket, shell_unsafe};
-use crate::ticket::{
-    Operation, PastSupervisor, ProjectState, STUCK, SupervisorIntent, SupervisorRecord,
-};
+use crate::ticket::{Operation, PastSupervisor, ProjectState, SupervisorIntent, SupervisorRecord};
 
 /// The commands a supervisor works with, for its seed. `{exe}` is the
 /// full path of the `dispatch` it must type, since its allow rule
@@ -88,7 +85,7 @@ fn decision_words(name: &str) -> Option<&'static str> {
 /// Whether `name` is a gate's decision with no words of its own: not
 /// one Dispatch asks of its own accord, whose answers are not a gate's.
 fn gate_without_words(name: &str) -> bool {
-    decision_words(name).is_none() && !DECISIONS.contains(&name) && name != SERVICE && name != STUCK
+    decision_words(name).is_none() && !DECISIONS.contains(&name)
 }
 
 /// What the seed says of a gate's decision `decision_words` has no
@@ -179,7 +176,9 @@ pub fn seed(
     let _ = write!(
         out,
         "\nEvery other decision is the owner's: say so and move on. Tell the owner they \
-         answer it {OWNER_ROUTES}. A `dispatch` command the owner types in this pane, a `!` \
+         answer it {OWNER_ROUTES}. A `stuck` question is always the owner's, whatever \
+         you decide: its answer `released` ends a wait the stop may not have confirmed. \
+         A `dispatch` command the owner types in this pane, a `!` \
          line included, runs as you and is refused the same way, so never suggest it, and \
          never change your environment to get round the rule. A `merge` question is \
          answered `recheck` or `park` and no answer resolves it: Dispatch resolves it when \
@@ -1144,6 +1143,7 @@ pub(crate) fn apply_supervisor_reply(ps: &mut ProjectState, reply: &Reply) {
 mod tests {
     use super::*;
     use crate::pipeline::SupervisorSetup;
+    use crate::services::SERVICE;
 
     #[test]
     fn a_session_name_carries_its_start_in_the_given_zone() {
@@ -1275,6 +1275,7 @@ mod tests {
             "- `rerun`: `rerun` runs a failed",
             "Every other decision is the owner's: say so and move on.",
             OWNER_ROUTES,
+            "A `stuck` question is always the owner's, whatever you decide",
             "a `!` line included, runs as you",
             "never change your environment",
             "answered `recheck` or `park`",
@@ -1457,7 +1458,6 @@ mod tests {
             &["review-code"],
             &["lost-send"],
             &[SERVICE],
-            &[STUCK],
         ] {
             let s = with(known);
             assert!(!s.contains(GATE_WORDS), "{s}");

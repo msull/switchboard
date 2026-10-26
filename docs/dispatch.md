@@ -1096,7 +1096,7 @@ as written.
 | `{inputs.<artifact>}` | the path from the newest completed attempt that wrote it, among this lane's and those of stages that run in one context; `$DISPATCH_INPUT_<ARTIFACT>` |
 | `{inputs.<stage>.<artifact>}` | the path from the latest completed attempt of `<stage>`, in this lane when `<stage>` runs per lane; `$DISPATCH_INPUT_<STAGE>_<ARTIFACT>`. A root or joined stage naming a per-lane stage's artifact is refused |
 | `{inputs.<stage>.commit}` | the head that same attempt's gate recorded (a deploy's commit); refused in the same case |
-| `{decisions.<name>}` | the answer to decision `<name>` (`proceed`), for every decision a gate of the pipeline or Dispatch itself asks: the newest answered one this context sees (a root gate's from every lane, a per-lane gate's in its own lane), so an answer given after a `rerun` or a restart takes over; empty while there is none. A name no gate and nothing in Dispatch asks is refused when the file is read |
+| `{decisions.<name>}` | the answer to decision `<name>` (`proceed`), for every decision a gate of the pipeline or Dispatch itself asks: the newest answered one this context sees (a root gate's from every lane, a per-lane gate's in its own lane), so an answer given after a `rerun` or a restart takes over; empty while there is none. `service` (a service that would not start) and `stuck` (a stop past its limit) read the newest answer on the whole ticket, not this context's, so a prompt can show an earlier stop's `wait`. A name no gate and nothing in Dispatch asks is refused when a ticket takes the file; a ticket's copy already running is not checked again |
 | `{decisions.<name>.note}` | the note given with that answer, as typed (braces in it are not read as fields); empty when it had none |
 
 A command-gated stage's `checks` log and a code review's `summary`
@@ -2667,10 +2667,14 @@ may = ["runner", "restart"]   # capabilities beyond decisions; absent, they are 
 
 `decides` takes decision names: those Dispatch asks of its own accord
 (`finalize`, `paused`, `rerun`, `pr`, `branch`, `lanes`, `refresh`,
-`review-cap`, `review-code`, `message`, `resolution`, `lost-send`) and
-those a gate of the same file asks (a human gate's `decision`, an
-external gate's, and `merge` for a `pr-merged` gate that names none).
+`review-cap`, `review-code`, `message`, `resolution`, `lost-send`,
+`service`) and those a gate of the same file asks (a human gate's
+`decision`, an external gate's, and `merge` for a `pr-merged` gate that
+names none).
 An answer such as `recheck` is refused with the decisions that take it.
+`stuck` is refused too: Dispatch asks it, and a template may name it,
+but its answer `released` ends a wait the stop may not have confirmed,
+so it is always the owner's.
 
 `may` lists capabilities beyond decisions; today `runner` and
 `restart`. `runner` lets the supervisor run `dispatch runner
