@@ -4576,12 +4576,25 @@ const PROBE_PATH: &str = "/dispatch/tickets/t1/investigate/1/root/evidence/probe
 /// runner lists the checks log among the artifacts too, as real
 /// Dispatch does. Returns the port and the session.
 fn port_with_a_granted_ticket(big: bool) -> (Port, String) {
-    use switchboard::ports::dispatch::EventView;
-    let checks = if big {
-        "x".repeat(800 * 1024)
+    if big {
+        port_with_a_checks_log_of(800 * 1024)
     } else {
-        format!("+ deploy --key {SET_VALUE}\nok\n")
-    };
+        port_with_ticket_text(
+            format!("+ deploy --key {SET_VALUE}\nok\n"),
+            format!("Deploy with {SET_VALUE}."),
+        )
+    }
+}
+
+/// The granted ticket with a checks log of `len` bytes.
+fn port_with_a_checks_log_of(len: usize) -> (Port, String) {
+    port_with_ticket_text("x".repeat(len), format!("Deploy with {SET_VALUE}."))
+}
+
+/// The granted ticket with `checks` as its checks log and `body` as
+/// its body.
+fn port_with_ticket_text(checks: String, body: String) -> (Port, String) {
+    use switchboard::ports::dispatch::EventView;
     let secrets = FakeSecrets::default();
     let mut port = port_built(
         FakeHost::default(),
@@ -4665,7 +4678,7 @@ fn port_with_a_granted_ticket(big: bool) -> (Port, String) {
     assert!(matches!(reply, Reply::Persisted { .. }), "{reply:?}");
     let mut status = tickets_status();
     let t1 = &mut status.tickets[1];
-    t1.body = format!("Deploy with {SET_VALUE}.");
+    t1.body = body;
     t1.attempts[0].session = Some(session.clone());
     t1.attempts[0]
         .artifacts
@@ -4793,6 +4806,80 @@ fn a_tickets_file_over_the_cap_is_refused_whole() {
         Some(&token),
     );
     assert_eq!((status, code(&reply)), (413, "too_large"), "{reply}");
+    let reason = reply["error"]["message"].as_str().unwrap_or_default();
+    assert!(reason.contains(&(800 * 1024).to_string()), "{reply}");
+}
+
+/// The checks log of `len` bytes as a device reads it.
+fn checks_log_read(len: usize) -> (u16, serde_json::Value) {
+    let (mut port, _) = port_with_a_checks_log_of(len);
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let checks = file_key_named(&mut port, &token, "checks");
+    get(
+        &mut port,
+        &format!("/api/v1/dispatch/tickets/t1/files/{checks}"),
+        Some(&token),
+    )
+}
+
+#[test]
+fn a_tickets_file_under_the_file_cap_reaches_a_device_whole() {
+    let (status, reply) = checks_log_read(200 * 1024);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["text"].as_str().unwrap().len(), 200 * 1024);
+    assert!(
+        reply["body"]["truncated"].is_null(),
+        "{}",
+        reply["body"]["truncated"]
+    );
+}
+
+#[test]
+fn a_tickets_file_past_the_file_cap_is_cut_and_says_so() {
+    let (status, reply) = checks_log_read(300 * 1024);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["text"].as_str().unwrap().len(), 256 * 1024);
+    assert_eq!(reply["body"]["truncated"], serde_json::json!(["text"]));
+}
+
+#[test]
+fn a_secret_across_the_file_cap_is_masked_before_the_cut() {
+    // Unmasked, the cut would keep `dk-"q7Zp`.
+    let before = 256 * 1024 - 8;
+    let checks = format!(
+        "{}{SET_VALUE}{}",
+        "a".repeat(before),
+        "b".repeat(300 * 1024 - before - SET_VALUE.len())
+    );
+    let (mut port, _) = port_with_ticket_text(checks, "Short.".into());
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let key = file_key_named(&mut port, &token, "checks");
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/dispatch/tickets/t1/files/{key}"),
+        Some(&token),
+    );
+    assert_eq!(status, 200, "{reply}");
+    let text = reply["body"]["text"].as_str().unwrap();
+    assert_eq!(text.len(), 256 * 1024);
+    assert!(text.ends_with("<DEPLOY_"), "{}", &text[text.len() - 16..]);
+    assert!(!reply.to_string().contains("q7Zp"));
+    assert_eq!(reply["body"]["truncated"], serde_json::json!(["text"]));
+}
+
+#[test]
+fn a_tickets_long_body_reaches_a_device_whole() {
+    let body = "w".repeat(20 * 1024);
+    let (mut port, _) = port_with_ticket_text("ok\n".into(), body.clone());
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let (status, reply) = get(&mut port, "/api/v1/dispatch/tickets/t1", Some(&token));
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["body"], body.as_str());
+    assert!(
+        reply["body"]["truncated"].is_null(),
+        "{}",
+        reply["body"]["truncated"]
+    );
 }
 
 #[test]

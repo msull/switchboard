@@ -8,7 +8,7 @@
 //! machine looks the same through a forwarded socket.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -857,6 +857,33 @@ pub fn nudged(n: usize) -> Option<String> {
     }
 }
 
+/// The most of any ticket file `Body::Artifact` reads, in source bytes.
+/// Switchboard's port caps a file it reads at the same number, so a file
+/// Dispatch reads is never refused again on the way to a device.
+pub const FILE_TEXT_MAX: u64 = 768 * 1024;
+
+const TOO_LARGE: &str = "too large (";
+
+/// The reason Dispatch refuses an artifact over [`FILE_TEXT_MAX`] with. It
+/// starts with a stable prefix carrying the size, which [`too_large_len`]
+/// reads back, so a client never matches the free text after it.
+#[must_use]
+pub fn too_large_reason(path: &Path, len: u64) -> String {
+    format!(
+        "{TOO_LARGE}{len} bytes): {} is over the {FILE_TEXT_MAX} bytes shown inline; open it instead",
+        path.display()
+    )
+}
+
+/// The size in a reason [`too_large_reason`] wrote, or `None` for any
+/// other reason, including a runner's from before the prefix existed.
+#[must_use]
+pub fn too_large_len(reason: &str) -> Option<u64> {
+    let rest = reason.strip_prefix(TOO_LARGE)?;
+    let (len, _) = rest.split_once(" bytes)")?;
+    len.parse().ok()
+}
+
 /// The stage name of a resolution review's attempts: the one review
 /// pass a conflicted bring-up gets after the pipeline's last code review.
 pub const RESOLUTION: &str = "resolution";
@@ -1021,6 +1048,23 @@ fn to_line<T: Serialize>(value: &T) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_too_large_reason_reads_back_its_size_and_nothing_else_does() {
+        let path = Path::new("/data/t 1/evidence (old)/checks.log");
+        let reason = too_large_reason(path, 900_000);
+        assert_eq!(too_large_len(&reason), Some(900_000));
+        assert!(reason.contains("(old)/checks.log is over the"), "{reason}");
+        assert!(reason.ends_with("open it instead"), "{reason}");
+        assert_eq!(
+            too_large_len(
+                "/data/t1/checks.log is 900000 bytes, over the 1048576 shown inline; open it instead"
+            ),
+            None
+        );
+        assert_eq!(too_large_len("no such file"), None);
+        assert_eq!(too_large_len("too large (many bytes): x"), None);
+    }
 
     #[test]
     fn paths_from_an_older_runner_read_with_no_plan_label() {

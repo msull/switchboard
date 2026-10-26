@@ -5952,6 +5952,21 @@ fn the_plan_is_read_again_once_the_ticket_moves() {
     harness.get_by_label("Step one of the plan.");
 }
 
+/// A plan past what Dispatch reads is refused on the page with its
+/// size, as the runner words it.
+#[test]
+fn a_plan_refused_as_too_large_says_so_with_its_size() {
+    let (mut dispatch, edit) = ticket_with_documents();
+    let path = PathBuf::from("/dispatch/tickets/t1/plan/1/plan.md");
+    dispatch.artifacts.insert(path.clone(), "p".repeat(900_000));
+    let mut harness = ticket_page_on(dispatch, Changes::default(), edit);
+    click(&mut harness, "Plan");
+    harness.run_steps(2);
+    let reason = dispatch_control::too_large_reason(&path, 900_000);
+    assert!(reason.contains("900000 bytes"), "{reason}");
+    harness.get_by_label(&format!("Not read: {reason}"));
+}
+
 /// A round the owner opened with an objection says so in its title.
 #[test]
 fn the_plan_tab_marks_the_owners_round() {

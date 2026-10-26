@@ -23205,3 +23205,72 @@ fn a_supervisor_answers_the_gate_only_when_it_decides_it() {
         last_prompt_of(&env, "planner")
     );
 }
+
+// --- ticket files read through the port: every file up to one bound
+
+/// What the port answers for `path`, read the way a client asks.
+fn read_through_port(env: &Env, id: &str, path: PathBuf) -> dispatch_control::Reply {
+    let mut handler = dispatch::serve::Handler {
+        runner: Runner::new(
+            env.data.clone(),
+            Box::new(SharedPort(Arc::clone(&env.sb))),
+            Box::new(Arc::clone(&env.repo)),
+        ),
+        issues: Box::new(dispatch::github::FakeIssues::default()),
+    };
+    handler.handle(
+        &dispatch_control::Request::new(
+            "a",
+            dispatch_control::Body::Artifact {
+                ticket: id.to_owned(),
+                path,
+            },
+        ),
+        env.now,
+    )
+}
+
+#[test]
+fn a_ticket_file_is_read_whole_up_to_the_bound_and_refused_past_it_with_its_size() {
+    use dispatch_control::{FILE_TEXT_MAX, Reply, too_large_len};
+    let mut env = Env::new();
+    let id = through_plan(&mut env, 7);
+    let log = env
+        .data
+        .ticket_dir(&id)
+        .join("investigate/1/root/checks.log");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    let max = usize::try_from(FILE_TEXT_MAX).unwrap();
+    for len in [max - 1, max] {
+        let body = "y".repeat(len);
+        std::fs::write(&log, &body).unwrap();
+        let reply = read_through_port(&env, &id, log.clone());
+        let Reply::Artifact { text } = reply else {
+            panic!("{len} bytes read: {reply:?}");
+        };
+        assert!(text == body, "{len} bytes read whole");
+    }
+    for len in [max + 1, 1024 * 1024] {
+        std::fs::write(&log, "y".repeat(len)).unwrap();
+        let reply = read_through_port(&env, &id, log.clone());
+        let Reply::Failed { reason } = &reply else {
+            panic!("{len} bytes refused: {reply:?}");
+        };
+        assert_eq!(too_large_len(reason), Some(len as u64), "{reason}");
+        assert!(reason.ends_with("open it instead"), "{reason}");
+    }
+}
+
+#[test]
+fn an_evidence_file_shares_the_bound_of_every_ticket_file() {
+    use dispatch_control::{Reply, too_large_len};
+    let (mut env, id) = evidence_env("");
+    let dir = tester_running(&mut env, &id);
+    let file = dir.join("trace.txt");
+    std::fs::write(&file, "z".repeat(1024 * 1024)).unwrap();
+    let reply = read_through_port(&env, &id, file);
+    let Reply::Failed { reason } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert_eq!(too_large_len(reason), Some(1024 * 1024), "{reason}");
+}

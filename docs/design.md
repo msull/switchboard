@@ -3087,7 +3087,8 @@ close with `dispatch close --drop-evidence`; the attempt keeps
 ticket page lists each file with its size and age, Open only for
 documents and images (`evidence_opens`, since an agent's file has no
 quarantine flag), Reveal for every file, and View for `.md` and `.txt`
-through the port, which reads an evidence file only up to 1 MiB.
+through the port, which reads an evidence file only up to 768 KiB,
+the same bound as every ticket file.
 
 Spike 21 measured which writes reach the directory unasked: the Write
 tool does under the attempt directory's existing allow rule; Bash `cp`,
@@ -3838,11 +3839,19 @@ Built so far:
   and the events with a set value named, a grant taken back, a failing
   store, a file over the cap, and a withheld image. Known gaps: the
   Mac's own ticket page and the files on disk are not masked; a value
-  in an encoded or `set -x`-quoted form can pass; Dispatch reads an
-  artifact for the Mac with no size cap; a gate still resolves the
-  runner's grants and ignores the stage's `env` names; and whether a
+  in an encoded or `set -x`-quoted form can pass; a gate still resolves
+  the runner's grants and ignores the stage's `env` names; and whether a
   real `switchboard-env exec` gate's log carries a set value to the
   port was not run, only the fixture.
+- Ticket text bounds (2026-10-26): the port cut every ticket string
+  at 4 KiB, so a file or a body past it lost the rest; it now cuts per
+  read: a file's `text` at 256 KiB, a ticket alone's `notes` and
+  `body` at 64 KiB, an event's `text` and the list's strings at 4 KiB.
+  Dispatch reads every ticket file with `take(FILE_TEXT_MAX + 1)` and
+  refuses one over 768 KiB before reading it, with the size in a
+  stable reason prefix; the port maps that refusal to `too_large`
+  (413, naming source bytes), and the Mac's page drops the text it
+  held and says `Not read:` with the size.
 
 ## Versioning and updates (2026-10-15)
 

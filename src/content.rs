@@ -66,8 +66,9 @@ pub const ACTIVITY_BYTES_CAP: usize = 512;
 pub const PAGE_TURNS_CAP: usize = 100;
 pub const PAGE_TURNS_DEFAULT: usize = 20;
 /// A pinned file is sent whole or not at all: more source bytes than
-/// this answer `too_large`.
-pub const FILE_BYTES_CAP: u64 = 768 * 1024;
+/// this answer `too_large`. It is Dispatch's bound on a ticket file on
+/// purpose, so a file Dispatch reads is never refused again here.
+pub const FILE_BYTES_CAP: u64 = dispatch_control::FILE_TEXT_MAX;
 /// How many jobs may wait for the worker.
 const JOBS: usize = 64;
 

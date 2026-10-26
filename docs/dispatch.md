@@ -1157,7 +1157,7 @@ them at once. Switchboard's ticket page offers Open only for
 documents and images (`png jpg jpeg gif webp heic pdf csv tsv txt md
 json log mp4 mov`), since a file an agent wrote carries no quarantine
 flag; every file gets Reveal. The port reads an evidence file inline
-only up to 1 MiB.
+only up to 768 KiB, the bound on every ticket file.
 
 ### Pipeline: Switchboard
 
@@ -2904,7 +2904,11 @@ run` is up it serves `<data>/dispatch.sock` (wire crate
 ticket as a view (stage names resolved, attempts, decisions, lanes,
 artifact paths), `ticket` one in full (with its plan review's round
 files and each lane's clone), `artifact` the text of a file under a
-ticket's directory and nothing outside it, `events` a ticket's lines
+ticket's directory and nothing outside it (a file over 768 KiB,
+`FILE_TEXT_MAX`, is refused before it is read, with its size in a
+`too large (N bytes)` reason that `too_large_len` reads back; the
+Mac's own ticket page shows that refusal in place of any text it held,
+and a device gets it as `too_large`), `events` a ticket's lines
 of the event log after a cursor (with the next cursor and the seqs a
 `void` withdrew), and `decide`,
 `queue`, `take`, `resume`, `close` and `worktrees` do exactly what the command
