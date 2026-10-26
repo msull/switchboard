@@ -1,0 +1,1 @@
+Fixed: A paired device no longer sees secret values in a ticket's check logs, evidence text, body or events, which are masked like a session's screen, and images from an attempt that ran with environment grants are withheld.

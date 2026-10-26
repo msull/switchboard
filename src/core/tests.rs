@@ -13189,6 +13189,7 @@ mod tickets {
                         head: "abc".into(),
                         exit: Some(1),
                         log: "/d/t1/try/2/joined/checks.log".into(),
+                        env: false,
                     }),
                     evidence: vec![
                         EvidenceView {
@@ -13250,6 +13251,74 @@ mod tickets {
         );
         assert!(core.ticket_file("t1", "nope").is_none());
         assert!(core.ticket_file("t2", &key).is_none());
+    }
+
+    #[test]
+    fn the_checks_log_listed_as_an_artifact_too_is_listed_once_by_its_name() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        let mut status = status();
+        let a = &mut status.tickets[0].attempts[0];
+        a.artifacts
+            .push(("r1/checks".into(), "/d/t1/try/2/joined/checks.log".into()));
+        core.dispatch(AppAction::DispatchStatus(Some(status)), Clock::at(2));
+        let detail = core.ticket_detail("t1").unwrap();
+        let files = &detail.attempts[0].files;
+        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["notes", "token", "r1/checks", "Shot.PNG", "run.command"]
+        );
+        assert_eq!(files[2].kind, "checks");
+    }
+
+    #[test]
+    fn an_attempt_ran_with_env_when_its_checks_did_or_its_session_holds_sets() {
+        let p = project("p");
+        let pid = p.id;
+        let mut w = Workspace::new(p);
+        for i in 0..3 {
+            w.sessions.push(record(pid, agent(), i));
+        }
+        w.sessions[2].env_sets = vec!["deploy".into()];
+        let ids: Vec<RecordId> = w.sessions.iter().map(|s| s.id).collect();
+        let mut core = AppCore::new();
+        core.dispatch(
+            AppAction::StoreLoaded(Ok(Loaded {
+                workspaces: vec![w],
+                ..Loaded::default()
+            })),
+            Clock::at(0),
+        );
+        let mut status = status();
+        let gone = RecordId(uuid::Uuid::new_v4());
+        let attempt = |n: u32, session: Option<String>, env: bool| AttemptView {
+            stage: "try".into(),
+            n,
+            session,
+            checks: Some(ChecksView {
+                env,
+                ..ChecksView::default()
+            }),
+            ..AttemptView::default()
+        };
+        status.tickets[0].attempts = vec![
+            attempt(1, Some(ids[1].0.to_string()), true),
+            attempt(2, Some(ids[1].0.to_string()), false),
+            attempt(3, Some("not a record".into()), false),
+            attempt(4, Some(gone.0.to_string()), false),
+        ];
+        status.tickets.push(TicketView {
+            id: "t2".into(),
+            attempts: vec![attempt(1, Some(ids[2].0.to_string()), false)],
+            ..TicketView::default()
+        });
+        core.dispatch(AppAction::DispatchStatus(Some(status)), Clock::at(2));
+        assert!(core.attempt_ran_with_env("t1", "try", 1));
+        assert!(!core.attempt_ran_with_env("t1", "try", 2));
+        assert!(!core.attempt_ran_with_env("t1", "try", 9));
+        assert!(core.attempt_ran_with_env("t2", "try", 1));
+        assert!(!core.attempt_ran_with_env("t1", "try", 3));
+        assert!(!core.attempt_ran_with_env("t1", "try", 4));
     }
 
     #[test]

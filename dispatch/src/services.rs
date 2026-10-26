@@ -579,6 +579,7 @@ impl Runner {
             exit: None,
             group: self.git.check_group(key),
             lost_since_ms: None,
+            env: false,
         });
         self.save_ticket(t, now_ms)
     }

@@ -799,6 +799,7 @@ fn attempt_view(a: &crate::ticket::Attempt) -> AttemptView {
             head: g.head.clone(),
             exit: g.exit,
             log: g.log.clone(),
+            env: g.env,
         }),
         pr: a.pr.as_ref().map(|pr| dispatch_control::PullRequestView {
             provider: pr.provider.clone(),

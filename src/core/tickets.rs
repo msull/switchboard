@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::AppCore;
+use super::{AppCore, RecordId};
 use crate::ports::dispatch::{
     AttemptView, DecisionView, EventView, LaneView, ProjectView, TicketView,
 };
@@ -199,7 +199,9 @@ pub fn file_key(path: &Path) -> String {
 
 /// Every file of an attempt with its path, in the order the Mac's page
 /// lists them: artifacts, the checks log, each round's files, then the
-/// evidence.
+/// evidence. The runner lists the checks log among the artifacts too;
+/// it is listed once, as `checks`, under the artifact's name when there
+/// is one (`r1/checks` for a review round).
 fn attempt_files(a: &AttemptView) -> Vec<(TicketFile, PathBuf)> {
     let file = |name: String, kind: &str, path: &PathBuf, inline: bool| TicketFile {
         key: file_key(path),
@@ -213,13 +215,20 @@ fn attempt_files(a: &AttemptView) -> Vec<(TicketFile, PathBuf)> {
         image: false,
     };
     let mut files = Vec::new();
+    let checks_log = a.checks.as_ref().map(|c| &c.log);
+    let mut checks_name = None;
     for (name, path) in &a.artifacts {
+        if Some(path) == checks_log {
+            checks_name.get_or_insert_with(|| name.clone());
+            continue;
+        }
         let secret = a.is_secret(name);
         let kind = if secret { "secret" } else { "artifact" };
         files.push((file(name.clone(), kind, path, !secret), path.clone()));
     }
     if let Some(c) = &a.checks {
-        files.push((file("checks".into(), "checks", &c.log, true), c.log.clone()));
+        let name = checks_name.unwrap_or_else(|| "checks".into());
+        files.push((file(name, "checks", &c.log, true), c.log.clone()));
     }
     for r in &a.rounds {
         if let Some(p) = &r.feedback {
@@ -441,6 +450,27 @@ impl AppCore {
             .iter()
             .flat_map(attempt_files)
             .find(|(f, _)| f.key == key)
+    }
+
+    /// Whether attempt `n` of `stage` on ticket `id` ran with
+    /// environment grants: its checks under `switchboard-env exec`, or
+    /// an agent session that holds sets now. Its files may then hold a
+    /// granted value in a form no text mask reaches (an image). An
+    /// attempt recorded before the checks said so reads as without.
+    #[must_use]
+    pub fn attempt_ran_with_env(&self, id: &str, stage: &str, n: u32) -> bool {
+        self.ticket(id).is_some_and(|t| {
+            t.attempts.iter().any(|a| {
+                a.stage == stage
+                    && a.n == n
+                    && (a.checks.as_ref().is_some_and(|c| c.env)
+                        || a.session
+                            .as_deref()
+                            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                            .and_then(|s| self.session(RecordId(s)))
+                            .is_some_and(|r| !r.env_sets.is_empty()))
+            })
+        })
     }
 
     /// A ticket's events as read so far; none before the first read.

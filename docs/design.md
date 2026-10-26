@@ -250,8 +250,15 @@ never run anything on its own.
   owner something. The one other way a secret's surroundings leave the
   app is as redacted text on the remote port: a paired device reads a
   pane's screen with every value Switchboard holds for the project
-  replaced by its name, and the port's key and tokens never reach a
-  record or a log.
+  replaced by its name, and Dispatch's ticket text (the list, a
+  ticket's summary and body, its events, and every text file of an
+  attempt, the checks log included) with every value of the runner's,
+  each attempt session's and every project's grants replaced the same
+  way, since no ticket names the project it runs in; that over-masks
+  rather than leaks. The match is literal: a value in an encoded form,
+  or one a `set -x` trace writes differently (a value holding `'`, `\`
+  or a newline), can pass, and a value the app never held is not
+  found. The port's key and tokens never reach a record or a log.
   The writes (`env.set.upsert`, `env.secret.store`, `env.grant`) are
   accepted only inside a five-minute setup window the owner opens from
   the app's settings menu, so an agent cannot grant itself a set. What a
@@ -2576,7 +2583,9 @@ stands rather than hand it to an agent.
 
 Known gaps:
 
-- The `checks` log holds whatever the command prints, and is readable.
+- The `checks` log holds whatever the command prints, and is readable
+  on the Mac's ticket page and on the disk unmasked; the remote port
+  masks it (Remote client, "Ticket text masked").
 - The file is chmodded 0600 after the command exits, not created so;
   the 0700 attempt directory covers the window.
 - No secret on agent stages: an agent that wrote one would hold it in
@@ -3799,6 +3808,40 @@ Built so far:
   address, never an IPv6 `/64`; and the per-source limits (6 `/pair`
   and 60 `/info` a minute) are unconfirmed against a browser on a
   device.
+- **Ticket text masked (2026-10-25).** Every ticket text the port
+  sends (the list, a ticket read alone, its events, a text file of an
+  attempt, and the `{decision}` or `{ticket}` a command answers) goes
+  to the content worker as a `ContentKey::TicketText` job with a
+  `Source::Json` value, which masks every string in it before it is
+  serialized, so a value holding a quote or a backslash is found as it
+  is. The policy is the union of one spec per project, each with
+  every stored set granted (not only the sets granted now, so text a
+  child printed under a grant stays masked after the grant is taken
+  back or its session is gone), carried in `ContentJob.policies`; any
+  that fails to resolve refuses the read `policy` (503), so a stale
+  set name in any project's grants refuses ticket text until it is
+  fixed. The worker caches the masked value per key under the hash of
+  its input and the policy's fingerprint. A text file over 768 KiB is
+  refused `too_large` rather than masked and cut (a file between 256
+  KiB and that is still cut after masking). `resolve_policy` now
+  fails on a store error for a set's secret too, not only a project
+  variable's, which tightens the screen read as well. A gate that ran
+  under `switchboard-env exec` is marked (`GateRun.env`, sent as
+  `ChecksView.env`; a runner without it, and an attempt recorded
+  before it, read as `false`, so such an old attempt's images are
+  served), and an image of such an attempt, or of one whose session
+  holds sets now, is refused `withheld` (403), since no mask reads
+  pixels. The checks log, which the runner lists among the
+  artifacts too, is listed once, as `checks` or the artifact's name.
+  `tests/remote.rs` checks the body, the checks log, an evidence text
+  and the events with a set value named, a grant taken back, a failing
+  store, a file over the cap, and a withheld image. Known gaps: the
+  Mac's own ticket page and the files on disk are not masked; a value
+  in an encoded or `set -x`-quoted form can pass; Dispatch reads an
+  artifact for the Mac with no size cap; a gate still resolves the
+  runner's grants and ignores the stage's `env` names; and whether a
+  real `switchboard-env exec` gate's log carries a set value to the
+  port was not run, only the fixture.
 
 ## Versioning and updates (2026-10-15)
 

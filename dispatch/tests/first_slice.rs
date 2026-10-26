@@ -21060,6 +21060,17 @@ fn a_command_gate_with_env_runs_under_switchboard_env_with_the_runners_token() {
         "{:?}",
         check.env
     );
+    // The gate is recorded as run with grants, and the view says so.
+    let t = env.ticket(&id);
+    let a = t.attempts_of("implement").last().unwrap();
+    assert!(a.gate.as_ref().unwrap().env);
+    let view = dispatch::serve::ticket_view(&t, None);
+    let attempt = view
+        .attempts
+        .iter()
+        .rfind(|a| a.stage == "implement")
+        .unwrap();
+    assert!(attempt.checks.as_ref().unwrap().env);
 }
 
 #[test]
@@ -21096,6 +21107,14 @@ fn a_command_gate_without_env_gets_no_wrapper_and_no_token() {
     implementer_stops(&mut env, &id, &implementer);
     let check = implement_check(&mut env, &id);
     assert!(check.outer.is_empty(), "{:?}", check.outer);
+    let t = env.ticket(&id);
+    let view = dispatch::serve::ticket_view(&t, None);
+    let attempt = view
+        .attempts
+        .iter()
+        .rfind(|a| a.stage == "implement")
+        .unwrap();
+    assert!(!attempt.checks.as_ref().unwrap().env);
     assert!(
         !check
             .env

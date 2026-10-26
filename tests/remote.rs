@@ -2508,6 +2508,7 @@ fn tickets_status() -> switchboard::ports::dispatch::Status {
                         head: "abc1234".into(),
                         exit: Some(0),
                         log: "/dispatch/tickets/t1/investigate/1/root/checks.log".into(),
+                        env: false,
                     }),
                     evidence: vec![
                         evidence(
@@ -4560,4 +4561,254 @@ fn browser_step(port: &mut Port, step: &str, record: RecordId) -> String {
         }
         _ => "go".into(),
     }
+}
+
+/// A set's secret, with a quote in it so a mask after serialization
+/// would miss it.
+const SET_VALUE: &str = "dk-\"q7Zp\"-9041";
+const CHECKS_PATH: &str = "/dispatch/tickets/t1/investigate/1/root/checks.log";
+const PROBE_PATH: &str = "/dispatch/tickets/t1/investigate/1/root/evidence/probe.log";
+
+/// A port whose fixture ticket carries `SET_VALUE` in its body, its
+/// checks log, its evidence text and its events, with the `deploy` set
+/// holding it as `DEPLOY_KEY` granted to the attempt's session (a
+/// record made here, named in the status the app is handed). The
+/// runner lists the checks log among the artifacts too, as real
+/// Dispatch does. Returns the port and the session.
+fn port_with_a_granted_ticket(big: bool) -> (Port, String) {
+    use switchboard::ports::dispatch::EventView;
+    let checks = if big {
+        "x".repeat(800 * 1024)
+    } else {
+        format!("+ deploy --key {SET_VALUE}\nok\n")
+    };
+    let secrets = FakeSecrets::default();
+    let mut port = port_built(
+        FakeHost::default(),
+        secrets,
+        FakeRemoteStore::default(),
+        FakeDispatch {
+            status: Some(tickets_status()),
+            artifacts: [
+                (NOTES_PATH.into(), "Found it: one file each.\n".to_owned()),
+                (CHECKS_PATH.into(), checks),
+                (PROBE_PATH.into(), format!("probe saw {SET_VALUE}\n")),
+            ]
+            .into_iter()
+            .collect(),
+            events: vec![EventView {
+                seq: 1,
+                at_ms: 3,
+                stage: "investigate".into(),
+                kind: "stage".into(),
+                text: format!("ran with {SET_VALUE}"),
+                ..EventView::default()
+            }],
+            ..FakeDispatch::default()
+        },
+    );
+    let (_, project, _) = seed(&mut port, "");
+    port.app.dispatch(AppAction::SetEnvSetup { open: true });
+    for (op, body) in [
+        (
+            "up",
+            Body::EnvSetUpsert {
+                name: "deploy".into(),
+                vars: Vec::new(),
+                aws: None,
+            },
+        ),
+        (
+            "sec",
+            Body::EnvSecretStore {
+                set: "deploy".into(),
+                name: "DEPLOY_KEY".into(),
+                value: SET_VALUE.into(),
+            },
+        ),
+    ] {
+        let reply = control(&mut port, Request::new(op, body));
+        assert!(matches!(reply, Reply::Persisted { .. }), "{op}: {reply:?}");
+    }
+    let reply = control(
+        &mut port,
+        Request::new(
+            "se",
+            Body::SessionNew {
+                project,
+                name: "implementer".into(),
+                session_kind: SessionKind::Shell,
+                cwd: PathBuf::from("/tmp"),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: String::new(),
+                env: std::collections::BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            },
+        ),
+    );
+    let session = made_id(&reply, RecordKind::Session);
+    let reply = control(
+        &mut port,
+        Request::new(
+            "gr",
+            Body::EnvGrant {
+                project: None,
+                session: Some(session.clone()),
+                runner: false,
+                set: "deploy".into(),
+                remove: false,
+            },
+        ),
+    );
+    assert!(matches!(reply, Reply::Persisted { .. }), "{reply:?}");
+    let mut status = tickets_status();
+    let t1 = &mut status.tickets[1];
+    t1.body = format!("Deploy with {SET_VALUE}.");
+    t1.attempts[0].session = Some(session.clone());
+    t1.attempts[0]
+        .artifacts
+        .push(("checks".into(), CHECKS_PATH.into()));
+    port.app.dispatch(AppAction::DispatchStatus(Some(status)));
+    (port, session)
+}
+
+/// The key the listing gives the file named `name` on t1's attempt.
+fn file_key_named(port: &mut Port, token: &str, name: &str) -> String {
+    let (status, reply) = get(port, "/api/v1/dispatch/tickets/t1", Some(token));
+    assert_eq!(status, 200, "{reply}");
+    reply["body"]["attempts"][0]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == name)
+        .and_then(|f| f["key"].as_str())
+        .unwrap_or_else(|| panic!("no {name}: {reply}"))
+        .to_owned()
+}
+
+#[test]
+fn a_tickets_text_reaches_a_device_with_granted_values_named() {
+    let (mut port, session) = port_with_a_granted_ticket(false);
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+
+    // The listing names the log once, though the runner lists it twice.
+    let (status, reply) = get(&mut port, "/api/v1/dispatch/tickets/t1", t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["body"], "Deploy with <DEPLOY_KEY>.");
+    assert!(!reply.to_string().contains("q7Zp"), "{reply}");
+    let names: Vec<&str> = reply["body"]["attempts"][0]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["notes", "token", "checks", "probe.log", "shot.png"]);
+
+    // The checks log and the evidence text, first through the runner's
+    // read and then from the Mac's cache.
+    let checks = file_key_named(&mut port, &token, "checks");
+    let probe = file_key_named(&mut port, &token, "probe.log");
+    for _ in 0..2 {
+        let (status, reply) = get(
+            &mut port,
+            &format!("/api/v1/dispatch/tickets/t1/files/{checks}"),
+            t,
+        );
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(reply["body"]["text"], "+ deploy --key <DEPLOY_KEY>\nok\n");
+        let (status, reply) = get(
+            &mut port,
+            &format!("/api/v1/dispatch/tickets/t1/files/{probe}"),
+            t,
+        );
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(reply["body"]["text"], "probe saw <DEPLOY_KEY>\n");
+    }
+
+    // The events, read and then from the cache, and the list.
+    for _ in 0..2 {
+        let (status, reply) = get(&mut port, "/api/v1/dispatch/tickets/t1/events", t);
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(reply["body"]["events"][0]["text"], "ran with <DEPLOY_KEY>");
+    }
+    let (status, reply) = get(&mut port, "/api/v1/dispatch/tickets", t);
+    assert_eq!(status, 200, "{reply}");
+    assert!(!reply.to_string().contains("q7Zp"), "{reply}");
+
+    // A grant taken back leaves the value masked: text printed while
+    // it was granted may still be on the port.
+    let reply = control(
+        &mut port,
+        Request::new(
+            "rm",
+            Body::EnvGrant {
+                project: None,
+                session: Some(session.clone()),
+                runner: false,
+                set: "deploy".into(),
+                remove: true,
+            },
+        ),
+    );
+    assert!(matches!(reply, Reply::Persisted { .. }), "{reply:?}");
+    let (_, reply) = get(&mut port, "/api/v1/dispatch/tickets/t1", t);
+    assert_eq!(reply["body"]["body"], "Deploy with <DEPLOY_KEY>.");
+
+    // A store that cannot read the set's secret refuses the read.
+    let reply = control(
+        &mut port,
+        Request::new(
+            "re",
+            Body::EnvGrant {
+                project: None,
+                session: Some(session),
+                runner: false,
+                set: "deploy".into(),
+                remove: false,
+            },
+        ),
+    );
+    assert!(matches!(reply, Reply::Persisted { .. }), "{reply:?}");
+    port.secrets.set_failing(true);
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/dispatch/tickets/t1/files/{checks}"),
+        t,
+    );
+    assert_eq!((status, code(&reply)), (503, "policy"), "{reply}");
+    assert!(!reply.to_string().contains("q7Zp"), "{reply}");
+}
+
+#[test]
+fn a_tickets_file_over_the_cap_is_refused_whole() {
+    let (mut port, _) = port_with_a_granted_ticket(true);
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let checks = file_key_named(&mut port, &token, "checks");
+    let (status, reply) = get(
+        &mut port,
+        &format!("/api/v1/dispatch/tickets/t1/files/{checks}"),
+        Some(&token),
+    );
+    assert_eq!((status, code(&reply)), (413, "too_large"), "{reply}");
+}
+
+#[test]
+fn an_image_of_an_attempt_that_ran_with_grants_is_withheld() {
+    let mut status = tickets_status();
+    status.tickets[1].attempts[0].checks.as_mut().unwrap().env = true;
+    let mut port = port_dispatching(status);
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let shot = file_key_named(&mut port, &token, "shot.png");
+    let read = format!("/api/v1/dispatch/tickets/t1/files/{shot}");
+    let (status, reply) = get(&mut port, &read, Some(&token));
+    assert_eq!((status, code(&reply)), (403, "withheld"), "{reply}");
+    // The same attempt without grants sends it.
+    port.app
+        .dispatch(AppAction::DispatchStatus(Some(tickets_status())));
+    let (status, reply) = get(&mut port, &read, Some(&token));
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["media"], "image/png");
 }

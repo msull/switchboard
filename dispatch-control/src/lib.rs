@@ -970,6 +970,9 @@ pub struct ChecksView {
     pub head: String,
     pub exit: Option<i32>,
     pub log: PathBuf,
+    /// The check ran under `switchboard-env exec` with the runner's
+    /// grants. Absent from an older runner, which reads as `false`.
+    pub env: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

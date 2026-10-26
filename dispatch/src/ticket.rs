@@ -812,6 +812,11 @@ pub struct GateRun {
     /// with `group`.
     #[serde(default)]
     pub lost_since_ms: Option<u64>,
+    /// It ran under `switchboard-env exec`, so its child could read the
+    /// granted sets' values; the remote port withholds the attempt's
+    /// images, which it cannot mask.
+    #[serde(default)]
+    pub env: bool,
 }
 
 /// A check's or command reviewer's process group as started, so a
