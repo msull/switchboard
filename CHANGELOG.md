@@ -10,6 +10,17 @@ publishes that section as the release notes. The format follows
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-25
+
+### Changed
+
+- A pipeline file that sets a decisions dial other than ask for a human gate's decision is now refused at take and restart, naming the stage; a human gate always asks, and a supervisor's decides is how to automate it.
+- A commit made in a Dispatch lane now runs the project's .githooks (set once on the clone, existing clones included), while Dispatch's own git calls still run no hook.
+
+### Fixed
+
+- A pipeline prompt can name `{decisions.stuck}` and `{decisions.service}`, and a running ticket's pipeline copy is no longer re-checked for unknown decision names.
+
 ## [0.7.1] - 2026-10-25
 
 ### Changed
