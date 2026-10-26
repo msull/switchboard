@@ -9,8 +9,10 @@ use std::time::SystemTime;
 
 use uuid::Uuid;
 
-use super::action::PairingWindow;
-use super::action::{AppAction, AppCore, Clock, Effect, Out, PAIRING_ATTEMPTS, PAIRING_WINDOW};
+use super::action::{
+    AppAction, AppCore, Clock, Effect, Out, PAIRING_ATTEMPTS, PAIRING_FAILURES_MAX,
+    PAIRING_SOURCES_MAX, PAIRING_WINDOW, PairingSource, PairingWindow,
+};
 use crate::ports::remote::{Identity, PairedDevice, Scope};
 
 /// A device's last-seen time is saved when it moved by at least this
@@ -51,16 +53,34 @@ impl AppCore {
                     code: code.trim().to_ascii_uppercase(),
                     scope,
                     failures: 0,
+                    sources: Vec::new(),
                 });
             }
             AppAction::ClosePairing => self.pairing = None,
             AppAction::PairingFailed => {
                 if let Some(p) = &mut self.pairing {
                     p.failures += 1;
-                    if p.failures >= PAIRING_ATTEMPTS {
-                        self.pairing = None;
-                        self.error("Pairing closed: three attempts failed.");
-                    }
+                }
+            }
+            AppAction::PairingFailedFrom(ip) => {
+                let Some(p) = &mut self.pairing else {
+                    return;
+                };
+                let ip = ip.to_canonical();
+                if p.is_locked(ip) {
+                    return;
+                }
+                p.failures += 1;
+                // Rotating source addresses gets three guesses per
+                // address, so the window closes once the total reaches
+                // what a full source list of lockouts would hold.
+                if p.failures >= PAIRING_FAILURES_MAX {
+                    self.pairing = None;
+                    self.error("Pairing closed after too many failed attempts.".to_owned());
+                } else if count_failure(&mut p.sources, ip) >= PAIRING_ATTEMPTS {
+                    self.error(format!(
+                        "Pairing locked out {ip} after three failed attempts."
+                    ));
                 }
             }
             AppAction::Paired(device) => {
@@ -174,6 +194,26 @@ impl AppCore {
             last_seen: None,
         }
     }
+}
+
+/// Counts one failure from `ip` and returns that source's total. At
+/// the cap the oldest unlocked source makes room; `PAIRING_FAILURES_MAX`
+/// closes the window before every entry can be locked, so one is
+/// always there, and a locked one is the fallback only to stay total.
+fn count_failure(sources: &mut Vec<PairingSource>, ip: IpAddr) -> u32 {
+    if let Some(s) = sources.iter_mut().find(|s| s.ip == ip) {
+        s.failures += 1;
+        return s.failures;
+    }
+    if sources.len() >= PAIRING_SOURCES_MAX {
+        let oldest = sources
+            .iter()
+            .position(|s| s.failures < PAIRING_ATTEMPTS)
+            .unwrap_or(0);
+        sources.remove(oldest);
+    }
+    sources.push(PairingSource { ip, failures: 1 });
+    1
 }
 
 /// The address a phone on the network reaches the port at: this Mac's

@@ -18,6 +18,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -293,9 +294,15 @@ pub enum AppAction {
         scope: Scope,
     },
     ClosePairing,
-    /// A `/pair` whose code or key did not match; `PAIRING_ATTEMPTS`
-    /// of them, from any connection, close the window.
+    /// A `/pair` whose code or key did not match, from no known
+    /// source: it counts in the window's total and never closes it.
+    /// The listener always knows the peer, so only a request built by
+    /// hand reaches this.
     PairingFailed,
+    /// A `/pair` from this address whose code or key did not match;
+    /// the `PAIRING_ATTEMPTS`th locks the address out for the rest of
+    /// the window, which stays open for everyone else.
+    PairingFailedFrom(std::net::IpAddr),
     /// A `/pair` that matched: the device is kept and the code is spent.
     Paired(PairedDevice),
     /// An authenticated request from the device, for its last-seen time.
@@ -967,19 +974,54 @@ pub const TYPED_HOLD: Duration = Duration::from_mins(1);
 pub const ENV_SETUP_LOCKED: &str = "environment setup is locked: choose Unlock environment setup in Switchboard's settings menu, then run this again within five minutes";
 
 /// How long the pairing window stays open, and how many wrong codes
-/// close it early. Three tries at a 40-bit code is no odds at all, and
-/// the owner sees the window close.
+/// lock one address out of it. Three tries at a 40-bit code is no odds
+/// at all, and locking the address rather than closing the window
+/// means one host on the network cannot shut it for everyone.
 pub const PAIRING_WINDOW: Duration = Duration::from_mins(5);
 pub const PAIRING_ATTEMPTS: u32 = 3;
+/// How many source addresses one window tracks. Past it the oldest
+/// unlocked one is forgotten; a locked one never is, so rotating
+/// addresses cannot clear a lockout.
+pub const PAIRING_SOURCES_MAX: usize = 32;
+/// Failures from all sources together that close the window: every
+/// tracked source locked, so a sender rotating addresses cannot guess
+/// until the window ends.
+#[allow(clippy::cast_possible_truncation)] // 32 fits
+pub const PAIRING_FAILURES_MAX: u32 = PAIRING_ATTEMPTS * PAIRING_SOURCES_MAX as u32;
+
+/// Failed `/pair` attempts from one source in the open window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingSource {
+    pub ip: IpAddr,
+    pub failures: u32,
+}
 
 /// The pairing window while it is open: the code the QR carries, what
-/// a pairing made through it grants, and how many attempts failed.
+/// a pairing made through it grants, how many attempts failed in all
+/// (`PAIRING_FAILURES_MAX` closes it), and the failures per source address in first-seen order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingWindow {
     pub until: Duration,
     pub code: String,
     pub scope: Scope,
     pub failures: u32,
+    pub sources: Vec<PairingSource>,
+}
+
+impl PairingWindow {
+    /// Whether `ip` has used up its attempts in this window.
+    #[must_use]
+    pub fn is_locked(&self, ip: IpAddr) -> bool {
+        let ip = ip.to_canonical();
+        self.locked().any(|s| s.ip == ip)
+    }
+
+    /// The sources locked out of this window, for the dialog.
+    pub fn locked(&self) -> impl Iterator<Item = &PairingSource> {
+        self.sources
+            .iter()
+            .filter(|s| s.failures >= PAIRING_ATTEMPTS)
+    }
 }
 /// How far back a rule set may look, in hours: an hour to a month.
 pub const RULE_HOURS: std::ops::RangeInclusive<u32> = 1..=720;
@@ -1256,6 +1298,7 @@ impl AppCore {
             | AppAction::OpenPairing { .. }
             | AppAction::ClosePairing
             | AppAction::PairingFailed
+            | AppAction::PairingFailedFrom(_)
             | AppAction::Paired(_)
             | AppAction::DeviceSeen(_)
             | AppAction::RevokeDevice(_)

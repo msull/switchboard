@@ -379,6 +379,9 @@ pub struct RemoteRequest {
     /// The `Host` header: the address the device used to reach this
     /// port, which a same-origin page's `Origin` must name.
     pub host: Option<String>,
+    /// The address the request came from, canonical. The listener
+    /// sets it; a request parsed where no socket exists has none.
+    pub peer: Option<IpAddr>,
 }
 
 impl RemoteRequest {
@@ -586,6 +589,7 @@ fn read_head<R: Read>(reader: &mut BufReader<R>) -> io::Result<Option<(RemoteReq
         cookie,
         origin,
         host,
+        peer: None,
     };
     Ok(Some((request, length)))
 }
@@ -743,9 +747,12 @@ pub(crate) const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 /// this deep; a full channel answers 503 without reaching the frame.
 pub const DRAIN_PER_PASS: usize = 8;
 const INBOX: usize = 64;
-/// `/pair` and `/info` per minute per listener, answered 429 past it.
+/// `/pair` and `/info` per minute per source address, answered 429
+/// past it, so one host on the network cannot spend another's.
 const PAIR_PER_MINUTE: usize = 6;
 const INFO_PER_MINUTE: usize = 60;
+/// How many source addresses each of those windows tracks at once.
+const RATE_KEYS_MAX: usize = 256;
 /// The page's files per minute per listener: one load is three.
 const PAGE_PER_MINUTE: usize = 120;
 
@@ -979,29 +986,83 @@ impl RateWindow {
         self.stamps.push_back(now);
         true
     }
+
+    /// Whether every event it counted has left the window.
+    fn is_idle(&self, now: Instant) -> bool {
+        self.stamps.back().is_none_or(|&t| now - t >= self.per)
+    }
+
+    /// The latest event it counted.
+    fn last(&self) -> Option<Instant> {
+        self.stamps.back().copied()
+    }
+}
+
+/// One `RateWindow` per source address, at most `max` of them. Like
+/// `Admission`, it takes addresses and is tested with made-up ones.
+/// At the cap the stalest address's window is dropped, so rotating
+/// addresses resets this limit; the pairing window's total of failures
+/// is what bounds that case.
+struct KeyedWindows {
+    by_source: HashMap<IpAddr, RateWindow>,
+    max: usize,
+    per_source: usize,
+    per: Duration,
+}
+
+impl KeyedWindows {
+    fn new(per_source: usize, per: Duration, max: usize) -> Self {
+        Self {
+            by_source: HashMap::new(),
+            max,
+            per_source,
+            per,
+        }
+    }
+
+    /// Count one event from `ip`, or say it is over its window.
+    fn allow(&mut self, ip: IpAddr, now: Instant) -> bool {
+        let ip = ip.to_canonical();
+        self.by_source.retain(|_, w| !w.is_idle(now));
+        if !self.by_source.contains_key(&ip)
+            && self.by_source.len() >= self.max
+            && let Some(stalest) = self
+                .by_source
+                .iter()
+                .min_by_key(|(_, w)| w.last())
+                .map(|(&ip, _)| ip)
+        {
+            self.by_source.remove(&stalest);
+        }
+        self.by_source
+            .entry(ip)
+            .or_insert_with(|| RateWindow::new(self.per_source, self.per))
+            .allow(now)
+    }
 }
 
 struct Limits {
-    pair: Mutex<RateWindow>,
-    info: Mutex<RateWindow>,
+    pair: Mutex<KeyedWindows>,
+    info: Mutex<KeyedWindows>,
     page: Mutex<RateWindow>,
 }
 
 impl Limits {
-    /// Whether a request for `path` is over its window. Only `/pair` and
-    /// `/info` have one here; any other path is never over.
-    fn limited(&self, path: &str) -> bool {
-        match path {
-            PAIR_PATH => Self::over(&self.pair),
-            INFO_PATH => Self::over(&self.info),
-            _ => false,
-        }
+    /// Whether a request for `path` from `ip` is over its window. Only
+    /// `/pair` and `/info` have one here; any other path is never over.
+    fn limited(&self, path: &str, ip: IpAddr) -> bool {
+        let window = match path {
+            PAIR_PATH => &self.pair,
+            INFO_PATH => &self.info,
+            _ => return false,
+        };
+        Self::over(window, |w| w.allow(ip, Instant::now()))
     }
 
-    /// Count one event against `window`; a poisoned lock counts as
-    /// over, never as open.
-    fn over(window: &Mutex<RateWindow>) -> bool {
-        !window.lock().map_or(true, |mut w| w.allow(Instant::now()))
+    /// Count one event against `window` with `allow`; a poisoned lock
+    /// counts as over, never as open.
+    fn over<W>(window: &Mutex<W>, allow: impl FnOnce(&mut W) -> bool) -> bool {
+        window.lock().map_or(true, |mut w| !allow(&mut w))
     }
 }
 
@@ -1015,6 +1076,8 @@ struct Shared {
     limits: Limits,
     timeouts: Timeouts,
     next_subscriber: AtomicU64,
+    /// 429s written since the frame last took the count.
+    rate_limited: Arc<AtomicU64>,
 }
 
 /// The TLS listener: an accept thread, one thread per connection,
@@ -1026,6 +1089,7 @@ pub struct RemotePort {
     frames: Receiver<SubscriberFrame>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    rate_limited: Arc<AtomicU64>,
 }
 
 impl RemotePort {
@@ -1051,6 +1115,7 @@ impl RemotePort {
         let (tx, requests) = mpsc::sync_channel(INBOX);
         let (frames_tx, frames) = mpsc::sync_channel(FRAMES);
         let stop = Arc::new(AtomicBool::new(false));
+        let rate_limited = Arc::new(AtomicU64::new(0));
         let shared = Arc::new(Shared {
             tls,
             requests: tx,
@@ -1058,12 +1123,21 @@ impl RemotePort {
             wake: Arc::new(wake),
             pools: Arc::new(Pools::new()),
             limits: Limits {
-                pair: Mutex::new(RateWindow::new(PAIR_PER_MINUTE, Duration::from_secs(60))),
-                info: Mutex::new(RateWindow::new(INFO_PER_MINUTE, Duration::from_secs(60))),
+                pair: Mutex::new(KeyedWindows::new(
+                    PAIR_PER_MINUTE,
+                    Duration::from_secs(60),
+                    RATE_KEYS_MAX,
+                )),
+                info: Mutex::new(KeyedWindows::new(
+                    INFO_PER_MINUTE,
+                    Duration::from_secs(60),
+                    RATE_KEYS_MAX,
+                )),
                 page: Mutex::new(RateWindow::new(PAGE_PER_MINUTE, Duration::from_secs(60))),
             },
             timeouts,
             next_subscriber: AtomicU64::new(1),
+            rate_limited: Arc::clone(&rate_limited),
         });
         let thread = {
             let stop = Arc::clone(&stop);
@@ -1114,7 +1188,15 @@ impl RemotePort {
             frames,
             stop,
             thread: Some(thread),
+            rate_limited,
         })
+    }
+
+    /// How many requests were answered 429 since the last call. The
+    /// frame logs the count once a minute rather than a line each.
+    #[must_use]
+    pub fn take_rate_limited(&self) -> u64 {
+        self.rate_limited.swap(0, Ordering::SeqCst)
     }
 
     /// Up to `max` requests that arrived since the last poll, in
@@ -1198,16 +1280,18 @@ fn next_request(
 /// between requests.
 fn connection(tcp: TcpStream, shared: &Arc<Shared>, slot: &mut Slot) -> io::Result<()> {
     let mut reader = BufReader::new(handshake(tcp, shared)?);
-    while let Some(request) = next_request(&mut reader, slot.is_paired(), shared.timeouts)? {
+    while let Some(mut request) = next_request(&mut reader, slot.is_paired(), shared.timeouts)? {
+        request.peer = Some(slot.ip.to_canonical());
         // The page's files are constant bytes, answered here so a load
         // never waits on a busy frame. A query on them is ignored. They
         // have a rate window of their own; `/pair` and `/info` theirs.
         let page = web::page(&request.method, &request.path);
         let over = match page {
-            Some(_) => Limits::over(&shared.limits.page),
-            None => shared.limits.limited(&request.path),
+            Some(_) => Limits::over(&shared.limits.page, |w| w.allow(Instant::now())),
+            None => shared.limits.limited(&request.path, slot.ip),
         };
         if over {
+            shared.rate_limited.fetch_add(1, Ordering::SeqCst);
             if answer(
                 reader.get_mut(),
                 slot.is_paired(),
@@ -1594,6 +1678,78 @@ mod tests {
         assert!(w.allow(t0 + Duration::from_secs(1)));
         assert!(!w.allow(t0 + Duration::from_secs(2)));
         assert!(w.allow(t0 + Duration::from_secs(61)));
+    }
+
+    #[test]
+    fn each_source_has_its_own_window_and_the_map_is_bounded() {
+        let t0 = Instant::now();
+        let minute = Duration::from_secs(60);
+        let a = ip("192.168.1.9");
+        let b = ip("192.168.1.20");
+        let mut w = KeyedWindows::new(2, minute, 3);
+        assert!(w.allow(a, t0));
+        assert!(w.allow(a, t0));
+        assert!(!w.allow(a, t0), "a is over");
+        assert!(w.allow(b, t0), "b has its own window");
+        // The mapped form is the same peer.
+        assert!(!w.allow(ip("::ffff:192.168.1.9"), t0));
+        assert_eq!(w.by_source.len(), 2);
+
+        // Expired windows go on the next check.
+        let later = t0 + minute;
+        assert!(w.allow(ip("10.0.0.1"), later));
+        assert_eq!(w.by_source.len(), 1, "{:?}", w.by_source.keys());
+
+        // At the cap the key whose latest event is oldest makes room.
+        let mut w = KeyedWindows::new(2, minute, 3);
+        for (n, at) in [(1, 0), (2, 1), (3, 2)] {
+            assert!(w.allow(IpAddr::from([10, 0, 0, n]), t0 + Duration::from_secs(at)));
+        }
+        assert!(w.allow(ip("10.0.0.4"), t0 + Duration::from_secs(3)));
+        assert_eq!(w.by_source.len(), 3);
+        assert!(!w.by_source.contains_key(&ip("10.0.0.1")));
+        assert!(w.by_source.contains_key(&ip("10.0.0.4")));
+    }
+
+    /// The listener stamps each request with its peer, and counts each
+    /// 429 for the frame to take once.
+    #[test]
+    fn a_request_carries_its_peer_and_a_429_is_counted_once() {
+        let (mut port, config) = short_port();
+        let addr = port.addr();
+        let mut statuses = Vec::new();
+        for _ in 0..=PAIR_PER_MINUTE {
+            let mut s = handshaken(addr, &config);
+            write!(
+                s,
+                "POST /api/v1/pair HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{{}}"
+            )
+            .unwrap();
+            s.flush().unwrap();
+            let (done_tx, done_rx) = mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                let mut text = Vec::new();
+                let _ = s.read_to_end(&mut text);
+                let _ = done_tx.send(());
+                String::from_utf8_lossy(&text).into_owned()
+            });
+            // Answer whatever reaches the frame until the reply is read.
+            while done_rx.recv_timeout(Duration::from_millis(10)).is_err() {
+                for incoming in port.poll(8) {
+                    assert_eq!(incoming.request.peer, Some(ip("127.0.0.1")));
+                    let _ = incoming
+                        .reply
+                        .send(RemoteReply::new(403, error_body("x", "x"), false));
+                }
+            }
+            let text = reader.join().unwrap();
+            statuses.push(text.split(' ').nth(1).unwrap_or("").to_owned());
+        }
+        let mut expected = vec!["403"; PAIR_PER_MINUTE];
+        expected.push("429");
+        assert_eq!(statuses, expected);
+        assert_eq!(port.take_rate_limited(), 1);
+        assert_eq!(port.take_rate_limited(), 0, "taken once");
     }
 
     #[test]

@@ -3,7 +3,8 @@
 //! the event log on a timer; keeps the UI's captions fresh. Rendering
 //! lives in [`crate::ui`].
 
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -183,6 +184,11 @@ pub struct SwitchboardApp {
     /// `SWITCHBOARD_REMOTE_PORT`: a port in place of the identity's, so
     /// two instances can run on one machine; `0` picks a free one.
     remote_port_override: Option<u16>,
+    /// The remote port's refusals since the last summary line. In a
+    /// `RefCell` because `refuse` takes `&self` at every call site;
+    /// the frame is one thread and `count_refusal` and
+    /// `flush_refusals` are the only borrowers, each for one call.
+    refusals: RefCell<RefusalSummary>,
     /// This run's epoch and the revision counter every remote reply
     /// carries; the counter moves once per pass whose read-model diff
     /// found a change.
@@ -307,6 +313,44 @@ struct DiffDone {
     result: Result<crate::ports::changes::FileDiff, String>,
 }
 
+/// The remote port's refusals counted per cause (the refusal code, or
+/// `rate_limited`) and logged as one line a minute per cause, so a
+/// host on the network that keeps knocking writes a line a minute, not
+/// one per knock. Times are the frame clock's monotonic ones.
+#[derive(Debug, Default)]
+struct RefusalSummary {
+    counts: BTreeMap<String, u64>,
+    since: Option<Duration>,
+}
+
+impl RefusalSummary {
+    const EVERY: Duration = Duration::from_mins(1);
+
+    fn count(&mut self, cause: &str, n: u64, now: Duration) {
+        if n == 0 {
+            return;
+        }
+        *self.counts.entry(cause.to_owned()).or_insert(0) += n;
+        self.since.get_or_insert(now);
+    }
+
+    /// One line per cause once a minute has passed since the first
+    /// count, and a fresh start; nothing before then.
+    fn flush(&mut self, now: Duration) -> Vec<String> {
+        if self
+            .since
+            .is_none_or(|since| now.saturating_sub(since) < Self::EVERY)
+        {
+            return Vec::new();
+        }
+        self.since = None;
+        std::mem::take(&mut self.counts)
+            .into_iter()
+            .map(|(cause, n)| format!("remote: {n} refused {cause} in the last minute"))
+            .collect()
+    }
+}
+
 /// The threads reading file diffs: each sends one answer, and `out`
 /// counts the ones not yet drained.
 struct DiffReads {
@@ -364,6 +408,7 @@ impl SwitchboardApp {
             remote_wake: None,
             remote_bound: None,
             remote_port_override: None,
+            refusals: RefCell::new(RefusalSummary::default()),
             epoch: uuid::Uuid::new_v4(),
             revision: 0,
             fingerprints: None,
@@ -1421,6 +1466,7 @@ impl eframe::App for SwitchboardApp {
     /// window raises they ask for) lives here rather than in `ui`.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.dispatch(AppAction::Tick);
+        self.flush_refusals();
         self.drain_diffs();
         let answered: Vec<AppAction> = self.update_results.rx.try_iter().collect();
         for action in answered {
@@ -1685,7 +1731,8 @@ impl SwitchboardApp {
             Err(error) => {
                 if let Some(reply) = reply {
                     let (status, code, reason) = error.refusal();
-                    log::info!("remote: {} {} refused: {code}", key.kind(), key.id());
+                    log::debug!("remote: {} {} refused: {code}", key.kind(), key.id());
+                    self.count_refusal(code);
                     let _ = reply.try_send(RemoteReply::new(
                         status,
                         self.error_json(code, &reason),
@@ -3638,7 +3685,8 @@ impl SwitchboardApp {
     /// key hash (so a request relayed through a substituted
     /// certificate fails even with the code) and the code. A match
     /// makes a token the device keeps and the host stores only the hash
-    /// of; a mismatch counts against the window.
+    /// of; a mismatch counts against the address it came from, and an
+    /// address with three is refused for the rest of the window.
     fn remote_pair(&mut self, request: &RemoteRequest) -> RemoteReply {
         let now = self.clock();
         let Some(window) = self.core.pairing_at(now).cloned() else {
@@ -3650,6 +3698,15 @@ impl SwitchboardApp {
                 false,
             );
         };
+        if request.peer.is_some_and(|ip| window.is_locked(ip)) {
+            return self.refuse(
+                request,
+                403,
+                "pairing_locked",
+                "too many wrong codes from this address; ask the owner to reopen pairing",
+                false,
+            );
+        }
         let Some(identity) = self.core.identity().cloned() else {
             return self.refuse(
                 request,
@@ -3669,8 +3726,13 @@ impl SwitchboardApp {
                 .trim()
                 .to_owned()
         };
+        // A sender with no key never saw the QR; it is refused without
+        // spending an attempt, so an empty knock cannot lock anyone out.
+        if field("spki_sha256").is_empty() {
+            return self.refuse(request, 400, "bad_request", "the body has no key", false);
+        }
         if field("spki_sha256") != identity.spki_sha256 {
-            self.dispatch_inner(AppAction::PairingFailed);
+            self.pairing_failed(request.peer);
             return self.refuse(
                 request,
                 403,
@@ -3680,7 +3742,7 @@ impl SwitchboardApp {
             );
         }
         if field("code").to_ascii_uppercase() != window.code {
-            self.dispatch_inner(AppAction::PairingFailed);
+            self.pairing_failed(request.peer);
             return self.refuse(request, 403, "wrong_code", "the code does not match", false);
         }
         let name = field("device_name");
@@ -3808,7 +3870,8 @@ impl SwitchboardApp {
         .into_bytes()
     }
 
-    /// A refusal, logged by method, path and code only.
+    /// A refusal, logged by method, path and code only, at debug; the
+    /// info line is the minute's count per code (`flush_refusals`).
     fn refuse(
         &self,
         request: &RemoteRequest,
@@ -3817,12 +3880,46 @@ impl SwitchboardApp {
         message: &str,
         authenticated: bool,
     ) -> RemoteReply {
-        log::info!(
+        log::debug!(
             "remote: {} {} refused: {code}",
             request.method,
             request.path
         );
+        self.count_refusal(code);
         RemoteReply::new(status, self.error_json(code, message), authenticated)
+    }
+
+    fn count_refusal(&self, code: &str) {
+        let now = self.clock().mono;
+        self.refusals.borrow_mut().count(code, 1, now);
+    }
+
+    /// Takes the listener's 429 count and, once a minute, logs the
+    /// refusals per cause.
+    fn flush_refusals(&self) {
+        let now = self.clock().mono;
+        let mut refusals = self.refusals.borrow_mut();
+        if let Some(remote) = &self.remote {
+            refusals.count("rate_limited", remote.take_rate_limited(), now);
+        }
+        for line in refusals.flush(now) {
+            log::info!("{line}");
+        }
+    }
+
+    /// Counts a failed `/pair` against its source. The core's notice
+    /// is what tells the owner about a lockout; the info line is for
+    /// the log, once per source per window. A request with no peer
+    /// exists only when built by hand, so it counts without locking.
+    fn pairing_failed(&mut self, peer: Option<IpAddr>) {
+        let Some(ip) = peer else {
+            self.dispatch_inner(AppAction::PairingFailed);
+            return;
+        };
+        self.dispatch_inner(AppAction::PairingFailedFrom(ip));
+        if self.core.pairing().is_some_and(|p| p.is_locked(ip)) {
+            log::info!("remote: pairing locked out {ip}");
+        }
     }
 
     /// One request from a tool on `control.sock`, one reply.
@@ -4403,15 +4500,40 @@ fn bound_strings(value: &mut serde_json::Value, notes_cap: usize) {
 mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
-    use std::time::SystemTime;
+    use std::time::{Duration, SystemTime};
 
-    use super::SwitchboardApp;
+    use super::{RefusalSummary, SwitchboardApp};
     use crate::adapters::fakes;
     use crate::content::redact;
     use crate::core::model::{Project, ProjectEnv, ProjectId, SessionKind, SpaceId, Workspace};
     use crate::core::{AppAction, ControlAction, Launch};
     use crate::core::{RECORD_TOKEN_ENV, token_hash};
     use crate::ports::host::SpawnSpec;
+
+    /// Refusals are counted per cause and come out as one line each
+    /// once a minute has passed since the first, then start again.
+    #[test]
+    fn refusals_are_summed_per_cause_and_logged_once_a_minute() {
+        let at = Duration::from_secs;
+        let mut summary = RefusalSummary::default();
+        assert!(summary.flush(at(600)).is_empty(), "nothing counted");
+        summary.count("wrong_code", 1, at(10));
+        summary.count("rate_limited", 0, at(11));
+        summary.count("wrong_code", 1, at(20));
+        summary.count("rate_limited", 4, at(30));
+        assert!(summary.flush(at(69)).is_empty(), "not a minute yet");
+        assert_eq!(
+            summary.flush(at(70)),
+            vec![
+                "remote: 4 refused rate_limited in the last minute",
+                "remote: 2 refused wrong_code in the last minute",
+            ]
+        );
+        assert!(summary.flush(at(200)).is_empty(), "reset after a flush");
+        summary.count("unauthorized", 1, at(300));
+        assert!(summary.flush(at(359)).is_empty(), "the minute starts again");
+        assert_eq!(summary.flush(at(360)).len(), 1);
+    }
 
     /// Every spawn, a resume as much as the first, carries the
     /// variables on the record, under the launcher's own.

@@ -3202,9 +3202,20 @@ Built so far:
   before translation. Pairing: the Remote devices dialog (settings
   menu) opens a five-minute window with an eight-character Crockford
   code shown as a QR carrying the server id, key hash, code and
-  address; `/pair` must carry the host's own key hash and the code,
-  three failures from any connection close the window, the first
-  success spends it, and the device gets a 43-character bearer token
+  address; `/pair` must carry the host's own key hash and the code.
+  Failures are counted per source address: the third from one address
+  locks that address out for the rest of the window (403
+  `pairing_locked`, listed in the dialog and named in a notice) while
+  the window stays open for everyone else, and reopening clears the
+  lockouts, and the window closes once failures from all addresses
+  reach `PAIRING_FAILURES_MAX` (three for each of 32 tracked sources),
+  so rotating addresses cannot guess until it ends; a body with no key
+  is refused 400 without counting.
+  `/pair` and `/info` are rate-limited per source address, over a map
+  of at most 256 addresses (past it the stalest address's window is
+  dropped, so rotating addresses resets the limit; the total of
+  failures above is the bound there). The first
+  success spends the window, and the device gets a 43-character bearer token
   whose SHA-256 is what `devices.json` keeps. The dialog lists devices
   with scope (read or control, changed there and nowhere else), last
   seen and Revoke. Not in A1: events, the content worker (the screen
@@ -3777,10 +3788,17 @@ Built so far:
   strangers on several addresses can still fill the 4 (3 from one, 1
   from another), and whether a paired LAN device is shut out that way
   in practice is unchecked; a stranger's frames still queue to the
-  frame before `authenticate`; there is no cool-off for a refused
-  address (#282); a paired connection's head and body have no
-  deadline; how many connections Safari and Chrome open per page load
-  is unmeasured, so the share of 3 is unconfirmed on a device.
+  frame before `authenticate`; a paired connection's head and body
+  have no deadline; how many connections Safari and Chrome open per
+  page load is unmeasured, so the share of 3 is unconfirmed on a
+  device. Refusals the frame makes are logged at debug, with one info
+  line a minute per cause (the refusal code, or `rate_limited` for the
+  listener's 429s), and a lockout once at info. What pairing still
+  lacks: the code has no check digit and no O/I/L input mapping; the
+  page's rate window is per listener, not per source; a source is one
+  address, never an IPv6 `/64`; and the per-source limits (6 `/pair`
+  and 60 `/info` a minute) are unconfirmed against a browser on a
+  device.
 
 ## Versioning and updates (2026-10-15)
 

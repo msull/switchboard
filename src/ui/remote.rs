@@ -191,10 +191,19 @@ fn pairing(cx: &mut DrawCtx<'_>, ui: &mut Ui, draft: &mut RemoteDraft) {
                 ui.label(theme::meta_text(
                     ui,
                     format!(
-                        "Scan, or type the key and the code. Grants {} scope. Open for five minutes or three wrong codes.",
+                        "Scan, or type the key and the code. Grants {} scope. Open for five minutes. An address that sends three wrong codes is locked out until you reopen pairing.",
                         window.scope.word()
                     ),
                 ));
+                for source in window.locked() {
+                    ui.label(theme::meta_text(
+                        ui,
+                        format!(
+                            "Locked out: {} ({} failed attempts)",
+                            source.ip, source.failures
+                        ),
+                    ));
+                }
                 ui.horizontal(|ui| {
                     // The QR's text, for a client without a camera (the
                     // command-line browser takes it as one argument).
