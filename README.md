@@ -471,6 +471,9 @@ scripts/ci-apt.sh        CI's apt step: the two Linux packages the build links t
 scripts/ci-test.sh       CI's test step: the workspace, then one retry of the failed tests, warning `flaky:` for each that passes on it
 scripts/bump.sh          the next version into Cargo.toml and Cargo.lock, and the changelog fragments and Unreleased section dated under it
 scripts/fold-changelog.sh  the fold bump.sh runs: `changelog.d/` fragments grouped Added, Changed, Fixed into a new version section of CHANGELOG.md, then removed; every line checked before anything is written
+.github/workflows/ci.yml  CI on every pull request and non-docs push to main: `check` (Linux, the hook's commands with `ci-test.sh`), `msrv` (the tests on 1.95), `macos` (the hook's commands on a macOS runner, `--no-fail-fast`, the only job compiling the `cfg(target_os = "macos")` code), `deny` (`cargo deny`: advisories apart from bans, licenses and sources); actions pinned to a commit
+.github/dependabot.yml   weekly update pull requests for the cargo lockfile (minor and patch grouped), the workflow's actions and `tests/browser`'s npm lockfile; the spikes are left out
+deny.toml                `cargo deny`'s configuration: the licences the lockfile may use, git sources limited to promptbox, and the ignored advisories, each an unmaintained crate with no safe upgrade and a reason
 pipelines/Switchboard.toml  this project's own Dispatch pipeline, the plan trial's result: haiku investigates, a sonnet facts stage settles the open questions with web search or a spike, a sonnet plan with a two-round review, then implement, code review and the pull request; a supervisor block for a Mac that runs the released app. Installed by copying it to `pipelines/Switchboard.toml` in Dispatch's data directory (a ticket runs the copy it froze at take); parsed and validated by a test in dispatch/src/pipeline.rs
 scripts/release.sh       the signed bundle and its SHA-256 attached to a GitHub release tagged `v<version>`, with the changelog section as notes; what the app updates itself from
 CHANGELOG.md             every released user-visible change by version; written only by a bump
@@ -555,6 +558,17 @@ never modifies or stages files. Enable it once per clone:
 
 ```sh
 git config core.hooksPath .githooks
+```
+
+### CI
+
+`.github/workflows/ci.yml` runs the hook's checks on Linux and on macOS,
+plus `cargo deny`; the full account is in `docs/design.md`, "CI on
+macOS". To run the dependency check locally:
+
+```sh
+cargo install --locked cargo-deny
+cargo deny check
 ```
 
 ### Secrets

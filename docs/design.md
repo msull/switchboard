@@ -4366,6 +4366,59 @@ more. `TITLE_BAR` was measured on one macOS release; an older one with a
 shorter title bar opens the first window a few points short of the
 visible frame.
 
+## CI on macOS (2026-10-27)
+
+CI only ever ran on Linux, so nothing under `cfg(target_os = "macos")`
+was compiled before a merge: the Keychain, Bonjour and Dock adapters,
+`dispatch`'s macOS-only git tests and sandbox test, and the vendored
+terminal widget's macOS key bindings. A `macos` job on `macos-latest`
+(arm64, Homebrew under `/opt/homebrew`) now runs the pre-commit hook's
+four commands: `cargo fmt --all --check`, Clippy over the workspace with
+`--all-targets`, `cargo test --locked --workspace --no-fail-fast` (so one failing binary
+does not hide the rest) and `cargo test --locked -p egui_term --lib`. It installs tmux with `brew`,
+so the tmux integration tests run rather than skip, and node, which the
+web page's tests need. Unlike Linux's `scripts/ci-test.sh` it has no
+retry of a flaky test; a flake there is red.
+
+A `deny` job runs `cargo deny` with `deny.toml`, as two matrix entries:
+`advisories`, and `bans licenses sources`. Licences are an allow list of
+what the lockfile uses today; git sources are limited to promptbox.
+Advisories were red on the lockfile when the job was added; the three
+TLS crates with fixes (`rustls`, `rustls-webpki`, `webpki-roots`) were
+updated, and four unmaintained crates with no safe upgrade, all pulled
+in by the GUI stack (`ttf-parser`, `zbus_names`, `zvariant`,
+`zvariant_derive`), are ignored by id with a reason. Advisories are a
+separate check because a new one turns it red with no code change; it
+gates pull requests for now (the checks are named `deny (advisories)`
+and `deny (bans licenses sources)`; those are the names branch
+protection must require, along with `check`, `msrv` and `macos`), and making it non-blocking is a one-line
+`continue-on-error` on that matrix entry. `cargo deny check` (0.20.2)
+passes on this lockfile locally: advisories, bans, licenses and sources
+all ok, with warnings only for a yanked `clipboard-win` and duplicate
+versions.
+
+The workflow reads the repository only (`permissions: contents: read`),
+runs one at a time per branch or pull request (a newer push to a pull
+request cancels the older run; pushes to `main` all finish), skips a
+push to `main` that touches only Markdown or `docs/` (pull requests are
+never filtered, since a skipped workflow leaves a required check
+pending), and pins every action to a commit with its version in a
+comment. `.github/dependabot.yml` proposes weekly updates for the cargo
+lockfile (minor and patch grouped into one pull request), the actions,
+and `tests/browser`'s npm lockfile. No record or schema change.
+
+Known gaps: none of the macOS job has run on a runner yet; whether the
+Keychain round trip passes in a headless runner session, and how long
+the job takes against its 45-minute bound, are open until the first
+run. If the Keychain test fails there it is to be marked `#[ignore]`
+with its command in the doc comment; if the job is too slow or flaky,
+its test step drops to `cargo test --locked --lib`. `macos-latest` is
+moving from macOS 15 to 26, and `macos-15` is the label to pin if the
+move breaks the build. Whether Dependabot proposes `rev` bumps for the
+promptbox git dependency is unknown. Nothing builds or signs the bundle
+in CI, the Swift client and the browser test stay outside it, and which
+checks `main` requires is the owner's branch-protection setting.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

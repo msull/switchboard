@@ -1,0 +1,41 @@
+# `cargo deny check` configuration, run by the `deny` job in
+# `.github/workflows/ci.yml`. It reads the whole `Cargo.lock`, so
+# platform-gated crates count too.
+
+[advisories]
+# Each entry is an unmaintained crate with no safe upgrade, pulled in by
+# the GUI stack; drop it when the crate that pulls it in moves off it.
+ignore = [
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser: unmaintained" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: unmaintained" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: unmaintained" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: unmaintained" },
+]
+
+[licenses]
+# The set the lockfile uses today; a new licence fails the check so it is
+# read before it is accepted.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+    "Unlicense",
+    "0BSD",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+
+[bans]
+# The defaults are intended: duplicate versions only warn.
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/msull/promptbox"]
