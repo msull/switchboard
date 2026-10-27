@@ -61,7 +61,7 @@ serialport = { version = "4", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rcgen = "0.14"
 getrandom = "0.3"
-base64 = "0.22"
+base64 = "0.23"
 qrcode = { version = "0.14", default-features = false }
 tungstenite = "0.30"
 rustix = { version = "1.1.5", features = ["fs", "system"] }
