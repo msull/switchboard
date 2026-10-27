@@ -43,6 +43,18 @@ pub struct Probe {
     pub streak: u8,
 }
 
+/// Whose words a workflow sends into an agent. Only the owner answers a
+/// question the agent asked, so the workflow's own prompts are marked
+/// relayed and leave the ask on the card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Voice {
+    /// A round prompt, a respond after a Changes verdict, a Continue
+    /// re-prompt or the hand-off `/compact`.
+    Machinery,
+    /// The owner's feedback, objection or first round, passed through.
+    Owner,
+}
+
 /// Where a round's copies go: `<data dir>/workflows/<run>/round-<n>/`.
 #[must_use]
 pub fn snapshot_dir(data_dir: &Path, run: WorkflowId, n: u32) -> PathBuf {
@@ -492,7 +504,7 @@ impl AppCore {
         if owner_first && let Some(round) = run.current() {
             let def = self.definition_of(&run);
             let prompt = respond_prompt(&def, round, &run.plan, run.cap);
-            self.prompt_planner(id, &prompt, now, out);
+            self.prompt_planner(id, &prompt, Voice::Owner, now, out);
         }
     }
 
@@ -694,10 +706,12 @@ impl AppCore {
     /// card `SessionStart` set `Working` rather than a prompt, which is
     /// why `Working` is not trusted there. A permission dialog
     /// (`WaitingOnYou`) may likewise hold it queued behind the open
-    /// turn. Claude's trust question, an outside wait or the agent's
-    /// own ask are the owner's to clear first. Those marks are read
-    /// directly: the card state also reads the stall mark, which a lost
-    /// prompt itself sets. The agent must have reported since its pane
+    /// turn. Claude's trust question or an outside wait is the owner's
+    /// to clear first; the agent's own ask is not, since a round prompt
+    /// that was taken stamps `last_prompt_at` whether or not it
+    /// answered. `waiting_on` and `activity` are read directly: the
+    /// card state also reads the stall mark, which a lost prompt itself
+    /// sets. The agent must have reported since its pane
     /// was spawned: a relaunched pane keeps the previous process's
     /// stamps until the new one reports, and a pane still starting up
     /// has not been given the prompt yet.
@@ -713,7 +727,6 @@ impl AppCore {
             && (session.activity != Activity::Working || self.started.contains(&agent))
             && !self.prompted.contains(&agent)
             && session.waiting_on.is_none()
-            && session.asking.is_none()
     }
 
     /// False before any event. When this process spawned the pane, the
@@ -779,7 +792,7 @@ impl AppCore {
                 Self::snapshot(&run, &round, out);
                 if verdict == Verdict::Changes {
                     let prompt = def.render(&def.respond, &round, &run.plan, run.cap);
-                    self.prompt_planner(id, &prompt, now, out);
+                    self.prompt_planner(id, &prompt, Voice::Machinery, now, out);
                 }
             }
             RunState::AwaitingResponse => {
@@ -846,10 +859,17 @@ impl AppCore {
             r.cap = r.cap.max(n);
             r.state = RunState::AwaitingFeedback;
         });
-        self.prompt_agent(run.reviewer, &prompt, now, out);
+        self.prompt_agent(run.reviewer, &prompt, Voice::Machinery, now, out);
     }
 
-    fn prompt_planner(&mut self, id: WorkflowId, prompt: &str, now: Clock, out: &mut Out) {
+    fn prompt_planner(
+        &mut self,
+        id: WorkflowId,
+        prompt: &str,
+        voice: Voice,
+        now: Clock,
+        out: &mut Out,
+    ) {
         let Some(planner) = self.workflow(id).and_then(|r| r.planner) else {
             self.pause_workflow(id, "the planner clone does not exist yet", now, out);
             return;
@@ -859,13 +879,24 @@ impl AppCore {
                 round.response_asked = Some(now.wall);
             }
         });
-        self.prompt_agent(planner, prompt, now, out);
+        self.prompt_agent(planner, prompt, voice, now, out);
     }
 
     /// Send text into a running agent, or make it the first prompt of
-    /// a launch when the pane is gone.
-    fn prompt_agent(&mut self, agent: RecordId, prompt: &str, now: Clock, out: &mut Out) {
+    /// a launch when the pane is gone. The launch clears the ask either
+    /// way, so only a send into a running pane carries the voice.
+    fn prompt_agent(
+        &mut self,
+        agent: RecordId,
+        prompt: &str,
+        voice: Voice,
+        now: Clock,
+        out: &mut Out,
+    ) {
         if let Some(host) = self.running_host(agent) {
+            if voice == Voice::Machinery {
+                self.mark_relayed(agent);
+            }
             out.push(Effect::SendInput {
                 host,
                 text: prompt.to_owned(),
@@ -962,7 +993,7 @@ impl AppCore {
                     r.state = state;
                 });
                 if reprompt {
-                    self.prompt_agent(agent, &prompt, now, out);
+                    self.prompt_agent(agent, &prompt, Voice::Machinery, now, out);
                 }
             }
             RunState::AtCap | RunState::Converged => self.next_review_round(id, now, out),
@@ -1030,6 +1061,7 @@ impl AppCore {
                     ));
                     return;
                 };
+                self.mark_relayed(run.source);
                 out.push(Effect::SendInput {
                     host,
                     text: "/compact".into(),
@@ -1083,7 +1115,7 @@ impl AppCore {
             r.rounds.push(round);
             r.state = RunState::AwaitingResponse;
         });
-        self.prompt_planner(id, &prompt, now, out);
+        self.prompt_planner(id, &prompt, Voice::Owner, now, out);
     }
 
     /// The owner's objection to a converged or capped review, sent over
@@ -1128,7 +1160,7 @@ impl AppCore {
             r.rounds.push(round);
             r.state = RunState::AwaitingResponse;
         });
-        self.prompt_planner(id, &prompt, now, out);
+        self.prompt_planner(id, &prompt, Voice::Owner, now, out);
     }
 
     fn remove_workflow(&mut self, id: WorkflowId, out: &mut Out) {

@@ -5773,7 +5773,154 @@ mod workflow {
             });
         });
         missing(&mut core, run, late);
-        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback, "asking");
+        assert!(
+            failed_unprompted(&core, "plan.feedback-1.md"),
+            "an ask does not excuse a prompt that was never taken: {:?}",
+            run_of(&core).state
+        );
+
+        // The round prompt was taken and left the ask standing.
+        let (mut core, run) = fresh(|core, id| {
+            ask(core, id, 1_500);
+            hook(core, id, EventKind::PromptSubmitted, 2_500);
+            core.edit_session(id, &mut Out::default(), |s| {
+                s.activity = Activity::Idle;
+            });
+        });
+        missing(&mut core, run, late);
+        assert_eq!(run_of(&core).state, RunState::AwaitingFeedback, "taken");
+    }
+
+    /// Seed a question from `id`, asked at `at_ms`.
+    fn ask(core: &mut AppCore, id: RecordId, at_ms: u64) {
+        core.edit_session(id, &mut Out::default(), |s| {
+            s.asking = Some(Ask {
+                message: "which?".into(),
+                at: Clock::at(at_ms).wall,
+                kind: AskKind::default(),
+                answer: None,
+            });
+        });
+    }
+
+    /// Idle Claude Code `id` with a Stop, then report the prompt it was
+    /// sent; whether its ask is still standing after.
+    fn ask_survives_the_prompt(core: &mut AppCore, id: RecordId, at_ms: u64) -> bool {
+        make_claude(core, id);
+        stop(core, id, at_ms);
+        hook(core, id, EventKind::PromptSubmitted, at_ms + 1_000);
+        core.session(id).unwrap().asking.is_some()
+    }
+
+    #[test]
+    fn a_review_round_and_a_planners_respond_leave_their_asks() {
+        let (mut core, run, _, reviewer, planner) = started();
+        core.dispatch(
+            AppAction::HostListed(vec![running(reviewer), running(planner)]),
+            Clock::at(150),
+        );
+        ask(&mut core, reviewer, 0);
+        ask(&mut core, planner, 0);
+        let effects = settle(&mut core, run, "- item", 400);
+        assert_eq!(sent(&effects)[0].0, HostId(planner.host_name()));
+        assert!(core.relayed.contains(&planner), "the respond is marked");
+        assert!(!core.relayed.contains(&reviewer));
+        let effects = settle(&mut core, run, "accepted", 500);
+        assert!(sent(&effects)[0].1.contains("plan.feedback-2.md"));
+        assert!(core.relayed.contains(&reviewer), "the round is marked");
+
+        assert!(ask_survives_the_prompt(&mut core, reviewer, 10_000));
+        assert!(!core.relayed.contains(&reviewer), "the mark is consumed");
+        assert!(ask_survives_the_prompt(&mut core, planner, 20_000));
+        assert!(!core.relayed.contains(&planner));
+    }
+
+    #[test]
+    fn a_send_into_a_gone_pane_or_to_an_agent_with_no_ask_is_not_marked() {
+        let (mut core, run, _, reviewer, planner) = started();
+        // The planner's pane is gone: the respond becomes its first
+        // prompt, and the launch clears the ask.
+        ask(&mut core, planner, 0);
+        settle(&mut core, run, "- item", 400);
+        assert!(core.first_prompts.iter().any(|(id, _)| *id == planner));
+        assert!(!core.relayed.contains(&planner));
+        core.dispatch(
+            AppAction::HostListed(vec![running(reviewer), running(planner)]),
+            Clock::at(450),
+        );
+        let effects = settle(&mut core, run, "accepted", 500);
+        assert_eq!(sent(&effects).len(), 1);
+        assert!(core.relayed.is_empty(), "the reviewer asked nothing");
+    }
+
+    #[test]
+    fn a_continue_re_prompt_leaves_the_ask() {
+        let (mut core, run, _, reviewer, _) = started();
+        ask(&mut core, reviewer, 1_000);
+        stop(&mut core, reviewer, 5_000);
+        missing(&mut core, run, past_grace(5_000));
+        assert!(matches!(run_of(&core).state, RunState::Failed(_)));
+        let effects = core.dispatch(AppAction::ContinueWorkflow(run), Clock::at(60_000));
+        assert_eq!(sent(&effects).len(), 1);
+        assert!(core.relayed.contains(&reviewer));
+        assert!(ask_survives_the_prompt(&mut core, reviewer, 61_000));
+    }
+
+    #[test]
+    fn the_hand_off_compact_is_marked() {
+        let (mut core, run, source, ..) = started();
+        settle(&mut core, run, "No further feedback.", 400);
+        core.dispatch(AppAction::HostListed(vec![running(source)]), Clock::at(410));
+        ask(&mut core, source, 0);
+        let effects = core.dispatch(
+            AppAction::HandOffWorkflow {
+                run,
+                mode: HandoffMode::Compact,
+            },
+            Clock::at(420),
+        );
+        assert_eq!(sent(&effects)[0].1, "/compact");
+        assert!(core.relayed.contains(&source));
+    }
+
+    #[test]
+    fn the_owners_feedback_and_objection_answer_the_ask() {
+        let (mut core, run, _, reviewer, planner) = started();
+        settle(&mut core, run, "No further feedback.", 400);
+        core.dispatch(
+            AppAction::HostListed(vec![running(reviewer), running(planner)]),
+            Clock::at(410),
+        );
+        ask(&mut core, planner, 0);
+        let effects = core.dispatch(
+            AppAction::UserFeedback {
+                run,
+                text: "Split step 3.".into(),
+            },
+            Clock::at(420),
+        );
+        assert_eq!(sent(&effects).len(), 1);
+        assert!(core.relayed.is_empty(), "the owner's words are not marked");
+        assert!(!ask_survives_the_prompt(&mut core, planner, 10_000));
+
+        let (mut core, run, _, reviewer, planner) = started();
+        settle(&mut core, run, "No further feedback.", 400);
+        core.dispatch(
+            AppAction::HostListed(vec![running(reviewer), running(planner)]),
+            Clock::at(410),
+        );
+        ask(&mut core, planner, 0);
+        let effects = core.dispatch(
+            AppAction::ObjectWorkflow {
+                run,
+                round: 2,
+                text: "Step 3 deletes data.".into(),
+            },
+            Clock::at(420),
+        );
+        assert_eq!(sent(&effects).len(), 1);
+        assert!(core.relayed.is_empty());
+        assert!(!ask_survives_the_prompt(&mut core, planner, 10_000));
     }
 
     #[test]
@@ -6204,14 +6351,20 @@ mod workflow {
             "{:?}",
             core.first_prompts
         );
+        assert!(core.relayed.is_empty(), "the owner's round is not marked");
         core.dispatch(
             AppAction::HostListed(vec![running(reviewer), running(planner)]),
             Clock::at(160),
         );
+        ask(&mut core, reviewer, 0);
         let effects = settle(&mut core, run, "ok", 200);
         let r = run_of(&core);
         assert_eq!(r.state, RunState::AwaitingFeedback);
         assert_eq!(r.rounds.len(), 2);
+        assert!(
+            core.relayed.contains(&reviewer),
+            "the first round is marked"
+        );
         let sent_now = sent(&effects);
         assert_eq!(sent_now.len(), 1);
         assert_eq!(sent_now[0].0, HostId(reviewer.host_name()));
