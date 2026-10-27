@@ -188,6 +188,39 @@ test('turns merge by number', () => {
 
   assert.deepStrictEqual(ns(page.mergeTurns(held, { total: 3, turns: [] })), [3], 'past the total is gone');
   assert.deepStrictEqual(ns(page.mergeTurns([], { total: 2, turns: [turn(1), turn(2)] })), [1, 2]);
+
+  const range = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => turn(from + i));
+  const lowGap = page.mergeTurns(range(51, 70), { total: 70, turns: range(1, 20) });
+  assert.deepStrictEqual(ns(lowGap), ns(range(1, 20)), 'a gap on the low side drops the held turns');
+  const adjacent = page.mergeTurns(range(21, 40), { total: 40, turns: range(1, 20) });
+  assert.deepStrictEqual(ns(adjacent), ns(range(1, 40)));
+  const oneBelow = page.mergeTurns(range(22, 40), { total: 40, turns: range(1, 21) });
+  assert.deepStrictEqual(ns(oneBelow), ns(range(1, 40)), 'a page ending one below the first held turn merges');
+});
+
+test('an entry is marked by everything but its quiet seconds', () => {
+  const entry = { id: 'a', name: 'one', card: 'working', last_stop_at_ms: 5, last_seen_ms: 10, quiet_secs: 1 };
+  assert.strictEqual(page.entryMark(entry).key, page.entryMark({ ...entry, quiet_secs: 99 }).key);
+  assert.notStrictEqual(page.entryMark(entry).key, page.entryMark({ ...entry, last_seen_ms: 11 }).key);
+  assert.strictEqual(page.entryMark(entry).card, 'working');
+  assert.strictEqual(page.entryMark(entry).stop, 5);
+});
+
+test('a turn boundary is a change of card or last stop', () => {
+  const entry = { id: 'a', name: 'one', card: 'working', last_stop_at_ms: 5, last_seen_ms: 10, last_activity_ms: 10 };
+  const mark = page.entryMark(entry);
+  assert.ok(page.turnBoundary(mark, page.entryMark({ ...entry, card: 'review' })));
+  assert.ok(page.turnBoundary(mark, page.entryMark({ ...entry, last_stop_at_ms: 6 })));
+  assert.ok(!page.turnBoundary(mark, page.entryMark({ ...entry, name: 'renamed' })), 'a rename');
+  assert.ok(!page.turnBoundary(mark, page.entryMark({ ...entry, last_activity_ms: 11 })), 'a print');
+  assert.ok(!page.turnBoundary(mark, page.entryMark({ ...entry, last_seen_ms: 11 })), 'a hook');
+  assert.ok(!page.turnBoundary(null, mark), 'no previous entry');
+});
+
+test('earlier turns are asked for before the lowest held', () => {
+  assert.strictEqual(page.earlierBefore([]), null);
+  assert.strictEqual(page.earlierBefore([{ n: 1 }, { n: 2 }]), null);
+  assert.strictEqual(page.earlierBefore([{ n: 21 }, { n: 22 }]), 21);
 });
 
 test('the reply box keeps what was typed after a send', () => {

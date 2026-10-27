@@ -405,6 +405,29 @@ fn seed(port: &mut Port, notes: &str) -> (String, String, String) {
     (space, project, session)
 }
 
+/// Another session named `name` in `project`: its id.
+fn add_session(port: &mut Port, project: &str, name: &str, kind: SessionKind) -> String {
+    let reply = control(
+        port,
+        Request::new(
+            format!("se-{name}"),
+            Body::SessionNew {
+                project: project.into(),
+                name: name.into(),
+                session_kind: kind,
+                cwd: PathBuf::from("/tmp"),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: String::new(),
+                env: std::collections::BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            },
+        ),
+    );
+    made_id(&reply, RecordKind::Session)
+}
+
 /// Open the pairing window with `code` and pair as `name`: the token.
 fn pair(port: &mut Port, code: &str, scope: Scope, name: &str) -> String {
     port.app.dispatch(AppAction::OpenPairing {
@@ -4425,8 +4448,11 @@ fn page_requests_have_their_own_rate_window() {
 
 /// The page in headless Chromium against this host: a browser that
 /// refuses the cookie, pairing from the invite, the list and a session
-/// at phone width, a reply kept across a poll, one polling chain across
-/// tab switches, a send typed once, and the identity-changed and
+/// at phone width, a reply kept across a poll, "Earlier turns" without a
+/// gap after a refresh queued ahead of it, a session switch clearing the
+/// conversation's chrome, the open conversation read only when its own
+/// entry moved and once more after a turn's boundary, one polling chain
+/// across tab switches, a send typed once, and the identity-changed and
 /// removed notices. `tests/browser/page.mjs` is the browser half; this
 /// side pumps the host and does each step's part when the script asks.
 /// Not run by `cargo test`: it needs node and a Chromium download.
@@ -4447,11 +4473,18 @@ fn the_page_works_in_a_real_browser() {
     );
     let mut port = port();
     port.transcripts.set(Some(conversation(3)));
-    let (_, _, session) = seed(&mut port, "");
+    let (_, project, session) = seed(&mut port, "");
     let record = launched(&mut port, &session);
     running(&mut port, &session, "\u{276f} ");
     // A session that has reported no turn refuses a reply.
     hook(&mut port, record, stopped());
+    // Another Claude session, whose moving must not reread the open
+    // one, and a shell to switch to.
+    let helper = add_session(&mut port, &project, "helper", SessionKind::Claude);
+    running(&mut port, &helper, "\u{276f} ");
+    let shell = add_session(&mut port, &project, "shell", SessionKind::Shell);
+    running(&mut port, &shell, "$ ");
+    let helper_id = RecordId(uuid::Uuid::parse_str(&helper).unwrap());
 
     let mut child = Browser(
         std::process::Command::new("node")
@@ -4501,7 +4534,7 @@ fn the_page_works_in_a_real_browser() {
             println!("{line}");
             continue;
         };
-        let answer = browser_step(&mut port, step, record);
+        let answer = browser_step(&mut port, step, record, helper_id);
         writeln!(stdin, "{answer}").unwrap();
         stdin.flush().unwrap();
     }
@@ -4521,7 +4554,7 @@ impl Drop for Browser {
 }
 
 /// The host's part of one step of `tests/browser/page.mjs`: its answer.
-fn browser_step(port: &mut Port, step: &str, record: RecordId) -> String {
+fn browser_step(port: &mut Port, step: &str, record: RecordId, helper: RecordId) -> String {
     let invite = |port: &mut Port, code: &str| {
         port.app.dispatch(AppAction::OpenPairing {
             code: code.into(),
@@ -4551,6 +4584,37 @@ fn browser_step(port: &mut Port, step: &str, record: RecordId) -> String {
                 .dispatch(AppAction::RenameSession(record, "investigator 2".into()));
             port.transcripts.set(Some(conversation(4)));
             port.app.poll_now();
+            "go".into()
+        }
+        "grow-45" | "grow-70" | "rename-open" => {
+            let (name, turns) = match step {
+                "grow-45" => ("investigator 3", Some(45)),
+                "grow-70" => ("investigator 4", Some(70)),
+                _ => ("investigator 5", None),
+            };
+            port.app
+                .dispatch(AppAction::RenameSession(record, name.into()));
+            if let Some(turns) = turns {
+                port.transcripts.set(Some(conversation(turns)));
+            }
+            port.app.poll_now();
+            "go".into()
+        }
+        "rename-other" => {
+            port.app
+                .dispatch(AppAction::RenameSession(helper, "helper 2".into()));
+            port.app.poll_now();
+            "go".into()
+        }
+        "stop" => {
+            hook(port, record, stopped());
+            port.app.poll_now();
+            "go".into()
+        }
+        "transcript-5" | "transcript-6" => {
+            // The transcript alone: the entry does not move.
+            let turns = if step == "transcript-5" { 5 } else { 6 };
+            port.transcripts.set(Some(conversation(turns)));
             "go".into()
         }
         "sent" => {
