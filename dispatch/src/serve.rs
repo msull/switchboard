@@ -1555,7 +1555,10 @@ slots = 1
             1,
             AttemptKind::Workflow,
             AttemptState::Failed {
-                reason: "review run gone: no such run".into(),
+                reason: "review run gone: the app logged starting run r-1 and no longer has \
+                         it (the run or its project was removed, or the workspace was loaded \
+                         from an older file)"
+                    .into(),
             },
             &failed,
         );

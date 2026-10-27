@@ -8045,6 +8045,60 @@ impl Runner {
         Ok(())
     }
 
+    /// Why the app has no run `run` for attempt `a`, from its
+    /// operations log: the query path holds no state of its own, so the
+    /// log of the operation that started the run is the only witness
+    /// left. The sessions recorded for the run are named because failing
+    /// the attempt leaves them as they were; whether their panes still
+    /// exist is not asked.
+    fn run_gone_reason(&mut self, t: &Ticket, a: &Attempt, run: &str) -> String {
+        let start = t.ledger.iter().find(|o| {
+            o.intent == "run"
+                && o.attempt
+                    .as_ref()
+                    .is_some_and(|(stage, n)| *stage == a.stage && *n == a.n)
+        });
+        let gone = match start {
+            Some(op) => match self.ask(Body::Find {
+                operation: op.op.clone(),
+            }) {
+                Ok(reply) => run_gone(&reply),
+                Err(e) => RunGone::Unknown(format!("{e:#}")),
+            },
+            None => RunGone::Unknown("no start operation in this ticket's ledger".into()),
+        };
+        let reason = match gone {
+            RunGone::Dropped => format!(
+                "review run gone: the app logged starting run {run} and no longer has it \
+                 (the run or its project was removed, or the workspace was loaded from an \
+                 older file)"
+            ),
+            RunGone::NeverHeard => format!(
+                "review run gone: the app that answered has no record of starting run {run} \
+                 (a different Switchboard instance or data directory answered)"
+            ),
+            RunGone::Unknown(detail) => format!(
+                "review run gone: no such run; the app's operations log could not say why \
+                 ({detail})"
+            ),
+        };
+        let panes: Vec<String> = ["reviewer", "planner"]
+            .iter()
+            .filter_map(|role| {
+                a.run_sessions
+                    .get(*role)
+                    .map(|s| format!("{role} {}", s.session))
+            })
+            .collect();
+        if panes.is_empty() {
+            return reason;
+        }
+        format!(
+            "{reason}; sessions recorded for this run: {}",
+            panes.join(", ")
+        )
+    }
+
     fn poll_workflow(
         &mut self,
         t: &mut Ticket,
@@ -8060,14 +8114,8 @@ impl Runner {
         let view = match self.ask(Body::Workflow { run: run.clone() })? {
             Reply::Workflow { run } => run,
             Reply::Failed { reason } if reason == NO_SUCH_RUN => {
-                return self.fail_attempt(
-                    t,
-                    ps,
-                    &a.stage,
-                    a.n,
-                    &format!("review run gone: {reason}"),
-                    now_ms,
-                );
+                let reason = self.run_gone_reason(t, a, &run);
+                return self.fail_attempt(t, ps, &a.stage, a.n, &reason, now_ms);
             }
             // The app could not answer (busy, timed out on its own
             // thread): nothing is known about the run, so ask again.
@@ -8753,6 +8801,37 @@ pub(crate) const NO_SUCH_SESSION: &str = "no such session";
 /// Switchboard's reply to a `workflow` query for a run it does not have;
 /// the one failure that means the run is gone.
 pub(crate) const NO_SUCH_RUN: &str = "no such run";
+
+/// What the app's operations log says of a run it answers `no such run`
+/// for.
+#[derive(Debug, PartialEq, Eq)]
+enum RunGone {
+    /// The start is logged: the app kept the run, then lost it.
+    Dropped,
+    /// Nothing is logged: the app that answered never started it.
+    NeverHeard,
+    /// The log could not say, and why.
+    Unknown(String),
+}
+
+/// Classify `find`'s reply for the operation that started a run. Only
+/// the `Run` record decides: every logged id that is gone is reported
+/// removed, and a `workflow.start` line also lists the reviewer and
+/// planner, so a removed session says nothing about the run.
+fn run_gone(reply: &Reply) -> RunGone {
+    match reply {
+        Reply::Found { records } => {
+            match records.iter().find(|f| f.kind == wire::RecordKind::Run) {
+                Some(f) if f.removed => RunGone::Dropped,
+                Some(_) => RunGone::Unknown("the log lists the run as present".into()),
+                None if records.is_empty() => RunGone::NeverHeard,
+                None => RunGone::Dropped,
+            }
+        }
+        Reply::Failed { reason } => RunGone::Unknown(reason.clone()),
+        other => RunGone::Unknown(format!("find answered {other:?}")),
+    }
+}
 
 /// A running pane whose card says the agent is at work: after a Stop,
 /// a turn ended but the work did not (background agents, a tool).
@@ -13812,5 +13891,42 @@ prompt = "Decided: {decisions.lead} ({decisions.lead.note}); {decisions.look.not
         );
         assert_eq!(summary, "none");
         assert_eq!(verdict, Ok(false));
+    }
+
+    fn found(kind: wire::RecordKind, id: &str, removed: bool) -> wire::Found {
+        wire::Found {
+            kind,
+            id: id.into(),
+            removed,
+            session: None,
+            run: None,
+        }
+    }
+
+    /// A reviewer or planner gone from a start whose run is still there
+    /// says nothing about the run.
+    #[test]
+    fn a_removed_session_beside_a_present_run_cannot_say() {
+        let reply = Reply::Found {
+            records: vec![
+                found(wire::RecordKind::Run, "r", false),
+                found(wire::RecordKind::Session, "rev", true),
+                found(wire::RecordKind::Session, "plan", true),
+            ],
+        };
+        assert_eq!(
+            run_gone(&reply),
+            RunGone::Unknown("the log lists the run as present".into())
+        );
+    }
+
+    /// A logged start with its sessions but no `Run` record still names
+    /// a run the app kept and lost.
+    #[test]
+    fn a_logged_start_without_its_run_record_was_dropped() {
+        let reply = Reply::Found {
+            records: vec![found(wire::RecordKind::Session, "rev", false)],
+        };
+        assert_eq!(run_gone(&reply), RunGone::Dropped);
     }
 }

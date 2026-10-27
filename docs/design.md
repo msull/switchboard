@@ -4229,12 +4229,25 @@ transcript, else the plan stage's session. The rerun question, `show`
 (`plan_revised`) and the Plan tab name the copy. No record version
 changes: `revisions` and `carried_from` carry it.
 
+A run leaves the app's memory only by `remove_workflow`,
+`remove_project`, or a load of an older or unreadable workspace file;
+the other cause of `no such run` is a different instance or data
+directory answering. The `workflow` query holds no state of its own, so
+nothing retries or reattaches. Instead the runner asks `find` for the
+operation that started the run and fails the attempt saying which: the
+app logged the start and no longer has the run (dropped), the app that
+answered has no record of the start (another instance), or the log
+could not say (a failed `find`, no start operation in the ledger, or
+the run listed as present). A live reviewer or planner is left as it
+was, and the reason lists the sessions recorded for the run without
+checking that their panes exist.
+
 Known gaps: only the last revise is carried (earlier ones are already
 in the copy if their edits landed). A failed run's half-finished edits
 are kept with the copy, the cost of reviewing the revised copy at all.
-Nothing retries or reattaches a run the app reports gone before failing
-the attempt; why the app loses a run across a runner restart is not
-traced.
+A `Starting` or `AwaitingFeedback` run's state after an app restart is
+not traced, and the workspace `.bak` is a possible, untried source for a
+lost run, left out.
 
 ## Poisoned locks recovered (2026-10-26)
 

@@ -1,0 +1,1 @@
+Fixed: dispatch's plan review failure after the app reports a run gone now says whether the app dropped the run, never heard of it (another instance or data directory), or could not say, and lists the sessions recorded for the run.
