@@ -3661,6 +3661,12 @@ fn stranger_tls(
 fn a_stranger_streaming_a_head_with_no_newline_is_closed_early_with_no_reply() {
     let port = port();
     let mut s = stranger_tls(port.addr, &port.client);
+    // Set before writing: once the port has closed the socket, setting an
+    // option on it is `EINVAL` on macOS, and the close is the expected
+    // outcome of the writes below.
+    s.sock
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
     let started = std::time::Instant::now();
     let chunk = [b'a'; 4 * 1024];
     for _ in 0..16 {
@@ -3669,9 +3675,6 @@ fn a_stranger_streaming_a_head_with_no_newline_is_closed_early_with_no_reply() {
             break;
         }
     }
-    s.sock
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
     let mut buf = [0u8; 64];
     let read = s.read(&mut buf);
     let elapsed = started.elapsed();
