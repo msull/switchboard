@@ -3919,9 +3919,10 @@ Built so far:
   the confirming re-read;
   five tab switches leave one polling chain; a send is typed once and
   says "Sent."; and a 401 says "Identity changed" or "removed" as
-  `/info` decides. It is `#[ignore]`d, so neither the hook nor CI runs
-  it; the doc comment has the commands. Layout is checked at 390 px
-  only, and Safari stays a hand check. The page's node tests now fail
+  `/info` decides. It is `#[ignore]`d, so the hook does not run it;
+  CI's `browser` job does, and the doc comment has the commands.
+  Layout is checked at 390 px only, and Safari stays a hand check.
+  The page's node tests now fail
   on CI without node, which CI installs, and print `SKIPPED:`
   elsewhere. Text typed into the reply box while a send is in flight
   stays: on success the sent text is removed as a prefix of the box
@@ -4416,8 +4417,25 @@ its test step drops to `cargo test --locked --lib`. `macos-latest` is
 moving from macOS 15 to 26, and `macos-15` is the label to pin if the
 move breaks the build. Whether Dependabot proposes `rev` bumps for the
 promptbox git dependency is unknown. Nothing builds or signs the bundle
-in CI, the Swift client and the browser test stay outside it, and which
-checks `main` requires is the owner's branch-protection setting.
+in CI, the Swift client stays outside it, and which checks `main`
+requires is the owner's branch-protection setting.
+
+The `browser` job runs the web page's `#[ignore]`d browser test on
+`ubuntu-latest`: `ci-apt.sh`, the stable toolchain, node 22, `npm ci`
+in `tests/browser`, `npx playwright install --with-deps chromium` with
+`~/.cache/ms-playwright` cached on the npm lockfile, then `cargo test
+--locked --test remote -- --ignored the_page_works_in_a_real_browser
+--nocapture`. Naming the test keeps `tests/live.rs` and the gate's
+agent items out. It has no flaky-test retry. Playwright advises
+against caching browsers (the restore costs about what the download
+does), so the cache is an optimisation the job passes without. It is
+advisory: branch protection gets `browser` only after it has passed on
+`main`. Known gaps: the job has not run yet, so its elapsed time
+against the test's 120 s deadline, whether `--with-deps` is needed on
+the runner image, whether node 22 suffices, and whether Linux
+Chromium keeps the `__Host-` cookie and connects `wss://` to the
+self-signed IP host as the macOS build does are open until the first
+run.
 
 ## Open questions
 

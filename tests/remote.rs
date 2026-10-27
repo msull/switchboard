@@ -4514,6 +4514,7 @@ fn page_requests_have_their_own_rate_window() {
 /// runs beneath, and the identity-changed and removed notices. `tests/browser/page.mjs` is the browser half; this
 /// side pumps the host and does each step's part when the script asks.
 /// Not run by `cargo test`: it needs node and a Chromium download.
+/// CI's `browser` job runs it on Linux with the same test command.
 ///
 /// ```sh
 /// cd tests/browser && npm ci && npx playwright install chromium

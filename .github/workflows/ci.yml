@@ -83,6 +83,35 @@ jobs:
       - run: cargo test --locked --workspace --no-fail-fast
       - run: cargo test --locked -p egui_term --lib
 
+  # The web page in headless Chromium (`tests/remote.rs`,
+  # `the_page_works_in_a_real_browser`), which the four-command jobs skip
+  # because it is `#[ignore]`d. Advisory: branch protection does not
+  # list it until it has passed on main.
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Linux build dependencies
+        run: ./scripts/ci-apt.sh
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: tests/browser
+      # Playwright advises against caching this (the restore costs about
+      # what the download does) and the OS libraries `--with-deps` adds
+      # cannot be cached; the key is the lockfile, which pins the version.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('tests/browser/package-lock.json') }}
+      - run: npx playwright install --with-deps chromium
+        working-directory: tests/browser
+      - run: cargo test --locked --test remote -- --ignored the_page_works_in_a_real_browser --nocapture
+
   # Advisories are split from the rest so that check alone can be made
   # non-blocking: a new advisory turns it red with no change to the code.
   # The matrix entries name the checks (`deny (advisories)` and
