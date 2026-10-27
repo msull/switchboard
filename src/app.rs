@@ -22,6 +22,7 @@ use crate::adapters::remote::{
     self, RemoteIncoming, RemotePort, RemoteReply, RemoteRequest, SubscriberFrame, SubscriberQueue,
 };
 use crate::adapters::scrollback::scrollback_dir;
+use crate::cadence::{self, Cadence, Step};
 use crate::content::{
     self, ACTIVITY_BYTES_CAP, ContentJob, ContentKey, ContentVersion, ContentView, ContentWorker,
     ConversationCache, FILE_BYTES_CAP, Observed, PAGE_TURNS_CAP, PAGE_TURNS_DEFAULT, PageFrom,
@@ -53,8 +54,6 @@ use crate::ports::transcript::TranscriptReader;
 use crate::ports::updates::CheckOutcome;
 use crate::ui::{UiState, prompt_box};
 
-/// How often the host is listed and the event log read.
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// The line Claude Code prints in its folder trust question, and how
 /// far back in a pane to look for it.
 const TRUST_PROMPT_MARK: &str = "trust this folder";
@@ -146,11 +145,24 @@ struct Discovery {
     deadline: Instant,
 }
 
+/// Whether the root window is drawn: eframe skips `ui` while it is
+/// occluded or minimized and calls only `logic`.
+#[derive(Default)]
+struct Shown {
+    /// Whether `ui` ran since the last `logic`.
+    ui_ran: bool,
+    /// Whether the last `logic` saw the window visible.
+    last_visible: bool,
+}
+
 pub struct SwitchboardApp {
     core: AppCore,
     services: Services,
     started: Instant,
-    last_poll: Option<Instant>,
+    /// When the tick and polls last ran; `None` until `start`, so UI
+    /// tests, which never call it, never poll or badge.
+    cadence: Option<Cadence>,
+    shown: Shown,
     /// When Dispatch was last asked for its status.
     last_dispatch: Option<Instant>,
     /// The Dispatch port on a thread of its own when it may block.
@@ -393,7 +405,8 @@ impl SwitchboardApp {
             services,
             dispatch_port,
             started: Instant::now(),
-            last_poll: None,
+            cadence: None,
+            shown: Shown::default(),
             last_dispatch: None,
             badge: None,
             last_caption: None,
@@ -450,7 +463,7 @@ impl SwitchboardApp {
             data_dir: self.dispatch_port.data_dir.clone(),
             switchboard_data_dir: self.services.store.data_dir(),
         });
-        self.last_poll = Some(Instant::now());
+        self.cadence = Some(Cadence::started(Instant::now()));
         self.poll_events();
         self.poll_host();
         self.rearm_discoveries();
@@ -1248,7 +1261,7 @@ impl SwitchboardApp {
     /// Codex discoveries, captions. For tests and the startup script,
     /// which drive the app without a frame loop.
     pub fn poll_now(&mut self) {
-        self.last_poll = Some(Instant::now());
+        self.cadence = Some(self.cadence.unwrap_or_default().host_polled(Instant::now()));
         self.last_caption = Some(Instant::now());
         self.poll_events();
         self.poll_host();
@@ -1258,24 +1271,25 @@ impl SwitchboardApp {
         self.check_trust_prompts();
     }
 
-    fn pump(&mut self) {
+    fn pump(&mut self, step: &Step) {
         self.serve_pending();
         // Every `logic` call, not every poll: a button press should land
         // in the pass its wake-up requested.
         for event in self.services.controller.poll() {
             self.dispatch(AppAction::Controller(event));
         }
-        let woken = self
-            .services
-            .wake
-            .as_ref()
-            .is_some_and(WakeSocket::take_woken);
-        let due = self.last_poll.is_none_or(|t| t.elapsed() >= POLL_INTERVAL);
-        if woken || due {
-            self.last_poll = Some(Instant::now());
+        // Before the early return so a hidden pass still collects the
+        // Dispatch reply instead of leaving it for the next 5 s tick.
+        self.drain_dispatch();
+        if step.events {
             self.poll_events();
+        }
+        if step.host_poll {
             self.poll_host();
             self.poll_discoveries();
+        }
+        if !step.tick {
+            return;
         }
         if self
             .last_caption
@@ -1292,7 +1306,6 @@ impl SwitchboardApp {
             self.last_config = Some(Instant::now());
             self.poll_configs();
         }
-        self.drain_dispatch();
         if self
             .last_dispatch
             .is_none_or(|t| t.elapsed() >= DISPATCH_POLL)
@@ -1484,7 +1497,23 @@ impl eframe::App for SwitchboardApp {
     /// (the control port, hook wakes, polls, the tick's own re-arm, the
     /// window raises they ask for) lives here rather than in `ui`.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.dispatch(AppAction::Tick);
+        // `take` swaps in `false` and returns the old value, so the flag
+        // means "since the previous `logic`".
+        let visible = std::mem::take(&mut self.shown.ui_ran);
+        self.shown.last_visible = visible;
+        let step = self.cadence.map(|prev| {
+            let woken = self
+                .services
+                .wake
+                .as_ref()
+                .is_some_and(WakeSocket::take_woken);
+            let (next, step) = cadence::decide(prev, Instant::now(), visible, woken);
+            self.cadence = Some(next);
+            step
+        });
+        if step.is_none_or(|s| s.tick) {
+            self.dispatch(AppAction::Tick);
+        }
         self.flush_refusals();
         self.drain_diffs();
         let answered: Vec<AppAction> = self.update_results.rx.try_iter().collect();
@@ -1500,13 +1529,13 @@ impl eframe::App for SwitchboardApp {
             // The read threads have no context to wake the frame with.
             ctx.request_repaint_after(Duration::from_millis(50));
         }
-        if self.last_poll.is_some() {
-            // Only after `start`: UI tests never call it, so they never
-            // poll or badge.
-            self.pump();
-            ctx.request_repaint_after(POLL_INTERVAL);
+        if let Some(step) = step {
+            self.pump(&step);
+            ctx.request_repaint_after(step.next_in);
             let waiting = self.core.waiting_count();
-            if self.badge != Some(waiting) {
+            // A hidden pass that neither ticks nor lists the host has no new
+            // waiting count; a trailing host poll changes it, so it counts.
+            if (step.tick || step.events || step.host_poll) && self.badge != Some(waiting) {
                 crate::adapters::dock::set_waiting_badge(waiting);
                 self.services.controller.set_waiting(waiting);
                 self.badge = Some(waiting);
@@ -1520,6 +1549,13 @@ impl eframe::App for SwitchboardApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.shown.ui_ran = true;
+        if self.cadence.is_some() && !self.shown.last_visible {
+            // The `logic` before this frame thought the window hidden and
+            // may have skipped the polls; one more pass refreshes the
+            // cards at once instead of on the next tick.
+            ui.ctx().request_repaint();
+        }
         crate::ui::draw(self, ui);
     }
 
