@@ -19,6 +19,7 @@
 
 pub mod adapters;
 pub mod app;
+pub mod cadence;
 pub mod content;
 pub mod core;
 pub mod ports;

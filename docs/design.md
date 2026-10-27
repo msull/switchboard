@@ -2155,8 +2155,39 @@ While hidden, eframe throttles repaints to one per 100 ms, so a
 control request is answered within about 100 ms. Spike 12 has the
 measurements.
 
+The window counts as hidden when `ui` has not run since the previous
+`logic` call, which is the condition eframe uses to skip it; a visible
+popout keeps the root visible, by eframe's rule. Visible, every `logic`
+call ticks and the host and hook log are polled once a second.
+Hidden, `src/cadence.rs` backs the tick off to 5 s, and with it
+everything that rides the tick, each up to 5 s late: every
+`AppCore::tick` timer (notices, the update check, pairing and env-setup
+expiry, trash undo, `workflow_tick`, the radial-menu dwell), captions,
+the trust check, definition files, the Dispatch poll, the Dock badge,
+pane death and remote change events. The radial dwell in particular is
+not honoured promptly while hidden: a held stick sends no event, and a
+controller event does not force a tick. The control port, controller
+events and Dispatch answers are served on every `logic` call, so they
+stay within about 100 ms.
+
+A hook wake reads the event log at once, so a session that starts
+waiting moves the badge within about 100 ms, but lists the host at most
+once per second: `PostToolUse` fires per tool call, and a burst of
+wakes gets one `list-panes` and one trailing list when the second ends.
+On uncover the first `logic` still reads as hidden; `ui` sees that and
+asks for one more pass, which lists the host, so the first visible
+frame is at most one frame stale.
+
+The saving is arithmetic, not a measurement: visible, about
+`1 + N/2 + M/2` forks a second (one `list-panes`; a caption capture
+every 2 s for each of the view's `N` running sessions; a trust capture
+every 2 s for each of `M` running Claude Code agents whose state is
+still unknown); hidden, about a fifth of that.
+
 Known gap: the sleep and wake cycle and the Dock badge while hidden
-were not measured; spike 12 lists the steps.
+were not measured; spike 12 lists the steps. A window merely covered by
+others, rather than minimized or hidden, was not measured to be
+reported occluded, so it may keep the visible cadence.
 
 ## Dispatch ticket page (2026-10-04)
 

@@ -303,14 +303,22 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// or "Switchboard" when it has none.
 #[must_use]
 pub fn default_server_name() -> String {
-    std::process::Command::new("hostname")
-        .arg("-s")
-        .output()
+    // `uname` reads the node name without forking `hostname -s`.
+    rustix::system::uname()
+        .nodename()
+        .to_str()
         .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
+        .and_then(short_name)
         .unwrap_or_else(|| "Switchboard".into())
+}
+
+/// A node name up to its first dot, as `hostname -s` prints it, or
+/// `None` when that part is empty.
+#[must_use]
+fn short_name(nodename: &str) -> Option<String> {
+    let (short, _) = nodename.split_once('.').unwrap_or((nodename, ""));
+    let short = short.trim();
+    (!short.is_empty()).then(|| short.to_owned())
 }
 
 // --- random material
@@ -1518,6 +1526,14 @@ pub fn local_address() -> Option<IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_short_name_is_the_node_name_up_to_its_first_dot() {
+        assert_eq!(short_name("host.local").as_deref(), Some("host"));
+        assert_eq!(short_name("host").as_deref(), Some("host"));
+        assert_eq!(short_name(""), None);
+        assert_eq!(short_name(".x"), None);
+    }
 
     #[test]
     fn an_identity_round_trips_and_its_key_hashes_to_its_spki() {
