@@ -2620,6 +2620,12 @@ binary was 0.6.0 or later.)
   older build. A new file on disk is a new key and one more restart.
   A runner started outside the app is named and labelled but never
   restarted by it (the app restarts only its own); one notice says so.
+  Known gap: "no attempt open" covers agent panes, reviews, resolution
+  passes and gates, but not a lane bring-up's rebase, a lane `setup`
+  (`cargo fetch`) or a `gh` read, which are no attempt, and the restart
+  is a tmux hangup the runner does not catch, so an automatic restart
+  can end one of those mid-way. That is the exposure every by-hand
+  `runner restart` has had; the recheck path recovers it.
 - **Restart on the row.** While the runner is stale the row reads
   `… · older build` with a Restart button (`DispatchRunnerRestart`,
   `SWITCHBOARD_SCRIPT` line `dispatch-runner-restart`). It is refused
