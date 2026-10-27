@@ -88,7 +88,8 @@ side shown next to sessions and its tab, the directory each project's
 file side starts at when narrowed, the screen to reopen on, the
 Prompt Box switch and its trigger word, model, captions, the screen
 its caption bar and preview panel appear on, whether updates are
-checked for on a schedule, the sessions open in
+checked for on a schedule and when the last check was answered with the
+`ETag` and the release it described, the sessions open in
 windows of their own and where each window sits, where the main
 window sits, the zoom of each display, the workflow round cap and the
 user's workflow definitions, and the environment sets: each set's
@@ -219,7 +220,7 @@ a changelog section, and a tag that exists.
 
 A running Switchboard checks the repository's latest release
 (`core::updates`, the `adapters::updates::GitHubReleases` source over
-`ureq`) twenty seconds after launch and hourly, unless Settings' "Check
+`ureq`) thirty seconds after launch and once a day, unless Settings' "Check
 for updates automatically" is off; then only "Check for updates" looks. A newer version
 is a notice and an "Update" item on the rail: the click downloads the
 zip to `$TMPDIR/switchboard-update`, checks it against the published
@@ -381,7 +382,7 @@ src/core/
   workflow.rs            plan review runs: reviewer and planner rounds as a state machine over records
   control.rs             the control port's commands run quietly under an operation id; read models in the wire's shapes; `ready_for_prompt`, the one verdict `session.prompt` and a view's `prompt_refusal` share
   remote.rs              the remote port's state: the host's identity and paired devices as loaded, the pairing window with its code, scope and failure counts per source address (three lock an address out until the window is reopened), a device's scope and revocation; `invite_url`, the page's URL with the code, key and id in its fragment that the QR carries
-  updates.rs             the app's version and its update: the scheduled check (off when the setting says so), a newer release offered, downloaded on a click and installed on another; semantic versions, pre-releases never offered
+  updates.rs             the app's version and its update: the scheduled check, daily, with jitter (off when the setting says so), a newer release offered, downloaded on a click and installed on another; semantic versions, pre-releases never offered
   changelog.rs           the CHANGELOG.md this binary was built with, compiled in, as sections of titled groups; a found release's notes the same way with the release footer dropped; the sections at or below the running version
   tickets.rs             Dispatch's tickets as the remote port says them: each ticket's summary with its standing worded as the Mac's page words it, its decisions, and alone its body, attempts and lanes (the checks log listed once); one value for the port's fingerprint and its replies; and whether an attempt ran with grants (its checks, or a session that holds sets)
   revision.rs            the read-model fingerprints behind the remote port's revision: every exported view hashed with its time-derived fields held still, and the `changed`/`removed` diff between two passes (and a record's runs as the `runs` collection)
@@ -391,7 +392,7 @@ src/core/
 src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, changes (a branch's commits and files over its base, one file's diff), controller, control (the operations log), dispatch (Dispatch's port), remote (the identity and paired-device files, and the Bonjour advertisement), updates (the release source: the newest release, its bundle fetched and checked, the swap arranged)
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
-  updates.rs             GitHub Releases over `ureq`: the latest release parsed from the API, the zip staged under `$TMPDIR/switchboard-update` and checked against its `.sha256` asset, unpacked with `ditto`, verified with `codesign` and pinned to the running app's Team ID; the swap helper that replaces the bundle after exit and relaunches, keeping the old one aside
+  updates.rs             GitHub Releases over `ureq`: the latest release parsed from the API by a conditional (`If-None-Match`), size-capped request that follows redirects only to two pinned hosts, the zip staged under `$TMPDIR/switchboard-update` and checked against its `.sha256` asset, unpacked with `ditto`, verified with `codesign` and pinned to the running app's Team ID; the swap helper that replaces the bundle after exit and relaunches, keeping the old one aside
   tmux.rs                tmux process host on the private socket
   hooks.rs               append-first event log + socket wake-up + hook settings JSON
   control.rs             the control port: operations.log (append-only, synced) and control.sock (one thread per connection, requests handed to the frame)

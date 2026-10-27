@@ -13126,8 +13126,12 @@ mod changelog {
 
 mod updates {
     use super::*;
-    use crate::core::updates::{UPDATE_CHECK_INTERVAL, UPDATE_FIRST_CHECK, UpdateState, is_newer};
-    use crate::ports::updates::Release;
+    use crate::core::model::UpdateCheckRecord;
+    use crate::core::updates::{
+        UPDATE_CHECK_INTERVAL, UPDATE_FIRST_CHECK, UPDATE_JITTER_MAX, UPDATE_RETRY, UpdateState,
+        is_newer, update_jitter,
+    };
+    use crate::ports::updates::{CheckOutcome, Release};
 
     fn release(version: &str) -> Release {
         Release {
@@ -13150,6 +13154,49 @@ mod updates {
         u64::try_from(d.as_millis()).unwrap()
     }
 
+    /// The wall second `Clock::at(at)` reads.
+    fn wall(at: u64) -> u64 {
+        1_700_000_000 + at / 1000
+    }
+
+    /// The first `Clock::at` whose wall time is the second `secs`.
+    fn at_wall(secs: u64) -> u64 {
+        (secs - 1_700_000_000) * 1000
+    }
+
+    /// When the scheduled check is next due after an answer at `at`.
+    fn due_after(at: u64) -> u64 {
+        let checked = wall(at);
+        at_wall(checked + UPDATE_CHECK_INTERVAL.as_secs() + update_jitter(checked).as_secs())
+    }
+
+    fn answer(release: Option<Release>, etag: Option<&str>) -> AppAction {
+        AppAction::UpdateAnswered(CheckOutcome::Answer {
+            release,
+            etag: etag.map(str::to_owned),
+        })
+    }
+
+    /// A core loaded from a `settings.json` holding this record.
+    fn loaded_with(record: UpdateCheckRecord) -> AppCore {
+        let mut core = core();
+        core.dispatch(
+            AppAction::StoreLoaded(Ok(Loaded {
+                settings: Settings {
+                    update_check: record,
+                    ..Settings::default()
+                },
+                ..Loaded::default()
+            })),
+            Clock::at(0),
+        );
+        core
+    }
+
+    fn checks(effects: &[Effect]) -> bool {
+        effects.contains(&Effect::CheckForUpdate)
+    }
+
     #[test]
     fn only_a_parsed_higher_version_without_a_prerelease_is_newer() {
         assert!(is_newer("0.2.1", "0.2.0"));
@@ -13169,25 +13216,35 @@ mod updates {
     }
 
     #[test]
-    fn the_tick_checks_once_the_app_has_settled_and_then_hourly() {
+    fn the_tick_checks_once_the_app_has_settled_and_then_daily() {
         let mut core = core();
         let first = ms(UPDATE_FIRST_CHECK);
         let e = core.dispatch(AppAction::Tick, Clock::at(first - 1));
-        assert!(!e.contains(&Effect::CheckForUpdate));
-        assert_eq!(*core.update(), UpdateState::Idle);
+        assert!(!checks(&e));
         let e = core.dispatch(AppAction::Tick, Clock::at(first));
-        assert!(e.contains(&Effect::CheckForUpdate));
-        assert_eq!(*core.update(), UpdateState::Checking);
+        assert!(checks(&e));
+        assert_eq!(
+            *core.update(),
+            UpdateState::Idle,
+            "a scheduled check shows nothing"
+        );
         let e = core.dispatch(AppAction::Tick, Clock::at(first + 1));
-        assert!(!e.contains(&Effect::CheckForUpdate), "one check at a time");
+        assert!(!checks(&e), "one check at a time");
+        let e = core.dispatch(AppAction::CheckForUpdate, Clock::at(first + 1));
+        assert!(!checks(&e), "not even a click during a scheduled one");
 
-        core.dispatch(AppAction::UpdateChecked(Ok(None)), Clock::at(first + 2));
+        core.dispatch(answer(None, None), Clock::at(first + 2));
         assert_eq!(*core.update(), UpdateState::UpToDate);
-        let again = first + ms(UPDATE_CHECK_INTERVAL);
+        let again = due_after(first + 2);
         let e = core.dispatch(AppAction::Tick, Clock::at(again - 1));
-        assert!(!e.contains(&Effect::CheckForUpdate));
+        assert!(!checks(&e));
         let e = core.dispatch(AppAction::Tick, Clock::at(again));
-        assert!(e.contains(&Effect::CheckForUpdate));
+        assert!(checks(&e));
+        core.dispatch(answer(None, None), Clock::at(again + 1));
+
+        let e = core.dispatch(AppAction::CheckForUpdate, Clock::at(again + 2));
+        assert!(checks(&e));
+        assert_eq!(*core.update(), UpdateState::Checking, "a click shows it");
     }
 
     #[test]
@@ -13200,19 +13257,17 @@ mod updates {
                 .any(|e| matches!(e, Effect::SaveSettings(s) if !s.check_for_updates))
         );
         let first = ms(UPDATE_FIRST_CHECK);
-        for at in [first, first + ms(UPDATE_CHECK_INTERVAL)] {
+        let period = ms(UPDATE_CHECK_INTERVAL + UPDATE_JITTER_MAX);
+        for at in [first, first + period] {
             let e = core.dispatch(AppAction::Tick, Clock::at(at));
-            assert!(!e.contains(&Effect::CheckForUpdate), "at {at}");
+            assert!(!checks(&e), "at {at}");
         }
         assert_eq!(*core.update(), UpdateState::Idle);
 
-        let manual = first + ms(UPDATE_CHECK_INTERVAL) + 10;
+        let manual = first + period + 10;
         let e = core.dispatch(AppAction::CheckForUpdate, Clock::at(manual));
-        assert!(e.contains(&Effect::CheckForUpdate));
-        core.dispatch(
-            AppAction::UpdateChecked(Ok(Some(release("0.3.0")))),
-            Clock::at(manual + 1),
-        );
+        assert!(checks(&e));
+        core.dispatch(answer(Some(release("0.3.0")), None), Clock::at(manual + 1));
         assert_eq!(*core.update(), UpdateState::Available(release("0.3.0")));
     }
 
@@ -13228,16 +13283,28 @@ mod updates {
                 .any(|e| matches!(e, Effect::SaveSettings(s) if s.check_for_updates))
         );
         let e = core.dispatch(AppAction::Tick, Clock::at(first + 6));
-        assert!(
-            e.contains(&Effect::CheckForUpdate),
-            "no check since launch, so one is due at once"
-        );
-        core.dispatch(AppAction::UpdateChecked(Ok(None)), Clock::at(first + 7));
-        let next = first + 6 + ms(UPDATE_CHECK_INTERVAL);
+        assert!(checks(&e), "never answered, so one is due at once");
+        core.dispatch(answer(None, None), Clock::at(first + 7));
+        let next = due_after(first + 7);
         let e = core.dispatch(AppAction::Tick, Clock::at(next - 1));
-        assert!(!e.contains(&Effect::CheckForUpdate));
+        assert!(!checks(&e));
         let e = core.dispatch(AppAction::Tick, Clock::at(next));
-        assert!(e.contains(&Effect::CheckForUpdate));
+        assert!(checks(&e));
+    }
+
+    #[test]
+    fn a_click_during_a_scheduled_check_takes_it_over() {
+        let mut core = core();
+        core.dispatch(AppAction::Tick, Clock::at(ms(UPDATE_FIRST_CHECK)));
+        assert_eq!(*core.update(), UpdateState::Idle);
+        let e = core.dispatch(AppAction::CheckForUpdate, Clock::at(40_000));
+        assert_eq!(*core.update(), UpdateState::Checking);
+        assert!(!e.iter().any(|e| matches!(e, Effect::CheckForUpdate)));
+        core.dispatch(
+            AppAction::UpdateChecked(Err("offline".into())),
+            Clock::at(41_000),
+        );
+        assert!(matches!(core.update(), UpdateState::Failed { .. }));
     }
 
     #[test]
@@ -13273,7 +13340,7 @@ mod updates {
         assert!(core.notices()[0].text.contains("0.3.0"));
         assert!(!core.notices()[0].is_error);
 
-        // The hourly check finds the same release: nothing new to say.
+        // The next check finds the same release: nothing new to say.
         core.dispatch(AppAction::CheckForUpdate, Clock::at(7));
         core.dispatch(
             AppAction::UpdateChecked(Ok(Some(release("0.3.0")))),
@@ -13347,6 +13414,244 @@ mod updates {
             UpdateState::Failed { release: Some(r), .. } if r.version == "0.3.0"
         ));
         assert!(core.notices().last().unwrap().text.contains("read-only"));
+    }
+
+    #[test]
+    fn the_period_is_kept_on_disk_and_every_launch_still_waits_to_settle() {
+        let first = ms(UPDATE_FIRST_CHECK);
+        let checked = wall(0);
+        let core_at = |checked_at| {
+            loaded_with(UpdateCheckRecord {
+                checked_at,
+                ..UpdateCheckRecord::default()
+            })
+        };
+
+        let mut core = core_at(Some(checked));
+        assert!(!checks(&core.dispatch(AppAction::Tick, Clock::at(first))));
+        let due = due_after(0);
+        assert!(!checks(&core.dispatch(AppAction::Tick, Clock::at(due - 1))));
+        assert!(checks(&core.dispatch(AppAction::Tick, Clock::at(due))));
+
+        let mut core = core_at(None);
+        assert!(!checks(
+            &core.dispatch(AppAction::Tick, Clock::at(first - 1))
+        ));
+        assert!(
+            checks(&core.dispatch(AppAction::Tick, Clock::at(first))),
+            "never checked"
+        );
+
+        let mut core = core_at(Some(wall(first) + 3600));
+        assert!(
+            checks(&core.dispatch(AppAction::Tick, Clock::at(first))),
+            "a check in the future means the clock was set back"
+        );
+    }
+
+    #[test]
+    fn the_jitter_is_fixed_by_the_answer_and_at_most_half_an_hour() {
+        let mut spread = std::collections::HashSet::new();
+        for at in (1_700_000_000..1_700_000_000 + 500).step_by(7) {
+            let j = update_jitter(at);
+            assert_eq!(j, update_jitter(at), "the same answer, the same jitter");
+            assert!(j <= UPDATE_JITTER_MAX, "{j:?}");
+            spread.insert(j);
+        }
+        assert!(spread.len() > 50, "answers at different seconds spread out");
+    }
+
+    #[test]
+    fn a_scheduled_failure_is_quiet_and_keeps_the_offer() {
+        for failure in [
+            CheckOutcome::NoAnswer("offline".into()),
+            CheckOutcome::Http {
+                status: 403,
+                detail: "rate limited".into(),
+            },
+        ] {
+            let mut core = core();
+            core.dispatch(AppAction::CheckForUpdate, Clock::at(1));
+            core.dispatch(answer(Some(release("0.3.0")), None), Clock::at(2));
+            let day = due_after(2);
+            assert!(checks(&core.dispatch(AppAction::Tick, Clock::at(day))));
+            let notices = core.notices().len();
+            let e = core.dispatch(AppAction::UpdateAnswered(failure.clone()), Clock::at(day));
+            assert!(
+                e.iter().all(|e| matches!(e, Effect::SaveSettings(_))),
+                "{e:?}"
+            );
+            assert_eq!(*core.update(), UpdateState::Available(release("0.3.0")));
+            assert_eq!(core.notices().len(), notices, "{failure:?}");
+        }
+    }
+
+    #[test]
+    fn no_answer_is_retried_in_an_hour_and_an_error_waits_the_period() {
+        let start = ms(UPDATE_FIRST_CHECK);
+        let retry = ms(UPDATE_RETRY);
+
+        let mut core = core();
+        assert!(checks(&core.dispatch(AppAction::Tick, Clock::at(start))));
+        core.dispatch(
+            AppAction::UpdateAnswered(CheckOutcome::NoAnswer("offline".into())),
+            Clock::at(start),
+        );
+        assert_eq!(*core.update(), UpdateState::Idle);
+        assert!(!checks(
+            &core.dispatch(AppAction::Tick, Clock::at(start + retry - 1000))
+        ));
+        assert!(checks(
+            &core.dispatch(AppAction::Tick, Clock::at(start + retry))
+        ));
+
+        let mut core = self::core();
+        assert!(checks(&core.dispatch(AppAction::Tick, Clock::at(start))));
+        let e = core.dispatch(
+            AppAction::UpdateAnswered(CheckOutcome::Http {
+                status: 503,
+                detail: "unavailable".into(),
+            }),
+            Clock::at(start),
+        );
+        assert!(
+            e.iter()
+                .any(|e| matches!(e, Effect::SaveSettings(s) if s.update_check.checked_at == Some(wall(start)))),
+            "an answer, even an error, moves the period"
+        );
+        assert!(!checks(
+            &core.dispatch(AppAction::Tick, Clock::at(start + retry))
+        ));
+        let due = due_after(start);
+        assert!(!checks(&core.dispatch(AppAction::Tick, Clock::at(due - 1))));
+        assert!(checks(&core.dispatch(AppAction::Tick, Clock::at(due))));
+    }
+
+    #[test]
+    fn a_manual_failure_shows_its_reason_and_keeps_the_offer() {
+        let mut core = core();
+        core.dispatch(AppAction::CheckForUpdate, Clock::at(1));
+        core.dispatch(answer(Some(release("0.3.0")), None), Clock::at(2));
+        let e = core.dispatch(AppAction::CheckForUpdate, Clock::at(3));
+        assert!(checks(&e));
+        core.dispatch(
+            AppAction::UpdateAnswered(CheckOutcome::Http {
+                status: 429,
+                detail: "slow down".into(),
+            }),
+            Clock::at(4),
+        );
+        assert!(matches!(
+            core.update(),
+            UpdateState::Failed { reason, release: Some(r) }
+                if reason.contains("429") && reason.contains("slow down") && r.version == "0.3.0"
+        ));
+        let e = core.dispatch(AppAction::DownloadUpdate, Clock::at(5));
+        assert!(e.contains(&Effect::DownloadUpdate(release("0.3.0"))));
+
+        let mut core = self::core();
+        core.dispatch(AppAction::CheckForUpdate, Clock::at(1));
+        core.dispatch(
+            AppAction::UpdateAnswered(CheckOutcome::NoAnswer("offline".into())),
+            Clock::at(2),
+        );
+        assert_eq!(
+            *core.update(),
+            UpdateState::Failed {
+                reason: "offline".into(),
+                release: None
+            }
+        );
+    }
+
+    #[test]
+    fn a_304_judges_the_release_kept_with_the_etag() {
+        let kept = |version: &str| UpdateCheckRecord {
+            checked_at: Some(wall(0)),
+            etag: Some("\"abc\"".into()),
+            release: Some(release(version)),
+        };
+        let not_modified = AppAction::UpdateAnswered(CheckOutcome::NotModified);
+
+        let mut core = loaded_with(kept("0.3.0"));
+        let notices = core.notices().len();
+        core.dispatch(AppAction::CheckForUpdate, Clock::at(1));
+        let e = core.dispatch(not_modified.clone(), Clock::at(5000));
+        assert_eq!(*core.update(), UpdateState::Available(release("0.3.0")));
+        assert_eq!(core.notices().len(), notices, "already offered");
+        assert!(e.iter().any(|e| matches!(
+            e,
+            Effect::SaveSettings(s) if s.update_check.checked_at == Some(wall(5000))
+                && s.update_check.etag.is_some()
+        )));
+
+        let mut core = loaded_with(kept("0.2.0"));
+        core.dispatch(AppAction::CheckForUpdate, Clock::at(1));
+        core.dispatch(not_modified.clone(), Clock::at(2));
+        assert_eq!(*core.update(), UpdateState::UpToDate);
+
+        let mut core = loaded_with(UpdateCheckRecord {
+            release: None,
+            ..kept("0.3.0")
+        });
+        core.dispatch(AppAction::CheckForUpdate, Clock::at(1));
+        core.dispatch(not_modified, Clock::at(2));
+        assert_eq!(core.settings().update_check.etag, None);
+        assert_eq!(core.settings().update_check.checked_at, Some(wall(0)));
+        assert!(matches!(core.update(), UpdateState::Failed { .. }));
+    }
+
+    #[test]
+    fn the_etag_is_kept_only_with_its_release() {
+        let mut core = core();
+        let e = core.dispatch(answer(Some(release("0.3.0")), Some("\"v1\"")), Clock::at(1));
+        let saved = |e: &[Effect]| {
+            e.iter()
+                .find_map(|e| match e {
+                    Effect::SaveSettings(s) => Some(s.update_check.clone()),
+                    _ => None,
+                })
+                .expect("saved")
+        };
+        let record = saved(&e);
+        assert_eq!(record.etag.as_deref(), Some("\"v1\""));
+        assert_eq!(record.release, Some(release("0.3.0")));
+
+        for (found, etag) in [
+            (Some(release("0.3.1")), None),
+            (None, Some("\"v2\"")),
+            (None, None),
+        ] {
+            let mut core = self::core();
+            core.dispatch(answer(Some(release("0.3.0")), Some("\"v1\"")), Clock::at(1));
+            let e = core.dispatch(answer(found, etag), Clock::at(2000));
+            let record = saved(&e);
+            assert_eq!((record.etag, record.release), (None, None));
+            assert_eq!(record.checked_at, Some(wall(2000)));
+        }
+
+        let mut core = self::core();
+        core.dispatch(
+            AppAction::StoreLoaded(Err(StoreError::Locked)),
+            Clock::at(0),
+        );
+        let e = core.dispatch(answer(Some(release("0.3.0")), Some("\"v1\"")), Clock::at(1));
+        assert!(!e.iter().any(|e| matches!(e, Effect::SaveSettings(_))));
+        assert_eq!(core.settings().update_check.etag.as_deref(), Some("\"v1\""));
+    }
+
+    #[test]
+    fn a_relaunch_offers_the_kept_release_again_without_a_notice() {
+        let record = |version: &str| UpdateCheckRecord {
+            checked_at: Some(wall(0)),
+            etag: Some("\"abc\"".into()),
+            release: Some(release(version)),
+        };
+        let core = loaded_with(record("0.3.0"));
+        assert_eq!(*core.update(), UpdateState::Available(release("0.3.0")));
+        assert!(core.notices().is_empty());
+        let core = loaded_with(record("0.2.0"));
+        assert_eq!(*core.update(), UpdateState::Idle);
     }
 }
 
