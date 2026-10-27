@@ -10049,6 +10049,323 @@ fn a_resolution_fix_on_a_published_branch_keeps_its_commits() {
     assert!(env.repo.lock().unwrap().replayed.is_empty());
 }
 
+// --- a conflict met at `ready`, with the PR open
+
+/// `resolution_pipeline` with no `pr` agent stage, so the PR is the
+/// provider's from the start and a base that moves after `review-code`
+/// is first met at `ready`.
+fn ready_resolution_pipeline(worktrees: &std::path::Path) -> String {
+    let pr = "[[stages]]\nname = \"pr\"\noperator = \"implementer\"\ncontext = \"each\"\nwrites = [\"notes\"]\nprompt = \"Open a pull request for {branch}.\"\n\n";
+    let text = resolution_pipeline(worktrees);
+    assert!(text.contains(pr));
+    text.replace(pr, "")
+}
+
+/// A ticket whose `review-code` converged at `base0000`, at its
+/// `inspect` question.
+fn reviewed_at_inspect(env: &mut Env) -> (String, PathBuf) {
+    let worktrees = env.data.root.join("wt");
+    std::fs::write(
+        env.data.pipeline(PROJECT),
+        ready_resolution_pipeline(&worktrees),
+    )
+    .unwrap();
+    let (id, implementer) = before_review(env);
+    review_starts(env, &id, &implementer);
+    lint_exits(env, &id, 1, 0, "all fine\n");
+    style_says(env, &id, 1, "No findings.");
+    env.steps_until(&id, "the inspect question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+    let tree = env.ticket(&id).lanes[0].worktree.clone();
+    (id, tree)
+}
+
+/// The base moves to `main0002` with `tree` one behind and a rebase
+/// that stops on `pick0001`.
+fn base_moves_into_a_conflict(env: &Env, tree: &std::path::Path) {
+    let mut repo = env.repo.lock().unwrap();
+    repo.bases
+        .insert(env.data.repo_dir(PROJECT), "main0002".into());
+    repo.behind.insert(tree.to_path_buf(), 1);
+    repo.rebase_conflicts.push(tree.to_path_buf());
+    repo.conflicting
+        .insert(tree.to_path_buf(), vec!["pick0001".into()]);
+}
+
+fn rebaser_started(env: &mut Env, id: &str) -> Attempt {
+    env.steps_until(id, "the rebaser", |t, _| {
+        t.attempts_of(REFRESH)
+            .any(|a| a.session.is_some() && a.is_open())
+    });
+    env.ticket(id).attempts_of(REFRESH).last().unwrap().clone()
+}
+
+/// The PR is open at `base0000` in state `pr_state` and the base moves
+/// into a conflict before `ready`: `inspect` is answered, the rebaser
+/// resolves at `resolv01`, and the resolution reviewer starts.
+fn resolution_at_ready(env: &mut Env, pr_state: &str) -> (String, PathBuf) {
+    let (id, tree) = reviewed_at_inspect(env);
+    base_moves_into_a_conflict(env, &tree);
+    env.pr_is(&id, "base0000", pr_state, Checks::Passed);
+    env.inspect(&id, "proceed", None);
+    let rebase = rebaser_started(env, &id);
+    resolution_review_started(env, &id, &tree, &rebase);
+    (id, tree)
+}
+
+/// `resolution_at_ready` with a point from the reviewer, at the
+/// resolution question.
+fn resolution_findings_at_ready(env: &mut Env, pr_state: &str) -> (String, PathBuf) {
+    let (id, tree) = resolution_at_ready(env, pr_state);
+    resolver_says(
+        env,
+        &id,
+        "- src/queue.rs: the base's guard on an empty queue was dropped\n",
+    );
+    env.steps_until(&id, "the resolution question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == RESOLUTION)
+    });
+    (id, tree)
+}
+
+fn resolution_complete(env: &mut Env, id: &str) {
+    env.steps_until(id, "the resolution pass done", |t, _| {
+        resolution_attempt(t).state == AttemptState::Complete
+    });
+}
+
+/// Main moved after the PR was opened and the rebase at `ready`
+/// conflicted: the bring-up pushes the resolution once, and its pass
+/// still runs, holding `ready` before any reading of the checks; a
+/// clean answer completes it and `ready` reads the checks.
+#[test]
+fn a_conflicted_bring_up_at_ready_is_reviewed_though_it_pushed() {
+    let mut env = Env::new();
+    let (id, tree) = resolution_at_ready(&mut env, "open");
+    let t = env.ticket(&id);
+    let branch = t.lanes[0].branch.clone();
+    assert_eq!(
+        env.repo.lock().unwrap().pushed,
+        vec![(tree, "origin".into(), branch, "base0000".into())]
+    );
+    assert_eq!(
+        t.lanes[0].pushed.as_ref().map(|p| p.head.as_str()),
+        Some("resolv01")
+    );
+    assert!(resolution_attempt(&t).is_open());
+    assert!(t.attempts_of("ready").next().is_none(), "{t:#?}");
+    let prompt = last_prompt_of(&env, "resolver");
+    assert!(
+        prompt.contains("git range-diff root0000..base0000 main0002..resolv01"),
+        "{prompt}"
+    );
+    env.pr_is(&id, "resolv01", "open", Checks::Passed);
+    resolver_says(&mut env, &id, "No findings.");
+    resolution_complete(&mut env, &id);
+    env.steps_until(&id, "the ready attempt done", |t, _| {
+        t.attempts_of("ready").last().is_some_and(|a| !a.is_open())
+    });
+    let t = env.ticket(&id);
+    let ready = t.attempts_of("ready").last().unwrap();
+    assert_eq!(ready.state, AttemptState::Complete);
+    assert_eq!(ready.head.as_deref(), Some("resolv01"));
+    assert_eq!(env.repo.lock().unwrap().pushed.len(), 1, "pushed once");
+    let kinds = events_of(&env.data, &id);
+    assert_eq!(count_of(&kinds, "pushed"), 1, "{kinds:?}");
+}
+
+/// A fix from the pass at `ready` is pushed once its checks pass, with
+/// the lease on the head the bring-up pushed; the commits are kept, the
+/// provider still at the old head reads as lagging the push, not as a
+/// question, and the checks pass once it shows the fix.
+#[test]
+fn a_resolution_fix_at_ready_is_pushed_with_the_lease_on_the_brought_up_head() {
+    let mut env = Env::new();
+    let (id, tree) = resolution_findings_at_ready(&mut env, "open");
+    env.pr_is(&id, "resolv01", "open", Checks::Passed);
+    decide_resolution(&mut env, &id, "fix");
+    resolution_fixed(&mut env, &id, &tree);
+    resolution_complete(&mut env, &id);
+    let t = env.ticket(&id);
+    let branch = t.lanes[0].branch.clone();
+    assert_eq!(
+        env.repo.lock().unwrap().pushed,
+        vec![
+            (
+                tree.clone(),
+                "origin".into(),
+                branch.clone(),
+                "base0000".into()
+            ),
+            (tree, "origin".into(), branch, "resolv01".into()),
+        ]
+    );
+    assert_eq!(
+        t.lanes[0].pushed.as_ref().map(|p| p.head.as_str()),
+        Some("fix00001")
+    );
+    let a = resolution_attempt(&t);
+    assert_eq!(a.head.as_deref(), Some("fix00001"));
+    assert!(env.repo.lock().unwrap().replayed.is_empty());
+    for _ in 0..3 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert!(t.pending_decisions().is_empty(), "{t:#?}");
+    assert!(
+        t.attempts_of("ready")
+            .all(|a| a.state != AttemptState::Complete)
+    );
+    env.pr_is(&id, "fix00001", "open", Checks::Passed);
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the ready attempt done", |t, _| {
+        t.attempts_of("ready").last().is_some_and(|a| !a.is_open())
+    });
+    let t = env.ticket(&id);
+    let ready = t.attempts_of("ready").last().unwrap();
+    assert_eq!(ready.state, AttemptState::Complete);
+    assert_eq!(ready.head.as_deref(), Some("fix00001"));
+    assert_eq!(env.repo.lock().unwrap().pushed.len(), 2);
+    let kinds = events_of(&env.data, &id);
+    assert_eq!(count_of(&kinds, "pushed"), 2, "{kinds:?}");
+}
+
+/// An accepted resolution at `ready` is the head the bring-up pushed:
+/// nothing more is pushed.
+#[test]
+fn an_accepted_resolution_at_ready_pushes_nothing_more() {
+    let mut env = Env::new();
+    let (id, _) = resolution_findings_at_ready(&mut env, "open");
+    env.pr_is(&id, "resolv01", "open", Checks::Passed);
+    decide_resolution(&mut env, &id, "accept");
+    resolution_complete(&mut env, &id);
+    env.steps_until(&id, "the ready attempt done", |t, _| {
+        t.attempts_of("ready").last().is_some_and(|a| !a.is_open())
+    });
+    assert_eq!(env.repo.lock().unwrap().pushed.len(), 1);
+    let t = env.ticket(&id);
+    assert_eq!(
+        t.lanes[0].pushed.as_ref().map(|p| p.head.as_str()),
+        Some("resolv01")
+    );
+}
+
+/// With no open PR at the bring-up nothing is pushed, and the pass runs
+/// anyway; its fix has no lease to push with, so the head is left to
+/// `ready`'s own reading of the PR.
+#[test]
+fn a_resolution_fix_at_ready_with_no_open_pr_is_left_to_the_pr_question() {
+    let mut env = Env::new();
+    let (id, tree) = resolution_findings_at_ready(&mut env, "closed");
+    assert!(env.repo.lock().unwrap().pushed.is_empty());
+    assert_eq!(env.ticket(&id).lanes[0].pushed, None);
+    decide_resolution(&mut env, &id, "fix");
+    resolution_fixed(&mut env, &id, &tree);
+    resolution_complete(&mut env, &id);
+    env.steps_until(&id, "ready's question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.stage == "ready")
+    });
+    assert!(env.repo.lock().unwrap().pushed.is_empty());
+    assert_eq!(env.ticket(&id).lanes[0].pushed, None);
+}
+
+/// A lane that pushed at `pr` and whose bring-up at `ready` pushed
+/// nothing has no lease on the remote's head: the fix is not
+/// force-pushed on the old `pushed`.
+#[test]
+fn a_resolution_fix_is_not_pushed_on_a_head_older_than_the_bring_up() {
+    let mut env = Env::new();
+    let (id, tree) = resolution_findings_at_ready(&mut env, "closed");
+    let mut t = env.ticket(&id);
+    t.lanes[0].pushed = Some(PushedHead {
+        head: "old00001".into(),
+        at_ms: 0,
+    });
+    env.runner.save_ticket(&mut t, env.now).unwrap();
+    decide_resolution(&mut env, &id, "fix");
+    resolution_fixed(&mut env, &id, &tree);
+    resolution_complete(&mut env, &id);
+    env.steps_until(&id, "ready's question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.stage == "ready")
+    });
+    assert!(env.repo.lock().unwrap().pushed.is_empty());
+    assert_eq!(
+        env.ticket(&id).lanes[0]
+            .pushed
+            .as_ref()
+            .map(|p| p.head.as_str()),
+        Some("old00001")
+    );
+}
+
+/// Dispatch restarts once the bring-up at `ready` has pushed and its
+/// pass has started: the new runner keeps that one pass, and nothing
+/// is pushed again.
+#[test]
+fn a_restart_after_the_ready_push_starts_the_pass_once() {
+    let mut env = Env::new();
+    let (id, _) = resolution_at_ready(&mut env, "open");
+    env.restart();
+    env.pr_is(&id, "resolv01", "open", Checks::Passed);
+    for _ in 0..3 {
+        env.step();
+    }
+    assert_eq!(env.ticket(&id).attempts_of(RESOLUTION).count(), 1);
+    resolver_says(&mut env, &id, "No findings.");
+    resolution_complete(&mut env, &id);
+    env.steps_until(&id, "the ready attempt done", |t, _| {
+        t.attempts_of("ready").last().is_some_and(|a| !a.is_open())
+    });
+    assert_eq!(env.ticket(&id).attempts_of(RESOLUTION).count(), 1);
+    assert_eq!(launches_of(&env, "resolver"), 1);
+    assert_eq!(env.repo.lock().unwrap().pushed.len(), 1);
+}
+
+/// The base moves into a conflict while the ticket waits at `merge`:
+/// the trip back to `ready` rebases through the rebaser, pushes its
+/// resolution once, and the pass reads it before the checks are read
+/// again.
+#[test]
+fn a_conflicting_base_move_at_merge_is_reviewed_through_ready() {
+    let mut env = Env::new();
+    let (id, tree) = reviewed_at_inspect(&mut env);
+    env.pr_is(&id, "base0000", "open", Checks::Passed);
+    env.inspect(&id, "proceed", None);
+    env.steps_until(&id, "the merge decision", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    base_moves(&env, &tree, &["src/a.rs"]);
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.rebase_conflicts.push(tree.clone());
+        repo.conflicting
+            .insert(tree.clone(), vec!["pick0001".into()]);
+    }
+    env.wait(PR_POLL_MS);
+    env.steps_until(&id, "the trip back", |t, _| stands_at(t, "ready"));
+    let rebase = rebaser_started(&mut env, &id);
+    resolution_review_started(&mut env, &id, &tree, &rebase);
+    assert_eq!(env.repo.lock().unwrap().pushed.len(), 1);
+    assert!(
+        env.ticket(&id)
+            .attempts_of("ready")
+            .all(|a| a.state != AttemptState::Complete || a.n == 1),
+        "ready reads the checks again only after the pass"
+    );
+    env.pr_is(&id, "resolv01", "open", Checks::Passed);
+    resolver_says(&mut env, &id, "No findings.");
+    env.steps_until(&id, "the merge decision again", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "merge")
+    });
+    assert_eq!(env.repo.lock().unwrap().pushed.len(), 1, "pushed once");
+    let kinds = events_of(&env.data, &id);
+    assert_in_order(
+        &kinds,
+        &["sent-back", "refreshed", "pushed", "round", "pr", "stage"],
+    );
+}
+
 /// A reviewer that stops without writing fails the pass: the rerun
 /// question says what a rerun does, with no "start over", and nothing
 /// is launched while it waits; a rerun reviews afresh.

@@ -1280,9 +1280,11 @@ impl Runner {
 
     /// The review of each chosen lane's conflict resolution, when its
     /// last bring-up resolved a conflict after the pipeline's last code
-    /// review stage and pushed nothing: one reviewer reads only what the
-    /// resolution changed, before the stage's own work. True while one
-    /// is open, failed or asked about, which holds the stage.
+    /// review stage, whether or not that bring-up pushed: one reviewer
+    /// reads only what the resolution changed, before the stage's own
+    /// work (at `ready`, before the checks are read). A pass that
+    /// completes on a fix pushes it to the lane's open PR. True while
+    /// one is open, failed or asked about, which holds the stage.
     fn resolution_passes(
         &mut self,
         t: &mut Ticket,
@@ -1308,6 +1310,13 @@ impl Runner {
                 Some(a) if a.state == AttemptState::Complete => continue,
                 Some(a) if a.is_open() => {
                     self.poll_review(t, ps, p, &shape, &a, cwd, Some(ctx), now_ms)?;
+                    // Pushed on the transition only, so a refused push is
+                    // not retried every tick while the stage waits.
+                    if resolution_of(t, &lane.name, moved)
+                        .is_some_and(|x| x.n == a.n && x.state == AttemptState::Complete)
+                    {
+                        self.push_resolution_fix(t, p, i, now_ms)?;
+                    }
                 }
                 Some(a) => {
                     if !held_in(t, RESOLUTION, ctx) && may_rerun(t, &a) {
@@ -1345,6 +1354,24 @@ impl Runner {
         i: usize,
         remote: &str,
     ) -> Result<Option<String>> {
+        let Some(seen) = pr_head_seen(t, &t.lanes[i]) else {
+            return Ok(None);
+        };
+        self.push_lane(t, p, i, remote, &seen)
+    }
+
+    /// The push behind `push_refreshed` and `push_resolution_fix`: lane
+    /// `i`'s head pushed to its open PR's branch with a lease on `seen`,
+    /// the head the remote is believed to hold. Same contract as
+    /// `push_refreshed`: anything short of a push is logged and `None`.
+    fn push_lane(
+        &mut self,
+        t: &Ticket,
+        p: &Pipeline,
+        i: usize,
+        remote: &str,
+        seen: &str,
+    ) -> Result<Option<String>> {
         let lane = &t.lanes[i];
         let (id, name, branch) = (&t.id, &lane.name, &lane.branch);
         // The PR is looked up the way the pipeline's PR stage will look
@@ -1352,11 +1379,8 @@ impl Runner {
         let Some((stage, provider)) = pr_stage(p) else {
             return Ok(None);
         };
-        let Some(seen) = pr_head_seen(t, lane) else {
-            return Ok(None);
-        };
         let head = self.git.head(&lane.worktree)?;
-        if same_commit(&head, &seen) {
+        if same_commit(&head, seen) {
             return Ok(None);
         }
         let origin = self.git.remote_url(&lane.worktree)?;
@@ -1384,7 +1408,7 @@ impl Runner {
         }
         match self
             .git
-            .push_with_lease(&lane.worktree, remote, branch, &seen)
+            .push_with_lease(&lane.worktree, remote, branch, seen)
         {
             Ok(Push::Pushed) => {
                 log::info!("ticket {id} lane {name}: pushed {branch} over {seen} (lease)");
@@ -1424,6 +1448,44 @@ impl Runner {
                 head,
                 at_ms: now_ms,
             });
+        }
+        Ok(())
+    }
+
+    /// A completed resolution pass's head pushed to lane `i`'s open PR
+    /// and recorded as its `pushed`, with the lease on the head the
+    /// bring-up pushed. Not `pr_head_seen`: the pass records the fix head
+    /// as its own, which would make the lease the head being pushed. A
+    /// lane whose `pushed` predates the bring-up pushed nothing at it,
+    /// and that head is not the remote's to lease on, so it is left to
+    /// the `pr` question; an accepted pass is at the pushed head already
+    /// and pushes nothing.
+    fn push_resolution_fix(
+        &mut self,
+        t: &mut Ticket,
+        p: &Pipeline,
+        i: usize,
+        now_ms: u64,
+    ) -> Result<()> {
+        let refreshed_at = t.lanes[i].refreshed.as_ref().map_or(0, |r| r.at_ms);
+        let Some(seen) = t.lanes[i]
+            .pushed
+            .as_ref()
+            .filter(|x| x.at_ms >= refreshed_at)
+            .map(|x| x.head.clone())
+        else {
+            return Ok(());
+        };
+        let Some(lane) = p.lane(&t.lanes[i].name) else {
+            return Ok(());
+        };
+        let remote = p.lane_remote(lane).to_owned();
+        if let Some(head) = self.push_lane(t, p, i, &remote, &seen)? {
+            t.lanes[i].pushed = Some(crate::ticket::PushedHead {
+                head,
+                at_ms: now_ms,
+            });
+            self.save_ticket(t, now_ms)?;
         }
         Ok(())
     }
@@ -9306,9 +9368,9 @@ pub(crate) fn conflict_count(r: &Refreshed, by: wire_dispatch::BroughtUpBy) -> O
 
 /// The bring-up of `lane` whose conflict resolution is still to be
 /// reviewed: a chosen lane, not removed, whose last bring-up resolved a
-/// conflict after the pipeline's last code review stage and pushed
-/// nothing since. Shared by the resolution loop and the resume, so a
-/// resume authorises a rerun only where the loop would launch one.
+/// conflict after the pipeline's last code review stage, pushed or not.
+/// Shared by the resolution loop and the resume, so a resume authorises
+/// a rerun only where the loop would launch one.
 pub(crate) fn resolution_due<'l>(p: &Pipeline, lane: &'l LaneRecord) -> Option<&'l Refreshed> {
     let last_review = p
         .stages
@@ -9328,10 +9390,8 @@ pub(crate) fn resolution_due<'l>(p: &Pipeline, lane: &'l LaneRecord) -> Option<&
     {
         return None;
     }
-    // A bring-up that pushed has put the resolution on the PR already.
-    if lane.pushed.as_ref().is_some_and(|p| p.at_ms >= moved.at_ms) {
-        return None;
-    }
+    // A bring-up that pushed is reviewed too: a pushed resolution is on
+    // the PR, and its checks passing says nothing of whether it is right.
     Some(moved)
 }
 
@@ -12390,13 +12450,13 @@ gate = { kind = "human", decision = "inspect" }
         t.lanes[0].refreshed = Some(moved.clone());
         t.attempts = vec![cancelled(RESOLUTION, 1, AttemptKind::Review, "parked", 150)];
         assert_eq!(rerun_of(&t, &p), [(RESOLUTION.to_owned(), 1)]);
-        // The bring-up was pushed since: the resolution is on the PR.
+        // The bring-up was pushed since: the resolution is still read.
         let mut pushed = t.clone();
         pushed.lanes[0].pushed = Some(crate::ticket::PushedHead {
             head: "head1".into(),
             at_ms: 100,
         });
-        assert!(rerun_of(&pushed, &p).is_empty());
+        assert_eq!(rerun_of(&pushed, &p), [(RESOLUTION.to_owned(), 1)]);
         // A newer bring-up: the review belongs to the one before it.
         let mut newer = t.clone();
         newer.lanes[0].refreshed = Some(Refreshed {

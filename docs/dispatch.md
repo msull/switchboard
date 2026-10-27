@@ -2292,7 +2292,7 @@ rewritten since the rebase stopped (by the rebaser or by hand), with the
 bring-up's stage, and records the head it reached as `refreshed.after`;
 a branch git rebased untouched onto a newer base resolved nothing, and
 the record is dropped. A bring-up with a conflict at a stage after the
-pipeline's last code review stage, which pushed nothing (no open PR),
+pipeline's last code review stage, whether or not it pushed,
 gets one resolution review before the stage runs: an ordinary `review`
 attempt under the pseudo-stage `resolution`, shaped as the last code
 review stage with one reviewer (the policy's `resolution_reviewer`,
@@ -2311,9 +2311,16 @@ completes with no second reviewer; `accept` completes at the reviewed
 head. A failed pass asks `rerun`, and a rerun reviews the same
 resolution afresh, carrying nothing. A conflict brought up at or
 before the last code review stage is read by that stage's rebase
-check, and a conflict at `ready` with an open PR was pushed by the
-bring-up already; neither gets a pass. A pass belongs to the bring-up
-it started at or after, so a later one gets its own.
+check and gets no pass. A conflict at `ready` with an open PR is
+reviewed too, though the bring-up has pushed the resolution already:
+passing checks say nothing of whether a resolution kept both sides. The pass holds `ready` before
+its checks are read, and a fix that passes the checks is pushed to the
+PR with a lease on the head the bring-up pushed and recorded as the
+lane's `pushed`, so `ready` reads a provider still at the old head as
+lagging the push; with nothing pushed by the bring-up (no open PR, a
+refused lease) there is no lease to give, and the head is left to the
+`pr` question. A pass belongs to the bring-up it started at or after,
+so a later one gets its own.
 
 Pull-request tickets are someone else's branch and are never
 refreshed; `lanes`, a human look and the merge watch launch nothing
@@ -3074,7 +3081,7 @@ and one against the real one:
 | The user's own feedback round after the review converged | The pending `finalize` decision is cancelled and the session unmarked while the planner answers; when the run converges again a new decision names the new round count |
 | The provider reports the PR conflicting at `merge` | The ticket goes back to `ready`, where the policy's rebaser starts in the lane, cloned from the implementer's session, with the PR, the base and the notes path in its prompt; when it stops `ready` reads the checks at its head, the ticket stands at `merge` again and, merged, closes; the rebaser's attempt still records `conflicting`, which its completion line names as the rebaser's (`a_conflicting_pr_is_rebased_by_a_clone_of_the_implementer`; the log text in `a_remedys_completion_names_its_role_and_head`) |
 | The rebaser leaves the PR at the same head, or `max_rebases` is spent | A `pr` decision saying which at `ready`; no further rebaser runs, and the ticket does not return to `merge` (`a_rebase_that_changes_nothing_or_past_the_cap_is_a_question`) |
-| The base moves under a ticket at `merge` and a merge with it conflicts | The ticket goes back to `ready`, which rebases and pushes once with the lease, reads the checks pending then green, and the ticket stands at `merge` with a new decision; `sent-back`, `refreshed`, `pushed`, `pr`, `pr-checks`, `stage` in order; a restart after the trip back's save still pushes once; a provider's short head leases on the full head `ready` read (`a_conflicting_base_move_at_merge_is_refreshed_through_ready`, `a_restart_after_the_send_back_refreshes_once`, `the_lease_after_a_trip_back_uses_the_full_head`) |
+| The base moves under a ticket at `merge` and a merge with it conflicts | The ticket goes back to `ready`, which rebases and pushes once with the lease, reads the checks pending then green, and the ticket stands at `merge` with a new decision; `sent-back`, `refreshed`, `pushed`, `pr`, `pr-checks`, `stage` in order; a restart after the trip back's save still pushes once; a provider's short head leases on the full head `ready` read; when the rebase conflicts and the rebaser resolves it, a pipeline with a resolution reviewer reviews the resolution between the push and the checks (`a_conflicting_base_move_at_merge_is_refreshed_through_ready`, `a_restart_after_the_send_back_refreshes_once`, `the_lease_after_a_trip_back_uses_the_full_head`, `a_conflicting_base_move_at_merge_is_reviewed_through_ready`) |
 | The base moves cleanly under a ticket at `merge` | Nothing is rebased or pushed and the same decision waits (`a_clean_base_move_at_merge_leaves_the_branch_alone`) |
 | The trip back meets a conflict with no rebaser | `ready` asks its `refresh` question naming the file (`a_base_move_at_merge_the_rebaser_cannot_resolve_asks_refresh_naming_the_file`) |
 | A conflict at `merge` with a tree that is not clean | No trip back and no rebaser; the merge decision names the tree, the file or the provider's word; `recheck` while it is still not clean says so again; once clean, `recheck` sends it back; in two lanes, the dirty one holds both (`a_dirty_tree_at_merge_asks_instead_of_looping`, `a_dirty_tree_with_a_conflicting_pr_at_merge_starts_no_rebaser`, `a_dirty_second_lane_holds_the_send_back_of_a_clean_one`); a `root` merge with only the provider's word checks the lane trees too (`a_dirty_tree_under_a_root_merge_asks_instead_of_looping`) |
@@ -3103,6 +3110,7 @@ and one against the real one:
 | The rebase at `pr` conflicts and the rebaser resolves it | The reviewed head and the conflicting commits are on the lane before the rebaser starts; then one `resolution` reviewer reads the range-diff of the reviewed and the resolved branch, and `pr` waits; a clean answer completes it with nothing run (`a_conflicting_refresh_at_pr_is_reviewed_before_the_pr_opens`) |
 | The resolution review finds points, with `review-code = "auto"` | A `resolution` question with `fix`, `accept` and `park`; `fix` is one fixer and the checks, no second reviewer; `accept` completes at the reviewed head (`a_resolution_pass_with_points_asks_fix_accept_park`) |
 | The conflict was brought up at `implement` and the base has not moved since | `review-code`'s first round checks the rebase; no resolution review at `pr` (`a_conflict_before_review_code_gets_no_resolution_pass`) |
+| The base moved after `review-code` and the PR; the rebase at `ready` conflicts and the rebaser resolves it | The bring-up pushes the resolution once with the lease, then one `resolution` reviewer reads it while `ready` waits with no reading of the checks; a clean answer lets `ready` read them; a fix that passes its checks is pushed with the lease on the brought-up head, keeps its commits, and a provider still at that head reads as lagging, not a question; `accept` pushes nothing more; with no open PR nothing is pushed, the pass still runs, and the fix is left to `ready`'s `pr` question; a restart once the pass has started keeps that one pass (`a_conflicted_bring_up_at_ready_is_reviewed_though_it_pushed`, `a_resolution_fix_at_ready_is_pushed_with_the_lease_on_the_brought_up_head`, `an_accepted_resolution_at_ready_pushes_nothing_more`, `a_resolution_fix_at_ready_with_no_open_pr_is_left_to_the_pr_question`, `a_resolution_fix_is_not_pushed_on_a_head_older_than_the_bring_up`, `a_restart_after_the_ready_push_starts_the_pass_once`) |
 | A resolution fix on a branch the remote already holds | The commits are kept, the rewrite recorded as skipped (`a_resolution_fix_on_a_published_branch_keeps_its_commits`) |
 | The resolution reviewer fails | A `rerun` question that says a rerun reviews the same resolution with a fresh reviewer; nothing launches while it waits (`a_failed_resolution_pass_asks_rerun_without_carry_wording`) |
 | A hand rebase, then `recheck` | The same review, with no rebaser's notes (`a_hand_rebase_after_the_refresh_question_is_reviewed`) |
