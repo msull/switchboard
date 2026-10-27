@@ -93,3 +93,9 @@ The rule since: comments say why.
   and retries, and fetches the 12 MB of indexes only on a 404; the jobs
   carry `timeout-minutes` so nothing holds a runner for the six-hour
   default.
+- GitHub caps a repository's Actions caches at 10 GB and evicts the
+  least recently used. Four Rust jobs saving a gigabyte each per branch
+  reach that in a week of pull requests, and what gets evicted is
+  `main`'s, so every job on `main` runs cold. Save caches from `main`
+  only and let branches restore them; a job whose build is a subset of
+  another's shares that one's key instead of keeping its own copy.

@@ -4443,6 +4443,27 @@ self-signed IP host as the macOS build does. Known gaps: whether
 `--with-deps` is needed on the runner image, and the job's time once
 the cache restores.
 
+The runs after the merge answered the time question: on a warm cache
+`check` takes 4 minutes, `msrv` 3.5, `browser` 2 and `macos` 5 to 6,
+and the macOS runner's queue alone has reached 11 minutes. Two things
+made cold runs of 14 to 20 minutes: a stable point release
+(1.99.0 to 1.99.1) changed every cache key at once, and the
+repository's caches, about a gigabyte per job per branch, passed
+GitHub's 10 GB cap, after which `main`'s own entries were evicted by
+branches' and jobs on `main` rebuilt from nothing. So `rust-cache`
+saves only on `main` (`save-if`); a pull request restores `main`'s
+entry, keyed on the toolchain and the lockfile, and saves nothing;
+`browser` restores `check`'s entry (`shared-key`) rather than keeping
+a near copy. The `macos` job moved to its own workflow,
+`.github/workflows/macos.yml`: every non-docs push to `main`, pull
+requests that touch the macOS-only files (the adapters, `main.rs`, the
+dispatch sandbox and its git tests, `tests/gate.rs`, the vendored
+terminal widget), the Cargo files or the toolchain file, and
+`workflow_dispatch` for a branch the owner wants checked. It is
+advisory: a required check that a path filter skips leaves the pull
+request pending, so branch protection lists `check`, `msrv` and the
+two `deny` entries, not `macos`.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no
