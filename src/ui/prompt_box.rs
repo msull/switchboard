@@ -20,6 +20,7 @@ use crate::app::Services;
 use crate::core::{
     AppAction, AppCore, RecordId, SessionRecord, VOICE_KEY_ACCOUNT, VoiceSettings, WindowFrame,
 };
+use crate::sync::lock_recover;
 
 /// Prompts sent from editors, waiting for the frame to end so they can
 /// be dispatched with the app borrowed mutably.
@@ -39,10 +40,7 @@ impl PromptSink for PaneSink {
         if !self.running.load(Ordering::Relaxed) {
             return Err("the session is not running".into());
         }
-        self.outbox
-            .lock()
-            .expect("outbox mutex")
-            .push((self.id, text.to_owned()));
+        lock_recover(&self.outbox, "outbox (deliver)").push((self.id, text.to_owned()));
         Ok(())
     }
 }
@@ -66,7 +64,7 @@ impl FileSaver for NotingSaver {
     ) -> Result<Option<std::path::PathBuf>, String> {
         let result = self.inner.save(seed, text)?;
         if let Some(path) = &result {
-            self.saved.lock().expect("saved paths").push(path.clone());
+            lock_recover(&self.saved, "saved paths (save)").push(path.clone());
         }
         Ok(result)
     }
@@ -169,8 +167,10 @@ impl PromptBoxes {
 pub fn pump(cx: &mut DrawCtx<'_>) -> Option<std::time::Duration> {
     let core = cx.core;
     // A file saved from an editor shows up in its project's tree at once.
-    let saved: Vec<std::path::PathBuf> =
-        std::mem::take(&mut *cx.state.prompt_boxes.saved.lock().expect("saved paths"));
+    let saved: Vec<std::path::PathBuf> = std::mem::take(&mut *lock_recover(
+        &cx.state.prompt_boxes.saved,
+        "saved paths (take)",
+    ));
     for path in saved {
         for workspace in core.workspaces() {
             if path.starts_with(&workspace.project.root)

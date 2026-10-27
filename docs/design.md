@@ -4056,6 +4056,43 @@ Nothing retries or reattaches a run the app reports gone before failing
 the attempt; why the app loses a run across a runner restart is not
 traced.
 
+## Poisoned locks recovered (2026-10-26)
+
+The frame's locks are taken with `sync::lock_recover`, which takes a
+poisoned mutex back (`PoisonError::into_inner`), clears the poison and
+logs the site once: the Prompt Box outbox and saved paths, on both the
+editor side and the take in `draw`. A panic on the UI thread is not
+caught (eframe 0.36.1 has no `catch_unwind`; winit 0.30.13 stops the
+app and re-raises it), so a poisoned `expect` there ended the app. In
+this tree nothing can poison those two locks: every holder runs on the
+UI thread and does one `push` or one `mem::take`. The change hardens
+the sites a future worker would hit rather than fixing a reproduced
+crash; the original report had no backtrace.
+
+The content worker's locks (the poll interval and the watch set) go
+through the same helper, so a poisoned one no longer kills the worker
+or silently drops `set_watch` and `set_poll`. A read that panics is
+caught per job like the diff read: it answers `failed` ("the read
+panicked") through the usual refusal, stamps no revision, starts the
+worker's cache over, and the worker reads on.
+
+Known gaps, left out:
+
+- The tmux Enter thread (`adapters/tmux.rs`): one detached thread per
+  send sleeps 150 ms and writes the Enter. Two single-line sends inside
+  150 ms should, from the code, type A, B and then two Enters, so the
+  pane submits `AB` once plus a stray Enter; quitting inside the 150 ms
+  drops the Enter. Neither has been run. Queueing the Enter means
+  joining the text write to it, which changes the `write_line` failure
+  contract the send relies on to hand the text back.
+- The PDF preview (`ui/document.rs`): a `qlmanage` thread that panics or
+  hangs leaves the preview `Pending`, a spinner forever, since the poll
+  never checks for a disconnected channel. A stuck spinner, not a crash.
+- The `promptbox` crate has its own poisonable `expect`s (the mic mutex
+  read in `pump_live`, the mic error mutex written from the audio error
+  callback); whether cpal calls that callback on its own thread was not
+  checked. A fix is upstream plus a rev bump.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

@@ -429,8 +429,10 @@ pub fn draw(app: &mut SwitchboardApp, ui: &mut Ui) {
     };
     // Prompts the editors sent this frame go to their panes now that the
     // app is free to dispatch.
-    let sent: Vec<(RecordId, String)> =
-        std::mem::take(&mut *state.prompt_boxes.outbox.lock().expect("outbox mutex"));
+    let sent: Vec<(RecordId, String)> = std::mem::take(&mut *crate::sync::lock_recover(
+        &state.prompt_boxes.outbox,
+        "outbox (take)",
+    ));
     app.ui_state = state;
     let columns = app.ui_state.working_set_columns;
     if columns != app.core().view_columns() {

@@ -4155,6 +4155,51 @@ fn a_failed_editor_write_gives_the_prompt_back() {
     );
 }
 
+/// Lock `m` on a thread, push `item`, and panic with the guard held.
+fn poison_with<T: Send + 'static>(m: &std::sync::Arc<std::sync::Mutex<Vec<T>>>, item: T) {
+    let held = std::sync::Arc::clone(m);
+    let _ = std::thread::spawn(move || {
+        let mut guard = held.lock().unwrap();
+        guard.push(item);
+        panic!("poison the lock");
+    })
+    .join();
+    assert!(m.is_poisoned());
+}
+
+#[test]
+fn a_poisoned_outbox_still_sends_and_the_frame_survives() {
+    let (mut harness, ids) = harness();
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    let boxes = &harness.state().ui_state.prompt_boxes;
+    poison_with(&boxes.outbox, (id, "queued before the panic".to_owned()));
+    poison_with(
+        &boxes.saved,
+        std::env::temp_dir().join("switchboard-poisoned"),
+    );
+    harness.run_steps(2);
+    assert!(actions(&harness).contains(&AppAction::SendMessage {
+        id,
+        text: "queued before the panic".into(),
+        from: Composer::Editor,
+    }));
+    let boxes = &harness.state().ui_state.prompt_boxes;
+    assert!(!boxes.outbox.is_poisoned() && !boxes.saved.is_poisoned());
+    // The editor's own send goes through the recovered lock too.
+    let field = prompt_field(&mut harness);
+    field.focus();
+    field.type_text("and after it");
+    harness.run_steps(2);
+    harness.get_by_label("Send →").click();
+    harness.run_steps(3);
+    assert!(actions(&harness).contains(&AppAction::SendMessage {
+        id,
+        text: "and after it".into(),
+        from: Composer::Editor,
+    }));
+}
+
 #[test]
 fn an_editor_send_leaves_the_card_line_draft() {
     let host = FakeHost::default();
