@@ -7,10 +7,10 @@ use std::io;
 use std::path::PathBuf;
 
 pub use dispatch_control::{
-    AttemptUsage, AttemptView, Body, ChecksView, DecisionView, EventView, EventsView, EvidenceView,
-    LaneView, PathsView, PlanRevision, PlanRoundView, ProjectView, PullRequestView, Reply,
-    ReviewRoundView, RewriteView, ServiceView, SessionUsage, StageUsage, Status, SupervisorView,
-    TicketView, Tokens, UsageSource, UsageView, WorktreesView, nudged,
+    AttemptUsage, AttemptView, Body, BuildId, ChecksView, DecisionView, EventView, EventsView,
+    EvidenceView, LaneView, PathsView, PlanRevision, PlanRoundView, ProjectView, PullRequestView,
+    Reply, ReviewRoundView, RewriteView, ServiceView, SessionUsage, StageUsage, StaleWhy, Status,
+    SupervisorView, TicketView, Tokens, UsageSource, UsageView, WorktreesView, nudged, stale,
 };
 
 pub trait DispatchPort: Send {
@@ -28,5 +28,12 @@ pub trait DispatchPort: Send {
     /// of its own; a port that answers at once is called in place.
     fn may_block(&self) -> bool {
         false
+    }
+    /// The `dispatch` at `command()` as it is on disk now, which a
+    /// restart would run; compared with the build the runner started
+    /// with. Only its time and length are read, so `version` is blank.
+    /// `None` when it cannot be read, or for a port with no file.
+    fn build_on_disk(&self) -> Option<BuildId> {
+        None
     }
 }

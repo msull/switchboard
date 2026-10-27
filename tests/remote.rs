@@ -2403,8 +2403,8 @@ const SHOT_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nnot really a picture";
 #[allow(clippy::too_many_lines)]
 fn tickets_status() -> switchboard::ports::dispatch::Status {
     use switchboard::ports::dispatch::{
-        AttemptView, ChecksView, DecisionView, EvidenceView, LaneView, ProjectView, Status,
-        SupervisorView, TicketView,
+        AttemptView, BuildId, ChecksView, DecisionView, EvidenceView, LaneView, ProjectView,
+        Status, SupervisorView, TicketView,
     };
     std::fs::create_dir_all("/tmp/switchboard-remote-tests").unwrap();
     std::fs::write(SHOT_PATH, SHOT_BYTES).unwrap();
@@ -2541,6 +2541,10 @@ fn tickets_status() -> switchboard::ports::dispatch::Status {
                 ..TicketView::default()
             },
         ],
+        runner: BuildId {
+            version: env!("CARGO_PKG_VERSION").into(),
+            ..BuildId::default()
+        },
     }
 }
 

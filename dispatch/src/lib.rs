@@ -68,6 +68,25 @@ pub mod ticket;
 pub mod usage;
 pub mod view;
 
+/// The app version this binary was built from, stamped by `build.rs`
+/// from the app's `Cargo.toml`.
+pub const VERSION: &str = env!("SWITCHBOARD_VERSION");
+
+/// This process's build: `VERSION` and its executable as `stat` shows
+/// it now. A runner reads it once at its start, since after an update
+/// the path names the new file. Blank but for the version when the
+/// executable cannot be read.
+#[must_use]
+pub fn own_build() -> dispatch_control::BuildId {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| dispatch_control::BuildId::of_exe(&exe, VERSION))
+        .unwrap_or_else(|| dispatch_control::BuildId {
+            version: VERSION.to_owned(),
+            ..dispatch_control::BuildId::default()
+        })
+}
+
 /// Milliseconds since the epoch, the one time format the records use.
 #[must_use]
 pub fn epoch_ms(t: std::time::SystemTime) -> u64 {

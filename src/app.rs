@@ -41,7 +41,7 @@ use crate::ports::agent::AgentLauncher;
 use crate::ports::artifacts::ArtifactFinder;
 use crate::ports::control::{OpLine, Operations};
 use crate::ports::controller::Controller;
-use crate::ports::dispatch::{Body, DispatchPort, Reply, Status};
+use crate::ports::dispatch::{Body, BuildId, DispatchPort, Reply, Status};
 use crate::ports::events::EventSource;
 use crate::ports::host::{HostId, ProcessHost, SpawnSpec};
 use crate::ports::opener::Opener;
@@ -1324,7 +1324,7 @@ impl SwitchboardApp {
         let Some((_, result)) = self.dispatch_port.poll_status() else {
             return false;
         };
-        self.dispatch(AppAction::DispatchStatus(status_of(result)));
+        self.deliver_status(result);
         true
     }
 
@@ -1477,10 +1477,19 @@ impl SwitchboardApp {
         }
     }
 
+    /// A status answer, after the `dispatch` on disk as it was read
+    /// for it, so the core compares the runner's build with a current
+    /// file.
+    fn deliver_status(&mut self, result: io::Result<Reply>) {
+        let on_disk = self.dispatch_port.build_on_disk();
+        self.dispatch(AppAction::DispatchBuildOnDisk(on_disk));
+        self.dispatch(AppAction::DispatchStatus(status_of(result)));
+    }
+
     fn deliver_dispatch(&mut self, done: Vec<DispatchDone>) {
         for (body, result) in done {
             if matches!(body, Body::Status) {
-                self.dispatch(AppAction::DispatchStatus(status_of(result)));
+                self.deliver_status(result);
             } else {
                 self.dispatch(AppAction::DispatchReplied {
                     body,
@@ -4521,6 +4530,11 @@ struct DispatchWorker {
     inline: Option<Box<dyn DispatchPort>>,
     jobs: Option<std::sync::mpsc::Sender<Body>>,
     done: Option<std::sync::mpsc::Receiver<DispatchDone>>,
+    /// The thread's reads of the `dispatch` on disk, one sent before
+    /// each status call, so it is in the channel before that answer.
+    disk: Option<std::sync::mpsc::Receiver<Option<BuildId>>>,
+    /// The last of those reads.
+    on_disk: Option<BuildId>,
     /// A status poll is on the thread; the next waits for its answer
     /// rather than queueing behind a slow call twice.
     status_in_flight: bool,
@@ -4535,6 +4549,8 @@ impl DispatchWorker {
                 inline: None,
                 jobs: None,
                 done: None,
+                disk: None,
+                on_disk: None,
                 status_in_flight: false,
             };
         };
@@ -4547,15 +4563,23 @@ impl DispatchWorker {
                 inline: Some(port),
                 jobs: None,
                 done: None,
+                disk: None,
+                on_disk: None,
                 status_in_flight: false,
             };
         }
         let (jobs, job_rx) = std::sync::mpsc::channel::<Body>();
         let (done_tx, done) = std::sync::mpsc::channel::<DispatchDone>();
+        let (disk_tx, disk) = std::sync::mpsc::channel::<Option<BuildId>>();
         let spawned = std::thread::Builder::new()
             .name("dispatch-port".into())
             .spawn(move || {
                 for body in job_rx {
+                    // The port moved to this thread, so the file is read
+                    // here too, and sent ahead of the answer it goes with.
+                    if matches!(body, Body::Status) {
+                        let _ = disk_tx.send(port.build_on_disk());
+                    }
                     let result = port.call(&body);
                     if done_tx.send((body, result)).is_err() {
                         break;
@@ -4571,8 +4595,24 @@ impl DispatchWorker {
             inline: None,
             jobs: Some(jobs),
             done: Some(done),
+            disk: Some(disk),
+            on_disk: None,
             status_in_flight: false,
         }
+    }
+
+    /// The `dispatch` on disk as last read: now for a port called in
+    /// place, else the thread's latest read.
+    fn build_on_disk(&mut self) -> Option<BuildId> {
+        if let Some(port) = &self.inline {
+            return port.build_on_disk();
+        }
+        if let Some(disk) = &self.disk
+            && let Some(last) = disk.try_iter().last()
+        {
+            self.on_disk = last;
+        }
+        self.on_disk.clone()
     }
 
     /// Send one call. In place, the reply comes back now; on the

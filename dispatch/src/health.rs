@@ -9,6 +9,7 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
+use dispatch_control::{BuildId, stale};
 use serde::{Deserialize, Serialize};
 
 use crate::child::command;
@@ -87,6 +88,9 @@ pub struct RunnerFile {
     pub gh: ProviderHealth,
     /// Each ticket the runner has got on with, by id.
     pub tickets: BTreeMap<String, TicketHealth>,
+    /// The build the runner started with. Blank in a file from a runner
+    /// older than this field.
+    pub build: BuildId,
 }
 
 /// What the runner has seen of its calls since it started. Times are the
@@ -102,6 +106,9 @@ pub struct Health {
     pub gh: ProviderHealth,
     /// Each ticket the runner has got on with, by id.
     pub tickets: BTreeMap<String, TicketHealth>,
+    /// The build the runner started with, set once before its first
+    /// pass.
+    pub build: BuildId,
 }
 
 fn wall_ms() -> u64 {
@@ -191,6 +198,7 @@ impl Health {
             port: self.port.clone(),
             gh: self.gh.clone(),
             tickets: self.tickets.clone(),
+            build: self.build.clone(),
         }
     }
 
@@ -331,13 +339,49 @@ fn failure_lines(what: &str, failures: &[Failure], now_ms: u64, verbose: bool) -
         .collect()
 }
 
+/// `runner.json` as the runner last wrote it, when it reads.
+#[must_use]
+pub fn read_runner_file(data: &DataDir) -> Option<RunnerFile> {
+    std::fs::read(data.root.join(RUNNER_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+}
+
+/// One line comparing the runner's build, from its `runner.json`, with
+/// this command's, which is also the app's: `build.rs` stamps both from
+/// the app's `Cargo.toml` and the bundle ships them together. Only the
+/// version is compared: this command may be a different copy of the
+/// binary than the runner's (a development build beside the bundled
+/// one), and only the app knows which file a restart would run. It
+/// names a runner to restart but never makes `check` fail: an older
+/// runner still runs.
+#[must_use]
+pub fn build_line(runner: Option<&BuildId>, cli: &BuildId) -> String {
+    let Some(runner) = runner else {
+        return format!("build: cli/app {}; no runner build to compare", cli.label());
+    };
+    match stale(runner, &cli.version, None) {
+        None => format!(
+            "build: runner {}, the same version as the cli/app",
+            runner.label()
+        ),
+        Some(why) => format!(
+            "build: runner {}, cli/app {}: the runner runs {}; restart it: dispatch runner restart",
+            runner.label(),
+            cli.label(),
+            why.text()
+        ),
+    }
+}
+
 /// Whether the runner is up and getting on: its status file fresh and
 /// its process alive, both sockets answering within `timeout`, no port
 /// failure since its last success, and no active ticket with an open
 /// attempt left unstepped for longer than `stale_ms`. It never takes
 /// `runner.lock`, which could make a starting runner exit. Failures
 /// that repeat for one ticket with one error are a single line with a
-/// count unless `verbose`, which lists each.
+/// count unless `verbose`, which lists each. The runner's build is
+/// compared with `cli`'s on a line of its own that leaves `ok` alone.
 #[must_use]
 pub fn check(
     data: &DataDir,
@@ -346,12 +390,11 @@ pub fn check(
     stale_ms: u64,
     now_ms: u64,
     verbose: bool,
+    cli: &BuildId,
 ) -> Checked {
     let mut lines = Vec::new();
     let mut ok = true;
-    let file: Option<RunnerFile> = std::fs::read(data.root.join(RUNNER_FILE))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let file = read_runner_file(data);
     match &file {
         None => {
             ok = false;
@@ -375,6 +418,7 @@ pub fn check(
             ));
         }
     }
+    lines.push(build_line(file.as_ref().map(|f| &f.build), cli));
     match switchboard_answers(switchboard_socket, timeout) {
         Ok(latency) => lines.push(format!("switchboard: answered in {latency} ms")),
         Err(e) => {
@@ -454,6 +498,7 @@ mod tests {
             30_000,
             wall_ms(),
             false,
+            &BuildId::default(),
         );
         assert!(!checked.ok);
         assert!(
@@ -491,6 +536,7 @@ mod tests {
             30_000,
             wall_ms(),
             false,
+            &BuildId::default(),
         );
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(!checked.ok);
@@ -520,6 +566,7 @@ mod tests {
             30_000,
             wall_ms(),
             false,
+            &BuildId::default(),
         );
         server.join().unwrap();
         assert!(
@@ -530,6 +577,87 @@ mod tests {
             "{:?}",
             checked.lines
         );
+    }
+
+    fn build(version: &str, mtime_ms: u64, len: u64) -> BuildId {
+        BuildId {
+            version: version.into(),
+            mtime_ms,
+            len,
+        }
+    }
+
+    #[test]
+    fn the_build_line_names_a_runner_to_restart() {
+        let cli = build("0.8.1", 2_000, 900);
+        assert_eq!(
+            build_line(Some(&cli), &cli),
+            "build: runner 0.8.1 (900 bytes, mtime 2000 ms), the same version as the cli/app"
+        );
+        let older = build_line(Some(&build("0.8.0", 1_000, 800)), &cli);
+        assert!(
+            older.contains("the runner runs a build of another app version")
+                && older.ends_with("restart it: dispatch runner restart"),
+            "{older}"
+        );
+        // Another copy of the same version is not a stale runner.
+        let copy = build_line(Some(&build("0.8.1", 1_000, 900)), &cli);
+        assert!(copy.ends_with("the same version as the cli/app"), "{copy}");
+        assert!(
+            build_line(Some(&BuildId::default()), &cli)
+                .contains("the runner runs a build from before builds were recorded")
+        );
+        assert_eq!(
+            build_line(None, &cli),
+            "build: cli/app 0.8.1 (900 bytes, mtime 2000 ms); no runner build to compare"
+        );
+    }
+
+    #[test]
+    fn an_older_runner_is_a_line_and_never_makes_check_fail() {
+        let dir = tempfile::Builder::new()
+            .prefix("db")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let data = DataDir::new(dir.path());
+        let cli = build("0.8.1", 2_000, 900);
+        let checked_with = |runner: &BuildId| {
+            let file = RunnerFile {
+                pid: std::process::id(),
+                last_pass_ms: wall_ms(),
+                build: runner.clone(),
+                ..RunnerFile::default()
+            };
+            std::fs::write(
+                dir.path().join(RUNNER_FILE),
+                serde_json::to_vec(&file).unwrap(),
+            )
+            .unwrap();
+            check(
+                &data,
+                &dir.path().join("control.sock"),
+                Duration::from_millis(200),
+                30_000,
+                wall_ms(),
+                false,
+                &cli,
+            )
+        };
+        let fresh = checked_with(&cli);
+        assert!(
+            fresh.lines[1].ends_with("the same version as the cli/app"),
+            "{:?}",
+            fresh.lines
+        );
+        for runner in [build("0.8.0", 1_000, 800), BuildId::default()] {
+            let older = checked_with(&runner);
+            assert_eq!(older.ok, fresh.ok);
+            assert_eq!(older.lines.len(), fresh.lines.len());
+            assert!(older.lines[1].contains("restart it"), "{:?}", older.lines);
+        }
+        // A file from before the field reads with a blank build.
+        let old: RunnerFile = serde_json::from_str(r#"{"pid": 7}"#).unwrap();
+        assert_eq!(old.build, BuildId::default());
     }
 
     fn failures_for_folding() -> Vec<Failure> {

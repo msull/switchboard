@@ -260,6 +260,8 @@ pub struct FakeDispatch {
     /// What a usage read answers, by ticket; any other ticket is
     /// answered as a runner from before usage was served.
     pub usage: HashMap<String, dispatch_control::UsageView>,
+    /// What `build_on_disk` answers.
+    pub on_disk: Option<dispatch_control::BuildId>,
 }
 
 impl FakeDispatch {
@@ -294,6 +296,9 @@ impl DispatchPort for FakeDispatch {
     }
     fn may_block(&self) -> bool {
         self.blocks
+    }
+    fn build_on_disk(&self) -> Option<dispatch_control::BuildId> {
+        self.on_disk.clone()
     }
     fn call(&mut self, body: &DispatchBody) -> std::io::Result<DispatchReply> {
         let Some(status) = &self.status else {

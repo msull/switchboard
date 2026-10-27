@@ -2562,12 +2562,15 @@ Known gaps:
   with `released`.
 - No restart on a crash while the app is up; the runner stays down
   until Start or the next app launch, like every service.
-- A rebundle with the runner up is followed by `dispatch runner
-  restart` (the owner's, or a supervisor's whose table's `may` lists
-  `runner`), which asks the app over the control port to kill the pane
-  without turning autostart off and start it again once the old runner
-  lets go, refused while a ticket runs a deploy. A supervisor that runs
-  the bundle script is still stopped by its permission prompt.
+- A rebundle or an update with the runner up no longer waits for
+  `dispatch runner restart`: the app restarts a runner on an older build
+  itself once no attempt is open, and otherwise offers Restart on the
+  row (below). `dispatch runner restart` (the owner's, or a supervisor's
+  whose table's `may` lists `runner`) still asks the app over the
+  control port to kill the pane without turning autostart off and
+  start it again once the old runner lets go, refused while a ticket
+  runs a deploy. A supervisor that runs the bundle script is still
+  stopped by its permission prompt.
 - The runner's children inherit `SWITCHBOARD_RECORD_ID` and `TMUX`.
 - `runner stopping…` ends on the first status `RUNNER_LET_GO` after
   the Stop, answered or not. A kill that fails leaves the pane running,
@@ -2575,6 +2578,84 @@ Known gaps:
   takes longer than that to exit still answers, so the row reads
   `runner up outside the app` until it exits, and a queued Start is
   dropped with a notice to Start again.
+
+### The runner's build (2026-10-27)
+
+A runner keeps the binary it started with when the file is replaced, so
+after an update (the self-updating app included) or a rebundle the old
+runner went on serving with the old code: a pipeline the new CLI
+validated, with a gate's `question` naming `{decisions.*}`, reached the
+agent with the fields as written. (The issue named the CLI 0.5.0; a gate's
+`question` and `validate_decision_vars` are in v0.6.0, so the validating
+binary was 0.6.0 or later.)
+
+- **What a runner records.** `dispatch run` stats its own executable
+  once, before its first pass, since after an update the path names the
+  new file: `BuildId { version, mtime_ms, len }`, the version stamped by
+  `dispatch/build.rs` from the app's `Cargo.toml` (the crate's own
+  `0.1.0` never moves). It goes into `runner.json` and the `Status`
+  reply's `runner`; a runner from before the field sends it blank.
+- **Stale.** `dispatch_control::stale` compares the recorded build with
+  the version wanted and the file on disk now: blank is `Unrecorded`, a
+  different version is `Version`, and a different mtime or length (both
+  known on both sides) is `Build`. Inequality only, never "newer": an
+  install may keep the archive's times. A rebuild with the same mtime
+  and length is undetectable until a content hash is recorded.
+- **The app.** Before each status answer the app reads the `dispatch`
+  beside it (`DispatchPort::build_on_disk`, on the port's thread) and
+  sends `DispatchBuildOnDisk`; `AppCore::runner_stale` is the rule above
+  for a runner that answers, the app's or one started outside it. Each status poll
+  then tries `restart_stale_runner`. There is no pass boundary to
+  restart at (the runner has no pause or handshake), so the safe moment
+  is "no attempt is open on any ticket" (`runner_is_busy`), with one
+  exception: a `gate-only` attempt whose ticket has a pending decision
+  at its stage only waits on the owner, whose question survives on the
+  record. The view's decision carries its stage, not its attempt, so
+  the match is by stage; a deploy has no pending decision of its own
+  while it runs, so it stays busy. Busy, one notice says the runner is
+  older and that Restart on the row restarts it now. The automatic
+  restart happens at most once per build on disk (`StaleGuard`): the
+  file can itself be older than the app (`cargo run` after building only
+  the app), and then one notice says the restarted runner still runs an
+  older build. A new file on disk is a new key and one more restart.
+  A runner started outside the app is named and labelled but never
+  restarted by it (the app restarts only its own); one notice says so.
+- **Restart on the row.** While the runner is stale the row reads
+  `… · older build` with a Restart button (`DispatchRunnerRestart`,
+  `SWITCHBOARD_SCRIPT` line `dispatch-runner-restart`). It is refused
+  while the runner is not the app's own, not up or a `gate-only` attempt is at work
+  (the CLI's deploy refusal, `mid_apply`); an open agent attempt does
+  not refuse it, since the owner who clicks accepts restarting it.
+- **The CLI.** `dispatch health` adds a line comparing the runner's
+  build with its own, which is the app's too since the bundle ships both,
+  by version only: the CLI may be another copy of the binary than the
+  runner's (a development build beside the bundled one), and only the app
+  knows which file a restart runs. It never changes `ok` or the exit code. `dispatch brief` prints the
+  same line.
+- **At run time.** `Vars::render_checked` refuses a pipeline template
+  that names a `{decisions.X}` or `{decisions.X.note}` with no value:
+  every decision a gate asks is set, empty while unanswered, so a
+  missing one means a runner older than the pipeline file. A stage
+  prompt or its guidance fails the attempt with `rerun`/`park` offered;
+  a lane refresh's or a PR remedy's guidance fails that attempt the same
+  way; a reviewer's or a fix round's prompt fails the reviewer or the
+  round, and a rewriter's fails the message step; a gate's own
+  `question` is asked without that block and the error logged, since no
+  attempt exists to fail; a plan review's definition is rendered before
+  the owner file or the attempt directory is written and parks the
+  ticket. The check reads the template, not the output, so a
+  note holding `{decisions.x}` cannot trip it. Other families
+  (`lane.*`, `inputs.*`, `services.*`) keep `render`'s rule, since their
+  keys are set only where they apply.
+
+The thread's disk read travels on its own channel, ahead of the status
+answer it goes with, rather than inside the answer: `DispatchDone` is
+the port's one reply type for every call, and widening it for one body
+would touch each caller for a pairing the channel's order already holds.
+
+Not built: a pass-boundary handshake with the runner; the attempt key on
+`DecisionView`, so the owner-wait match need not be by stage; a content
+hash in `BuildId`.
 
 ## Bracketed paste in the embedded terminal (2026-10-05)
 

@@ -44,6 +44,30 @@ impl Vars {
         out.push_str(rest);
         out
     }
+
+    /// `render`, refused when `template` names a `{decisions.X}` or
+    /// `{decisions.X.note}` that has no value. Every decision a gate of
+    /// the pipeline asks is set (empty while unanswered), so a missing
+    /// one means a runner older than the pipeline file, and the prompt
+    /// would reach the agent with the field as written. The template is
+    /// checked, never the output, so a value that holds `{decisions.x}`
+    /// cannot trip it. Other families keep `render`'s rule: their keys
+    /// are set only where they apply.
+    pub fn render_checked(&self, template: &str) -> anyhow::Result<String> {
+        for name in decision_names(template) {
+            for key in [
+                format!("decisions.{name}"),
+                format!("decisions.{name}.note"),
+            ] {
+                if !self.0.contains_key(&key) && template.contains(&format!("{{{key}}}")) {
+                    anyhow::bail!(
+                        "{{{key}}} was not set for this render: the runner is older than the pipeline file (restart it: dispatch runner restart)"
+                    );
+                }
+            }
+        }
+        Ok(self.render(template))
+    }
 }
 
 fn is_field(s: &str) -> bool {
@@ -127,6 +151,29 @@ mod tests {
         );
         assert_eq!(vars.render("no fields"), "no fields");
         assert_eq!(vars.render("{notes"), "{notes");
+    }
+
+    #[test]
+    fn render_checked_refuses_only_an_unset_decision() {
+        let mut vars = Vars::default();
+        vars.set("decisions.lead", "")
+            .set("decisions.lead.note", "keep {decisions.x} as written");
+        let err = vars.render_checked("Use {decisions.nope}.").unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("{decisions.nope} was not set for this render"),
+            "{err}"
+        );
+        let err = vars.render_checked("{decisions.nope.note}").unwrap_err();
+        assert!(
+            err.to_string().starts_with("{decisions.nope.note}"),
+            "{err}"
+        );
+        assert_eq!(
+            vars.render_checked("[{decisions.lead}] {decisions.lead.note} {lane.x}")
+                .unwrap(),
+            "[] keep {decisions.x} as written {lane.x}"
+        );
     }
 
     #[test]

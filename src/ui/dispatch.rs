@@ -909,7 +909,13 @@ fn runner_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, tickets: usize) {
         RunnerStanding::Gone => "runner gone; showing its last status".to_owned(),
         RunnerStanding::Stopped => "runner stopped".to_owned(),
     };
-    ui.label(
+    let stale = cx.core.runner_stale();
+    let text = if stale.is_some() {
+        format!("{text} · older build")
+    } else {
+        text
+    };
+    let label = ui.label(
         RichText::new(text)
             .text_style(theme::meta())
             .color(if standing.up() {
@@ -918,6 +924,22 @@ fn runner_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, tickets: usize) {
                 p.accent_2_text
             }),
     );
+    if let Some(why) = stale {
+        label.on_hover_text(format!("The runner runs {}", why.text()));
+        let refusal = cx.core.runner_restart_refusal();
+        let hint = refusal.unwrap_or(
+            "Restart the runner on the `dispatch` on disk now; an open agent attempt is \
+             restarted with it",
+        );
+        if ui
+            .add_enabled_ui(refusal.is_none(), |ui| theme::ghost(ui, "Restart"))
+            .inner
+            .on_hover_text(hint)
+            .clicked()
+        {
+            cx.dispatch(AppAction::DispatchRunnerRestart);
+        }
+    }
     if standing.stoppable() {
         if theme::ghost_muted(ui, "Stop")
             .on_hover_text(

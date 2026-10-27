@@ -108,6 +108,7 @@ const REVIEW_LINES: &[&str] = &[
     "show-dispatch",
     "dispatch-runner-start",
     "dispatch-runner-stop",
+    "dispatch-runner-restart",
     "show-ticket",
     "close-ticket",
     "ticket-tab",
@@ -280,15 +281,11 @@ fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         ["show-dispatch"] => app.dispatch(AppAction::ShowDispatch),
         ["dispatch-runner-start"] => app.dispatch(AppAction::DispatchRunnerStart),
         ["dispatch-runner-stop"] => app.dispatch(AppAction::DispatchRunnerStop),
+        ["dispatch-runner-restart"] => app.dispatch(AppAction::DispatchRunnerRestart),
         ["show-ticket", id] => app.dispatch(AppAction::ShowTicket((*id).to_owned())),
         ["close-ticket", id] => close_ticket(app, id)?,
         ["ticket-tab", id, tab] => ticket_tab(app, id, tab)?,
-        ["ticket-diff", id, lane, path] => {
-            ticket_tab(app, id, "changes")?;
-            app.ui_state
-                .ticket_diff_open
-                .insert(((*id).to_owned(), (*lane).to_owned()), (*path).to_owned());
-        }
+        ["ticket-diff", id, lane, path] => ticket_diff(app, id, lane, path)?,
         ["review-continue"] => {
             let id = newest_review(app)?;
             app.dispatch(AppAction::ContinueWorkflow(id));
@@ -319,6 +316,15 @@ fn review_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         }
         _ => return Err("unknown review line".into()),
     }
+    Ok(())
+}
+
+/// The ticket's Changes tab with one file's diff open under its row.
+fn ticket_diff(app: &mut SwitchboardApp, id: &str, lane: &str, path: &str) -> Result<(), String> {
+    ticket_tab(app, id, "changes")?;
+    app.ui_state
+        .ticket_diff_open
+        .insert((id.to_owned(), lane.to_owned()), path.to_owned());
     Ok(())
 }
 
