@@ -18,10 +18,11 @@ use crate::git::{Adopted, Confine, Network, Push, Repo, branch_name, yyyymmdd};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::health::Health;
 use crate::pipeline::{
-    Context, DeployWait, Gate, Lane, OnDirty, Pipeline, Stage, StageKind, Write, base_context,
-    env_key, env_sets,
+    Context, DeployWait, Gate, Lane, OnDirty, Pipeline, Rate, Stage, StageKind, Write,
+    base_context, env_key, env_sets,
 };
 use crate::port::Port;
+use crate::report::rates_with;
 use crate::restart::DISCARDED_BY;
 use crate::review::{checks_key, find_reviewer_mut, reviewer_key};
 use crate::services::{SERVICE, push_stuck, stuck_answer, stuck_pending, withdraw_stuck};
@@ -558,6 +559,22 @@ impl Runner {
         let text = std::fs::read_to_string(&t.pipeline_file)
             .with_context(|| format!("read {}", t.pipeline_file.display()))?;
         Pipeline::parse(&text)
+    }
+
+    /// The rates a ticket's tokens are priced at: the defaults under
+    /// the project's live `[policy] rates`, which are a price list and
+    /// not part of what the ticket was promised, read as `slots` is. The
+    /// ticket's own copy stands in when the live file is unreadable,
+    /// then the defaults alone.
+    #[must_use]
+    pub fn rates_for(&self, t: &Ticket) -> BTreeMap<String, Rate> {
+        let project = std::fs::read_to_string(self.data.pipeline(&t.project))
+            .ok()
+            .and_then(|text| Pipeline::parse(&text).ok())
+            .or_else(|| self.pipeline_of(t).ok())
+            .map(|p| p.policy.rates)
+            .unwrap_or_default();
+        rates_with(&project)
     }
 
     /// Every ticket on disk.

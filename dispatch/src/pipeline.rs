@@ -854,6 +854,50 @@ impl From<OnDirty> for OnDirtyFile {
     }
 }
 
+/// Dollars per million tokens for one model.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<f64>", into = "Vec<f64>")]
+pub struct Rate {
+    /// Input tokens.
+    pub input: f64,
+    /// Output tokens.
+    pub output: f64,
+    /// 5-minute write, 1-hour write, read. `None` for a two-field row,
+    /// which prices the cache kinds at zero.
+    pub cache: Option<[f64; 3]>,
+}
+
+impl TryFrom<Vec<f64>> for Rate {
+    type Error = String;
+
+    fn try_from(row: Vec<f64>) -> Result<Self, String> {
+        match row[..] {
+            [input, output] => Ok(Self {
+                input,
+                output,
+                cache: None,
+            }),
+            [input, output, five_min, hour, read] => Ok(Self {
+                input,
+                output,
+                cache: Some([five_min, hour, read]),
+            }),
+            _ => Err(format!(
+                "a rate takes 2 numbers [input, output] or 5 [input, output, cache_write_5m, cache_write_1h, cache_read], not {}",
+                row.len()
+            )),
+        }
+    }
+}
+
+impl From<Rate> for Vec<f64> {
+    fn from(r: Rate) -> Self {
+        let mut row = vec![r.input, r.output];
+        row.extend(r.cache.into_iter().flatten());
+        row
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Policy {
@@ -861,8 +905,10 @@ pub struct Policy {
     pub waiting_on_me: u32,
     #[serde(default)]
     pub ports: Option<[u16; 2]>,
+    /// Dollars per million tokens by model id, each row replacing the
+    /// built-in default for its model. Read live, like `slots`.
     #[serde(default)]
-    pub rates: BTreeMap<String, [f64; 2]>,
+    pub rates: BTreeMap<String, Rate>,
     /// Per decision kind: `ask`, `recommend` or `auto`.
     #[serde(default)]
     pub decisions: BTreeMap<String, String>,
@@ -2448,6 +2494,56 @@ decisions = { lanes = "auto", finalize = "ask", budget = "ask" }
     /// `[supervisor]`.
     fn supervised(table: &str) -> Result<Pipeline> {
         Pipeline::parse(&format!("{SWITCHBOARD}\n[supervisor]\n{table}"))
+    }
+
+    #[test]
+    fn a_two_field_rate_reads_with_no_cache_price() {
+        let p = Pipeline::parse(SWITCHBOARD).unwrap();
+        assert_eq!(
+            p.policy.rates["claude-sonnet-5"],
+            Rate {
+                input: 3.0,
+                output: 15.0,
+                cache: None
+            }
+        );
+    }
+
+    #[test]
+    fn a_five_field_rate_reads_its_cache_prices_and_writes_back_as_written() {
+        let text = SWITCHBOARD.replace(
+            r#"rates = { "claude-sonnet-5" = [3.0, 15.0] }"#,
+            r#"rates = { "claude-opus-5-5" = [4.0, 20.0, 5.0, 8.0, 0.2], "gpt-5-codex" = [1.25, 10.0] }"#,
+        );
+        let p = Pipeline::parse(&text).unwrap();
+        let opus = p.policy.rates["claude-opus-5-5"];
+        assert_eq!(opus.cache, Some([5.0, 8.0, 0.2]));
+        let table = toml::Table::try_from(&p.policy).unwrap();
+        let rates = table["rates"].as_table().unwrap();
+        assert_eq!(
+            rates["claude-opus-5-5"],
+            toml::Value::Array(vec![
+                4.0.into(),
+                20.0.into(),
+                5.0.into(),
+                8.0.into(),
+                0.2.into()
+            ])
+        );
+        assert_eq!(
+            rates["gpt-5-codex"],
+            toml::Value::Array(vec![1.25.into(), 10.0.into()])
+        );
+    }
+
+    #[test]
+    fn a_three_field_rate_is_refused() {
+        let text = SWITCHBOARD.replace(
+            r#"rates = { "claude-sonnet-5" = [3.0, 15.0] }"#,
+            r#"rates = { "claude-sonnet-5-5" = [2.0, 10.0, 2.5] }"#,
+        );
+        let err = format!("{:#}", Pipeline::parse(&text).unwrap_err());
+        assert!(err.contains("a rate takes 2 numbers"), "{err}");
     }
 
     #[test]

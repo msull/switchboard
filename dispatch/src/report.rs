@@ -12,7 +12,7 @@ use serde::Serialize;
 use dispatch_control::{AttemptUsage, Tokens, add_models};
 
 use crate::git::RangeSize;
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, Rate};
 use crate::review::{
     LEFT_HEADING, open_points_of, point_text, reviewer_of, section_points, unqualified,
 };
@@ -146,6 +146,146 @@ pub struct TicketReport {
     pub not_found: u32,
     /// Sessions whose kind neither the record nor the pipeline says.
     pub kind_unknown: u32,
+    /// What `tokens` cost at the default rates and the project's own.
+    /// `of` leaves it empty; the caller prices it with the project's rates.
+    pub cost: Cost,
+}
+
+/// What a ticket's tokens cost at a rate table, in millionths of a
+/// dollar: whole numbers keep `TicketReport` `Eq` and make a total
+/// exact.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Cost {
+    /// The priced models' total.
+    pub micro_usd: u64,
+    /// Models priced.
+    pub priced: u32,
+    /// Models with tokens and no rate, named.
+    pub unpriced: Vec<String>,
+    /// Models priced from a two-field row that also hold cache tokens,
+    /// whose cache is counted at zero, named.
+    pub partial: Vec<String>,
+}
+
+/// What a figure from `price` leaves out, printed under it: a
+/// transcript's rows carry none of these modifiers, and per-model
+/// totals cannot be split into Haiku's per-request prompt tiers.
+pub const ESTIMATE_NOTE: &str = "estimate at list API rates, standard speed: no fast-mode, batch or US-only premium; Haiku 5.5 prompts over 100k priced at the lower tier";
+
+impl Cost {
+    /// The `cost:` line's text: the figure and what it leaves out, or
+    /// why there is none.
+    #[must_use]
+    pub fn label(&self) -> String {
+        let mut missing = Vec::new();
+        if !self.unpriced.is_empty() {
+            missing.push(format!("no rate for {}", self.unpriced.join(", ")));
+        }
+        if !self.partial.is_empty() {
+            missing.push(format!("cache not priced for {}", self.partial.join(", ")));
+        }
+        match (self.priced, missing.is_empty()) {
+            (0, true) => "none counted".to_owned(),
+            (0, false) => format!("not priced: {}", missing.join("; ")),
+            (_, true) => format!("{} estimate", self.dollars()),
+            (_, false) => format!(
+                "{} estimate, partial: {}",
+                self.dollars(),
+                missing.join("; ")
+            ),
+        }
+    }
+
+    /// `micro_usd` to the cent: `$18.42`.
+    #[must_use]
+    pub fn dollars(&self) -> String {
+        let cents = self.micro_usd.saturating_add(5_000) / 10_000;
+        format!("${}.{:02}", cents / 100, cents % 100)
+    }
+
+    /// Whether some model's tokens, or its cache, went unpriced.
+    #[must_use]
+    pub fn short(&self) -> bool {
+        !self.unpriced.is_empty() || !self.partial.is_empty()
+    }
+}
+
+/// The built-in rates, dollars per million tokens as `[input, output,
+/// cache_write_5m, cache_write_1h, cache_read]`, copied from
+/// <https://platform.claude.com/docs/en/about-claude/pricing> as read on
+/// 2026-10-27. Haiku 5.5 is its prompts-up-to-100k tier. A project's
+/// `[policy] rates` row replaces its model's row here.
+#[must_use]
+pub fn default_rates() -> BTreeMap<String, Rate> {
+    [
+        ("claude-haiku-5-5", [0.10, 0.50, 0.125, 0.20, 0.01]),
+        ("claude-sonnet-5-5", [2.0, 10.0, 2.50, 4.0, 0.10]),
+        ("claude-opus-5-5", [4.0, 20.0, 5.0, 8.0, 0.20]),
+    ]
+    .into_iter()
+    .map(|(model, [input, output, five_min, hour, read])| {
+        (
+            model.to_owned(),
+            Rate {
+                input,
+                output,
+                cache: Some([five_min, hour, read]),
+            },
+        )
+    })
+    .collect()
+}
+
+/// The defaults with the project's rows laid over them, a row replacing
+/// the default for its model only. Model ids match exactly.
+#[must_use]
+pub fn rates_with(project: &BTreeMap<String, Rate>) -> BTreeMap<String, Rate> {
+    let mut rates = default_rates();
+    rates.extend(project.iter().map(|(m, r)| (m.clone(), *r)));
+    rates
+}
+
+/// What `tokens` cost at `rates`. A rate in dollars per million tokens
+/// is millionths of a dollar per token, so each model's sum is
+/// `micro_usd` directly, rounded once.
+#[must_use]
+pub fn price(tokens: &BTreeMap<String, Tokens>, rates: &BTreeMap<String, Rate>) -> Cost {
+    let mut cost = Cost::default();
+    for (model, t) in tokens {
+        let cached = t.cache_write + t.cache_read;
+        if t.input + t.output + cached == 0 {
+            continue;
+        }
+        let Some(r) = rates.get(model) else {
+            cost.unpriced.push(model.clone());
+            continue;
+        };
+        let [five_min, hour, read] = r.cache.unwrap_or_default();
+        if r.cache.is_none() && cached > 0 {
+            cost.partial.push(model.clone());
+        }
+        // `cache_write` includes the hour's part.
+        let sum = per_token(t.input, r.input)
+            + per_token(t.output, r.output)
+            + per_token(t.cache_write.saturating_sub(t.cache_write_1h), five_min)
+            + per_token(t.cache_write_1h, hour)
+            + per_token(t.cache_read, read);
+        cost.micro_usd += to_micro(sum);
+        cost.priced += 1;
+    }
+    cost
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn per_token(n: u64, rate: f64) -> f64 {
+    n as f64 * rate
+}
+
+// A sum past `u64::MAX` micro-dollars saturates, and a negative rate
+// prices at zero.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn to_micro(sum: f64) -> u64 {
+    sum.round().max(0.0) as u64
 }
 
 /// The plan review's round files beside `subject`: `<stem>.feedback-<n>.md`.
@@ -482,6 +622,10 @@ pub fn total(reports: &[TicketReport]) -> TicketReport {
             add_models(&mut e.tokens, &s.tokens);
         }
         add_models(&mut sum.tokens, &r.tokens);
+        sum.cost.micro_usd += r.cost.micro_usd;
+        sum.cost.priced += r.cost.priced;
+        union(&mut sum.cost.unpriced, &r.cost.unpriced);
+        union(&mut sum.cost.partial, &r.cost.partial);
         sum.not_counted += r.not_counted;
         sum.not_found += r.not_found;
         sum.kind_unknown += r.kind_unknown;
@@ -516,6 +660,15 @@ pub fn total(reports: &[TicketReport]) -> TicketReport {
         .filter_map(|name| stages.remove(&name))
         .collect();
     sum
+}
+
+/// `from`'s names not yet in `into`, appended in order.
+fn union(into: &mut Vec<String>, from: &[String]) {
+    for name in from {
+        if !into.contains(name) {
+            into.push(name.clone());
+        }
+    }
 }
 
 /// Every model's tokens added into one.
@@ -1126,5 +1279,170 @@ prompt = "Write {plan}."
         assert_eq!(parse_date("2000-03-01"), Some(951_868_800_000));
         assert_eq!(parse_date("2026-13-01"), None);
         assert_eq!(parse_date("yesterday"), None);
+    }
+
+    fn counts(input: u64, output: u64, write: u64, write_1h: u64, read: u64) -> Tokens {
+        Tokens {
+            input,
+            output,
+            cache_write: write,
+            cache_write_1h: write_1h,
+            cache_read: read,
+            messages: 1,
+        }
+    }
+
+    fn models(rows: &[(&str, Tokens)]) -> BTreeMap<String, Tokens> {
+        rows.iter().map(|(m, t)| ((*m).to_owned(), *t)).collect()
+    }
+
+    fn two(input: f64, output: f64) -> Rate {
+        Rate {
+            input,
+            output,
+            cache: None,
+        }
+    }
+
+    #[test]
+    fn a_five_field_row_prices_every_kind_and_the_five_minute_write_is_what_the_hour_leaves() {
+        let t = models(&[(
+            "claude-sonnet-5-5",
+            counts(1_000_000, 1_000_000, 1_000_000, 400_000, 1_000_000),
+        )]);
+        let cost = price(&t, &default_rates());
+        // 2 + 10 + 0.6 * 2.5 + 0.4 * 4 + 0.1 dollars.
+        assert_eq!(cost.micro_usd, 15_200_000);
+        assert_eq!(cost.priced, 1);
+        assert!(cost.unpriced.is_empty() && cost.partial.is_empty());
+    }
+
+    #[test]
+    fn a_two_field_row_counts_cache_at_zero_and_names_the_model_only_when_it_cached() {
+        let rates = BTreeMap::from([
+            ("m".to_owned(), two(3.0, 15.0)),
+            ("n".to_owned(), two(3.0, 15.0)),
+        ]);
+        let t = models(&[
+            ("m", counts(1_000_000, 1_000_000, 1_000_000, 0, 1_000_000)),
+            ("n", counts(1_000_000, 0, 0, 0, 0)),
+        ]);
+        let cost = price(&t, &rates);
+        assert_eq!(cost.micro_usd, 21_000_000);
+        assert_eq!(cost.priced, 2);
+        assert_eq!(cost.partial, ["m"]);
+    }
+
+    #[test]
+    fn a_model_with_no_row_is_named_and_the_others_still_sum() {
+        let t = models(&[
+            ("claude-fable-5-1", counts(1_000, 1_000, 0, 0, 0)),
+            ("claude-opus-5-5", counts(1_000_000, 0, 0, 0, 0)),
+        ]);
+        let cost = price(&t, &default_rates());
+        assert_eq!(cost.micro_usd, 4_000_000);
+        assert_eq!(cost.priced, 1);
+        assert_eq!(cost.unpriced, ["claude-fable-5-1"]);
+
+        let only = models(&[("claude-fable-5-1", counts(1_000, 1_000, 0, 0, 0))]);
+        let cost = price(&only, &default_rates());
+        assert_eq!(cost.priced, 0);
+        assert_eq!(cost.micro_usd, 0);
+    }
+
+    #[test]
+    fn a_project_row_replaces_its_models_default_only_and_ids_match_exactly() {
+        let project = BTreeMap::from([
+            ("claude-opus-5-5".to_owned(), two(15.0, 75.0)),
+            ("claude-sonnet-5".to_owned(), two(3.0, 15.0)),
+        ]);
+        let rates = rates_with(&project);
+        assert_eq!(rates["claude-opus-5-5"], two(15.0, 75.0));
+        assert_eq!(
+            rates["claude-sonnet-5-5"],
+            default_rates()["claude-sonnet-5-5"]
+        );
+        assert_eq!(
+            rates["claude-haiku-5-5"],
+            default_rates()["claude-haiku-5-5"]
+        );
+        let t = models(&[("claude-sonnet-5-5", counts(1_000_000, 0, 0, 0, 0))]);
+        assert_eq!(price(&t, &rates).micro_usd, 2_000_000);
+    }
+
+    #[test]
+    fn the_defaults_are_the_three_current_models_with_five_fields_each() {
+        let rates = default_rates();
+        assert_eq!(
+            rates.keys().collect::<Vec<_>>(),
+            ["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"]
+        );
+        assert!(rates.values().all(|r| r.cache.is_some()));
+    }
+
+    #[test]
+    fn a_total_sums_the_cost_and_names_each_model_once() {
+        let a = TicketReport {
+            cost: Cost {
+                micro_usd: 1_500_000,
+                priced: 1,
+                unpriced: vec!["claude-fable-5-1".into()],
+                partial: vec![],
+            },
+            ..TicketReport::default()
+        };
+        let b = TicketReport {
+            cost: Cost {
+                micro_usd: 250_000,
+                priced: 2,
+                unpriced: vec!["claude-fable-5-1".into(), "x".into()],
+                partial: vec!["y".into()],
+            },
+            ..TicketReport::default()
+        };
+        let sum = total(&[a, b]).cost;
+        assert_eq!(sum.micro_usd, 1_750_000);
+        assert_eq!(sum.priced, 3);
+        assert_eq!(sum.unpriced, ["claude-fable-5-1", "x"]);
+        assert_eq!(sum.partial, ["y"]);
+    }
+
+    #[test]
+    fn a_cost_labels_each_shape() {
+        let figure = Cost {
+            micro_usd: 18_424_999,
+            priced: 2,
+            ..Cost::default()
+        };
+        assert_eq!(figure.label(), "$18.42 estimate");
+        assert!(!figure.short());
+        let partial = Cost {
+            unpriced: vec!["claude-fable-5-1".into()],
+            partial: vec!["claude-opus-5-5".into()],
+            ..figure.clone()
+        };
+        assert_eq!(
+            partial.label(),
+            "$18.42 estimate, partial: no rate for claude-fable-5-1; cache not priced for claude-opus-5-5"
+        );
+        assert!(partial.short());
+        let none_priced = Cost {
+            unpriced: vec!["claude-fable-5-1".into()],
+            ..Cost::default()
+        };
+        assert_eq!(
+            none_priced.label(),
+            "not priced: no rate for claude-fable-5-1"
+        );
+        assert_eq!(Cost::default().label(), "none counted");
+        assert_eq!(
+            Cost {
+                micro_usd: 5_000,
+                priced: 1,
+                ..Cost::default()
+            }
+            .dollars(),
+            "$0.01"
+        );
     }
 }

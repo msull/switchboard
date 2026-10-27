@@ -325,13 +325,13 @@ fix passes, rebases (at least: a lane keeps only its last clean
 bring-up), and the commits and diff at the PR. Under each stage are
 its tokens by model, and the roles of its sessions that are `not
 counted` (Codex, a command reviewer), `not found` (no transcript read)
-or of `kind unknown`; the ticket's tokens by model follow. Cost reads
-`not priced`. `--refresh` asks Switchboard for the transcripts of a
-ticket from before they were recorded; a session it no longer has is
-named as removed. A count marked
-incomplete is missing a round's file. A resolution review (the
-`resolution` pass after a conflicted rebase) is code review work on the
-branch: its rounds, points and fix count in those totals, and it is
+or of `kind unknown`; the ticket's tokens by model follow, then
+`cost:`, a dollar estimate at the default rates under the project's
+live `[policy] rates`, naming any model it had no rate for. `--refresh` asks
+Switchboard for the transcripts of a ticket from before they were recorded; a
+session it no longer has is named as removed. A count marked incomplete is
+missing a round's file. A resolution review (the `resolution` pass after a
+conflicted rebase) is code review work on the branch: its rounds, points and fix count in those totals, and it is
 listed under the stage `resolution`.
 
 **Tail.** `dispatch tail X` prints the last lines (40, or `--lines N`
