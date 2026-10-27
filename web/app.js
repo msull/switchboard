@@ -247,6 +247,18 @@ function mergeTurns(held, page) {
   return [...byNumber.values()].sort((a, b) => a.n - b.n);
 }
 
+/**
+ * What the reply box holds once a send of `sent` (already trimmed) has
+ * succeeded: what was typed after it, nothing if there is none, or the
+ * whole box if it no longer starts with the sent text.
+ */
+function afterSend(box, sent) {
+  const rest = box.trimStart();
+  if (!rest.startsWith(sent)) return box;
+  const typed = rest.slice(sent.length);
+  return typed.trim() === '' ? '' : typed;
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     API,
@@ -265,6 +277,7 @@ if (typeof module !== 'undefined' && module.exports) {
     route,
     conversationQuery,
     mergeTurns,
+    afterSend,
   };
 }
 
@@ -795,7 +808,11 @@ if (typeof document !== 'undefined') {
     try {
       await call(API.send, id, { op: state.pending.op, text });
       state.pending = null;
-      $('reply-text').value = '';
+      // Read after the await: what was typed mid-flight stays. An unchanged
+      // box is not rewritten, because setting `.value` moves the caret.
+      const box = $('reply-text');
+      const rest = afterSend(box.value, text);
+      if (rest !== box.value) box.value = rest;
       $('reply-status').textContent = 'Sent.';
     } catch (error) {
       if (error instanceof HttpError && error.status === 403 && error.code === 'scope') {
@@ -807,7 +824,7 @@ if (typeof document !== 'undefined') {
       } else if (error instanceof HttpError) {
         $('reply-status').textContent = error.message;
       } else {
-        $('reply-status').textContent = 'Not sure it went. Send again: it will not be typed twice.';
+        $('reply-status').textContent = 'Not sure it went. The box still holds it: send it again unchanged and it will not be typed twice.';
       }
     } finally {
       $('send').disabled = false;
