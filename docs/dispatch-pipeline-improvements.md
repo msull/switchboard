@@ -434,10 +434,8 @@ table's `may` lists `runner`, refused while a deploy runs).
   for review rounds. Issue #54, built: a conflicted bring-up after the
   last code review stage that pushed nothing gets one `resolution`
   review of the range-diff between the reviewed and the resolved branch.
-- **A conflicted rebase at `ready` with an open PR is not reviewed.**
-  The bring-up pushes the resolution before anything could read it, and
-  a fix would need a push leased on the fixed head, which the pass's
-  attempt does not hold. #54 leaves such a bring-up to the PR's checks.
+  Issue #261, built: one at `ready` that pushed gets the pass too, and a
+  fix from it is pushed with a lease on the head the bring-up pushed.
 - **tmux adapter tests flake on the Linux runner.** #48 made every wait
   in the tmux and dispatch tests poll to a deadline and skipped fsync in
   tests (the dispatch suite went from about two minutes to half a
