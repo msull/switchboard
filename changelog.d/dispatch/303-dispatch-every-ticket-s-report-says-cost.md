@@ -1,1 +1,0 @@
-Changed: dispatch report prices a ticket's tokens as a labelled dollar estimate (cache included, models with no rate named) and brief shows each open ticket's running estimate; [policy] rates now takes five fields per model and overrides a built-in default table.

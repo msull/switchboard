@@ -1,1 +1,0 @@
-Changed: Update checks now run once a day at a spread-out time instead of hourly, send the last ETag so an unchanged release is not downloaded again, wait a day after a rate limit or server error instead of retrying, and a failed background check no longer takes an offered update off the screen.

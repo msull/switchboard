@@ -1,1 +1,0 @@
-Fixed: The web page no longer leaves a gap in "Earlier turns" when the conversation grew meanwhile, no longer shows the previous session's "Earlier turns" button or error after a switch, and no longer rereads the open conversation when another session printed.

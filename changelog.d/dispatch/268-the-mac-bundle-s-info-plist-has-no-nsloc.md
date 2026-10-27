@@ -1,1 +1,0 @@
-Fixed: The Mac app now gives macOS a reason for its Local Network request and names the _switchboard._tcp service, so the first prompt after this update carries Switchboard's own text, and the Automation prompt says it uses System Events to bring a session's Ghostty window to the front.

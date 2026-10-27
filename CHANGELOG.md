@@ -10,6 +10,33 @@ publishes that section as the release notes. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-27
+
+### Added
+
+- The web page shows a command or service session's runs, with the output of the one you pick and the names of the files it produced.
+
+### Changed
+
+- Update checks now run once a day at a spread-out time instead of hourly, send the last ETag so an unchanged release is not downloaded again, wait a day after a rate limit or server error instead of retrying, and a failed background check no longer takes an offered update off the screen.
+- While the window is hidden, Switchboard checks tmux every 5 seconds instead of every second (hook events still update at once), and no longer runs `hostname` to name a new server identity.
+- A pull request's branch is folded into one commit with the implementation's message.
+- dispatch report prices a ticket's tokens as a labelled dollar estimate (cache included, models with no rate named) and brief shows each open ticket's running estimate; [policy] rates now takes five fields per model and overrides a built-in default table.
+
+### Fixed
+
+- The web page no longer leaves a gap in "Earlier turns" when the conversation grew meanwhile, no longer shows the previous session's "Earlier turns" button or error after a switch, and no longer rereads the open conversation when another session printed.
+- A question an agent asked you now stays on its card when a review round, a response or a hand-off compaction is sent to it, instead of vanishing when the agent starts the turn.
+- A rebase that conflicted at the ready stage of a ticket with an open pull request is now reviewed before its checks are read, and a fix from that review is pushed to the pull request.
+- A runner older than the app or its CLI is now named by `dispatch health` and `dispatch brief`, restarted by the app when no attempt is open (or offered otherwise), and a prompt naming a `{decisions.*}` value the runner did not set fails the attempt instead of reaching the agent as written.
+- The Mac app now gives macOS a reason for its Local Network request and names the _switchboard._tcp service, so the first prompt after this update carries Switchboard's own text, and the Automation prompt says it uses System Events to bring a session's Ghostty window to the front.
+- A window saved on a larger display setup no longer aborts the app at launch; windows now open inside their display and under the GPU surface limit.
+- TLS dependencies (rustls, rustls-webpki, webpki-roots) updated for published security advisories.
+- A panic on a background thread no longer takes down the window through a poisoned lock, and a content read that panics reports failed instead of stopping the worker.
+- The web page's reply box no longer clears text you type while a send is in flight; it removes only the text that was sent.
+- dispatch's plan review failure after the app reports a run gone now says whether the app dropped the run, never heard of it (another instance or data directory), or could not say, and lists the sessions recorded for the run.
+- The `pr` stage refuses a branch holding more commits than its pipeline declares (a stage with `keeps_commit` keeps its own).
+
 ## [0.8.1] - 2026-10-26
 
 ### Fixed
