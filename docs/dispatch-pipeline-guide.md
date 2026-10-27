@@ -286,9 +286,14 @@ guidance = "Address one round of review points on the branch. For each point, fi
 - **`commits`** is what happens to the branch's commits as the stage
   completes. `keep` (the default) leaves them as made. `fold` folds
   each fix round into the commit it amends. `one` squashes the branch
-  into one commit. The tree is unchanged either way, so the checks do
-  not run again. A pipeline of other people's pull requests refuses
-  anything but `keep`.
+  into one commit with the implementation's message. The tree is
+  unchanged either way, so the checks do not run again. A pipeline of
+  other people's pull requests refuses anything but `keep`. After
+  `one`, the agent stage right after the review refuses to start on a
+  branch of more than one commit (`rerun | park`, each commit listed).
+  A stage before the review that says `keeps_commit = true` keeps its
+  commit through a `fold` and raises that limit by one; it needs
+  `fold`, not `one`.
 - **`gate = { kind = "command", like = "implement" }`** runs
   `implement`'s checks again at the head the review accepted. A result
   of that command at the same clean head is reused rather than run

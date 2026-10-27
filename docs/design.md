@@ -1866,6 +1866,13 @@ the ticket at the cut; `close` lists the branches it keeps.
 A fold or squash that cannot rewrite the branch asks `rerun | keep |
 park`, and `keep` completes the review at the reviewed head with the
 history as it is, once the head, the checks and a clean tree say it may.
+A `one` fold takes the message and author of the last commit no fix
+round made that is not a `fixup!` or `squash!` commit, so a spike's
+commit no longer leads; this project's pipeline folds with `one`. The
+agent stage right after a review that folds to `one`, or folds with a
+stage declared `keeps_commit`, counts the branch's commits in the lane
+before its agent starts and fails with `rerun | park`, listing each,
+when there are more than one plus the kept stages (no record change).
 A `lane:<name>` deploy with `without_lane = "base"` deploys the lane's
 base for a ticket that did not choose the lane, instead of skipping:
 it holds the stage's resource, runs as `<name>@base` in the project's

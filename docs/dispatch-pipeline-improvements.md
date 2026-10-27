@@ -191,6 +191,20 @@ the reviewed head with the history as it is, recorded as `skipped =
 "the user kept them after the rewrite failed"`, since a rerun folds
 the same way and fails again.
 
+**Built further** (#300). `fold` kept every commit no fix round made as
+its own unit, so a spike's commit before the implementation reached a
+pull request as a second commit (#289, with #293 cited alongside). The
+repository's pipeline now says `commits = "one"`, whose message and
+author are now the last commit no fix round made that is not a
+`fixup!` or `squash!` commit (the implementation's, not the spike's),
+with `squash!` bodies appended. The agent stage right after such a
+review counts the branch's commits in the lane before its agent
+starts and fails with `rerun | park`, listing each commit, when there
+are more than one plus the stages declared `keeps_commit = true`; a
+review with `keep`, or `fold` with nothing kept, is not counted, so a
+ticket's older copy of the pipeline behaves as before. No record
+changed.
+
 ## 8. A refreshed review reviews the rebase too
 
 **Problem.** After the refresh step rebases a branch, the next code review

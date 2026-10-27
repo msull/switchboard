@@ -233,7 +233,7 @@ impl Runner {
     /// The base a lane's review diffs against: resolved once at the
     /// cut and kept on the lane; a lane cut before that was recorded
     /// gets it from the merge base now, and keeps it.
-    fn base_of(
+    pub(crate) fn base_of(
         &mut self,
         t: &mut Ticket,
         p: &Pipeline,

@@ -562,6 +562,11 @@ pub struct Stage {
     /// ticket's mode never changes halfway.
     #[serde(default)]
     pub commits: Option<Commits>,
+    /// This stage's commit stays its own commit of the branch: a later
+    /// code review folds with `fold`, which leaves it a unit, and the
+    /// stage after the review allows one more commit for it.
+    #[serde(default)]
+    pub keeps_commit: bool,
     /// What this stage's agent (a code review stage's implementer) gets
     /// when it stops with a dirty tree; absent, the policy's.
     #[serde(default)]
@@ -1851,6 +1856,56 @@ impl Pipeline {
         Ok(())
     }
 
+    /// A stage that keeps its commit is not a code review and comes
+    /// before one, and every code review after it that rewrites folds:
+    /// `one` would fold the kept commit into the rest.
+    fn validate_kept_commits(&self) -> Result<()> {
+        for (i, stage) in self.stages.iter().enumerate() {
+            if !stage.keeps_commit {
+                continue;
+            }
+            let name = &stage.name;
+            if !stage.reviewers.is_empty() {
+                bail!("stage {name:?}: a code review stage keeps no commit of its own");
+            }
+            let later = &self.stages[i + 1..];
+            if !later.iter().any(|s| !s.reviewers.is_empty()) {
+                bail!("stage {name:?}: keeps_commit needs a code review stage after it");
+            }
+            if let Some(r) = later
+                .iter()
+                .find(|s| !s.reviewers.is_empty() && s.commits() == Commits::One)
+            {
+                bail!(
+                    "stage {name:?} keeps its commit, but stage {:?} folds the branch to one; use commits = \"fold\"",
+                    r.name
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The most commits the branch may hold when `stage` starts: for the
+    /// agent stage right after a code review that folds the branch to
+    /// one, or folds with a kept commit before it, one plus the kept
+    /// commits; otherwise no limit. A review that keeps history, or
+    /// folds with nothing kept, asked for its commits to stay as units.
+    #[must_use]
+    pub fn commit_limit(&self, stage: &Stage) -> Option<usize> {
+        let i = self.stages.iter().position(|s| s.name == stage.name)?;
+        let review = self.stages[..i].last()?;
+        if review.reviewers.is_empty() || stage.operator.is_none() {
+            return None;
+        }
+        let j = i - 1;
+        let kept = self.stages[..j].iter().filter(|s| s.keeps_commit).count();
+        match review.commits() {
+            Commits::One => Some(1),
+            Commits::Fold if kept > 0 => Some(1 + kept),
+            _ => None,
+        }
+    }
+
     /// A stage's operator exists and is an agent.
     fn validate_operator_ref(&self, stage: &Stage) -> Result<()> {
         if let Some(op) = &stage.operator {
@@ -2001,6 +2056,7 @@ impl Pipeline {
             }
         }
         self.validate_needs_runs()?;
+        self.validate_kept_commits()?;
         for (name, dial) in &self.policy.decisions {
             if !matches!(dial.as_str(), "ask" | "recommend" | "auto") {
                 bail!("decision {name:?}: the dial is ask, recommend or auto, not {dial:?}");
@@ -2818,6 +2874,95 @@ writes = ["plan"]"#,
             let p = Pipeline::parse(&with_review_stage(&keys)).unwrap();
             assert_eq!(stage_of(&p), mode);
         }
+    }
+
+    /// `with_review_stage` with an agent `pr` stage after the review
+    /// and `keys` on the implement stage.
+    fn with_pr_after_review(review_keys: &str, implement_keys: &str) -> String {
+        with_review_stage(review_keys)
+            .replace(
+                "[[stages]]\nname = \"ready\"\n",
+                "[[stages]]\nname = \"pr\"\noperator = \"implementer\"\ncontext = \"each\"\nprompt = \"Open a pull request.\"\n\n[[stages]]\nname = \"ready\"\n",
+            )
+            .replace(
+                "prompt = \"Implement {inputs.plan}",
+                &format!("{implement_keys}prompt = \"Implement {{inputs.plan}}"),
+            )
+    }
+
+    #[test]
+    fn keeps_commit_defaults_to_false_and_is_read() {
+        let p = Pipeline::parse(&with_pr_after_review("", "")).unwrap();
+        assert!(p.stages.iter().all(|s| !s.keeps_commit));
+        let p = Pipeline::parse(&with_pr_after_review(
+            "commits = \"fold\"\n",
+            "keeps_commit = true\n",
+        ))
+        .unwrap();
+        let implement = p.stages.iter().find(|s| s.name == "implement").unwrap();
+        assert!(implement.keeps_commit);
+    }
+
+    #[test]
+    fn keeps_commit_is_refused_on_a_review_after_the_review_and_with_one() {
+        let refused = |text: &str, expected: &str| {
+            let err = format!("{:#}", Pipeline::parse(text).unwrap_err());
+            assert!(err.contains(expected), "{err}");
+        };
+        refused(
+            &with_pr_after_review("commits = \"fold\"\nkeeps_commit = true\n", ""),
+            "a code review stage keeps no commit of its own",
+        );
+        refused(
+            &with_pr_after_review("commits = \"fold\"\n", "").replace(
+                "prompt = \"Open a pull request.\"",
+                "keeps_commit = true\nprompt = \"Open a pull request.\"",
+            ),
+            "keeps_commit needs a code review stage after it",
+        );
+        refused(
+            &with_pr_after_review("commits = \"one\"\n", "keeps_commit = true\n"),
+            "folds the branch to one; use commits = \"fold\"",
+        );
+        for mode in ["keep", "fold"] {
+            Pipeline::parse(&with_pr_after_review(
+                &format!("commits = \"{mode}\"\n"),
+                "keeps_commit = true\n",
+            ))
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn commit_limit_counts_for_the_agent_stage_right_after_a_review_that_folds() {
+        let limit = |review_keys: &str, implement_keys: &str, stage: &str| {
+            let p = Pipeline::parse(&with_pr_after_review(review_keys, implement_keys)).unwrap();
+            let s = p.stages.iter().find(|s| s.name == stage).unwrap();
+            p.commit_limit(s)
+        };
+        assert_eq!(limit("commits = \"one\"\n", "", "pr"), Some(1));
+        assert_eq!(
+            limit("commits = \"fold\"\n", "keeps_commit = true\n", "pr"),
+            Some(2)
+        );
+        // Commits that stay units are not counted.
+        assert_eq!(limit("commits = \"fold\"\n", "", "pr"), None);
+        assert_eq!(limit("", "", "pr"), None);
+        assert_eq!(
+            limit("commits = \"keep\"\n", "keeps_commit = true\n", "pr"),
+            None
+        );
+        // Only the stage right after the review, and only an agent one.
+        assert_eq!(limit("commits = \"one\"\n", "", "ready"), None);
+        assert_eq!(limit("commits = \"one\"\n", "", "review-code"), None);
+        assert_eq!(limit("commits = \"one\"\n", "", "implement"), None);
+        let p = Pipeline::parse(&with_review_stage("commits = \"one\"\n")).unwrap();
+        let ready = p.stages.iter().find(|s| s.name == "ready").unwrap();
+        assert_eq!(
+            p.commit_limit(ready),
+            None,
+            "a gate-only stage launches nothing"
+        );
     }
 
     #[test]
