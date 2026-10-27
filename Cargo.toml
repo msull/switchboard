@@ -39,7 +39,7 @@ directories = "6"
 dispatch-control = { path = "dispatch-control" }
 eframe = "0.36"
 egui = "0.36"
-egui_commonmark = { version = "0.25", default-features = false, features = ["pulldown_cmark"] }
+egui_commonmark = { version = "0.26", default-features = false, features = ["pulldown_cmark"] }
 egui_extras = { version = "0.36", features = ["image", "gif", "webp"] }
 egui_term = { path = "vendor/egui_term" }
 env_logger = "0.11"
