@@ -3946,22 +3946,103 @@ fn a_workflow_query_the_app_could_not_answer_leaves_the_attempt_running() {
     }
 }
 
-/// Only Switchboard's word that it has no such run fails the attempt.
+/// Only Switchboard's word that it has no such run fails the attempt,
+/// and the reason says the app's log shows it started the run it lost.
 #[test]
 fn a_run_switchboard_no_longer_has_fails_the_attempt() {
     let mut env = Env::new();
     let id = at_review_run(&mut env);
+    let run = env.sb().runs[0].clone();
+    let planner = run.planner.clone().unwrap();
+    env.steps_until(&id, "the run's sessions recorded", |t, _| {
+        t.attempts_of("review")
+            .last()
+            .is_some_and(|a| a.run_sessions.len() == 2)
+    });
     env.sb().runs.clear();
-    env.step();
-    let t = env.ticket(&id);
-    let a = t.attempts_of("review").last().unwrap();
-    assert!(
-        matches!(&a.state, AttemptState::Failed { reason } if reason == "review run gone: no such run"),
-        "{a:?}"
+    let reason = review_gone_reason(&mut env, &id);
+    assert_eq!(
+        reason,
+        format!(
+            "review run gone: the app logged starting run {} and no longer has it \
+             (the run or its project was removed, or the workspace was loaded from an \
+             older file); sessions recorded for this run: reviewer {}, planner {planner}",
+            run.id, run.reviewer
+        )
     );
     let pending = env.pending(&id);
     assert_eq!(pending.len(), 1, "{pending:#?}");
     assert_eq!(pending[0].name, "rerun");
+}
+
+/// A `no such run` from an app whose log never saw the start names
+/// another instance answering.
+#[test]
+fn a_run_the_app_never_logged_fails_naming_another_instance() {
+    let mut env = Env::new();
+    let id = at_review_run(&mut env);
+    let run = env.sb().runs[0].id.clone();
+    env.sb().runs.clear();
+    env.sb().log.clear();
+    let reason = review_gone_reason(&mut env, &id);
+    assert!(
+        reason.starts_with(&format!(
+            "review run gone: the app that answered has no record of starting run {run} \
+             (a different Switchboard instance or data directory answered)"
+        )),
+        "{reason}"
+    );
+}
+
+/// When the log cannot be read, or the ticket has no start to ask
+/// about, the reason says the log could not say why.
+#[test]
+fn a_run_gone_with_an_unreadable_log_says_so() {
+    let mut env = Env::new();
+    let id = at_review_run(&mut env);
+    env.sb().runs.clear();
+    env.sb().fail_find = Some("the operations log could not be read".into());
+    let reason = review_gone_reason(&mut env, &id);
+    assert!(
+        reason.starts_with(
+            "review run gone: no such run; the app's operations log could not say why \
+             (the operations log could not be read)"
+        ),
+        "{reason}"
+    );
+
+    let mut env = Env::new();
+    let id = at_review_run(&mut env);
+    env.sb().runs.clear();
+    let mut t = env.ticket(&id);
+    for op in t.ledger.iter_mut().filter(|o| o.intent == "run") {
+        op.intent.clear();
+    }
+    for a in &mut t.attempts {
+        a.run_sessions.clear();
+    }
+    let now = env.tick();
+    env.runner.save_ticket(&mut t, now).unwrap();
+    let reason = review_gone_reason(&mut env, &id);
+    assert_eq!(
+        reason,
+        "review run gone: no such run; the app's operations log could not say why \
+         (no start operation in this ticket's ledger)"
+    );
+}
+
+/// Step until the review attempt fails; its reason.
+fn review_gone_reason(env: &mut Env, id: &str) -> String {
+    env.steps_until(id, "the review failing", |t, _| {
+        t.attempts_of("review")
+            .last()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    let t = env.ticket(id);
+    let AttemptState::Failed { reason } = &t.attempts_of("review").last().unwrap().state else {
+        unreachable!()
+    };
+    reason.clone()
 }
 
 /// The `workflow.start` requests sent, in order: source, copy, owner

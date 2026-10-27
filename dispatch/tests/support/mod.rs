@@ -76,6 +76,9 @@ pub struct FakeSwitchboard {
     /// The next workflow query is answered with this failure instead of
     /// the run (the app too busy to answer, say).
     pub fail_workflow_query: Option<String>,
+    /// The next `find` is answered with this failure instead of the
+    /// records (an operations log the app could not read, say).
+    pub fail_find: Option<String>,
     /// Save the records and the request line, then die: no reply line,
     /// no pane, `op.status` interrupted.
     pub die_launching: Option<String>,
@@ -700,6 +703,9 @@ impl FakeSwitchboard {
                     .cloned()
                     .collect(),
             },
+            Body::Find { .. } if self.fail_find.is_some() => {
+                Reply::failed(self.fail_find.take().unwrap())
+            }
             Body::Find { operation } => {
                 let mut records = Vec::new();
                 for line in self.log.iter().filter(|l| &l.op == operation) {
