@@ -37,7 +37,7 @@ anyhow = "1"
 chrono = "0.4"
 directories = "6"
 dispatch-control = { path = "dispatch-control" }
-eframe = "0.36"
+eframe = "0.37"
 egui = "0.36"
 egui_commonmark = { version = "0.25", default-features = false, features = ["pulldown_cmark"] }
 egui_extras = { version = "0.36", features = ["image", "gif", "webp"] }
