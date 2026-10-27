@@ -4052,9 +4052,14 @@ agent's counts on the tab are as of the ticket's last change. Codex is
 not counted. A cold Usage read of a large open ticket holds the port's
 handler for its duration. A ticket from before this change takes a
 session's kind from its pipeline copy, which a restart may have
-replaced. There are no prices: `Policy.rates` cannot price cache
-writes and reads, and the cache keeps the hour-long split and `speed`
-for a price table later. The session page counts each `message.id`
+replaced. Prices are an estimate from a default table in the binary
+under the project's live `[policy] rates` (five fields per model,
+cache included), recomputed at report time; nothing is stored. The
+estimate prices every row at standard speed, since the `speed` value
+for fast mode is not known, and Haiku 5.5 at its up-to-100k tier,
+since per-model totals cannot be split by request; both need pricing
+per cache row. `claude-fable-5-1` has no default row and shows as
+unpriced. No budget is wired. The session page counts each `message.id`
 once and skips `<synthetic>`, as the tab does, but it reads only the
 main transcript and counts an assistant record with no `message.id`
 once, which the tab drops. The two agree only for a session with no

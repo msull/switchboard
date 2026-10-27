@@ -1280,7 +1280,7 @@ fn report_of(runner: &Runner, t: &dispatch::ticket::Ticket) -> TicketReport {
         dispatch::store::read_usage(&runner.data.usage_file(&t.id)).unwrap_or_default()
     });
     let usage = dispatch::usage::of(t, pipeline.as_ref(), &cache, now);
-    report::of(
+    let mut r = report::of(
         t,
         pipeline.as_ref(),
         &names,
@@ -1289,7 +1289,9 @@ fn report_of(runner: &Runner, t: &dispatch::ticket::Ticket) -> TicketReport {
         range,
         usage,
         now,
-    )
+    );
+    r.cost = report::price(&r.tokens, &runner.rates_for(t));
+    r
 }
 
 /// `report --refresh`: each ticket's missing transcripts asked of
@@ -1357,14 +1359,15 @@ fn report(args: &[&str]) -> Result<()> {
                 return Ok(());
             }
             say!(
-                "ticket    time      out       cache read  plan  code  fixes  rebases  commits  title"
+                "ticket    time      cost      out       cache read  plan  code  fixes  rebases  commits  title"
             );
             let row = |id: &str, r: &TicketReport, title: &str| -> Result<()> {
                 let all = report::all_models(&r.tokens);
                 say!(
-                    "{:<9} {:<9} {:<9} {:<11} {:<5} {:<5} {:<6} {:<8} {:<8} {}",
+                    "{:<9} {:<9} {:<9} {:<9} {:<11} {:<5} {:<5} {:<6} {:<8} {:<8} {}",
                     id,
                     span(r.stages.iter().map(|s| s.ms).sum()),
+                    cost_cell(&r.cost),
                     count(all.output),
                     count(all.cache_read),
                     r.plan_points,
@@ -1533,8 +1536,9 @@ fn stage_usage(r: &TicketReport, s: &report::StageTime) -> Result<()> {
     Ok(())
 }
 
-/// The ticket's tokens per model, and what to do about sessions not
-/// found. Prices are not kept, so no cost is shown.
+/// The ticket's tokens per model, what to do about sessions not found,
+/// and what the tokens cost at the default rates under the project's
+/// own, recomputed here since no price is stored.
 fn ticket_usage(r: &TicketReport) -> Result<()> {
     if r.tokens.is_empty() {
         say!("  tokens: none counted");
@@ -1549,8 +1553,21 @@ fn ticket_usage(r: &TicketReport) -> Result<()> {
             r.id
         );
     }
-    say!("  cost: not priced");
+    say!("  cost: {}", r.cost.label());
+    if r.cost.priced > 0 {
+        say!("  ({})", report::ESTIMATE_NOTE);
+    }
     Ok(())
+}
+
+/// A cost in a table cell or a brief line: `$1.23`, with a `+` when a
+/// model's tokens or cache had no rate, and `-` when nothing was priced,
+/// so a ticket with no rate or no tokens is not read as costing nothing.
+fn cost_cell(c: &report::Cost) -> String {
+    if c.priced == 0 {
+        return "-".to_owned();
+    }
+    format!("{}{}", c.dollars(), if c.short() { "+" } else { "" })
 }
 
 /// One model's tokens on a line.
@@ -1658,18 +1675,7 @@ fn brief(args: &[&str]) -> Result<()> {
         say!("  none");
     }
     for t in &tickets {
-        let stage = runner
-            .pipeline_of(t)
-            .ok()
-            .and_then(|p| p.stages.get(t.stage).map(|s| s.name.clone()))
-            .unwrap_or_else(|| "done".to_owned());
-        say!(
-            "  {} {} {} · stage {stage} · {}",
-            t.id,
-            t.source.label(),
-            t.source.title,
-            t.state.label()
-        );
+        say!("  {}", ticket_line(&runner, t, now));
     }
     say!("\nwaiting on you:");
     let mut any = false;
@@ -1740,6 +1746,51 @@ fn brief(args: &[&str]) -> Result<()> {
         say!("(no hand-off yet)");
     }
     Ok(())
+}
+
+/// An open ticket on one line: its source, stage, state and cost so far.
+/// The cost reads the project's pipeline file once per ticket
+/// (`running_cost`), so a brief of many tickets is that many file reads.
+fn ticket_line(runner: &Runner, t: &Ticket, now: u64) -> String {
+    let pipeline = runner.pipeline_of(t).ok();
+    let stage = pipeline
+        .as_ref()
+        .and_then(|p| p.stages.get(t.stage).map(|s| s.name.clone()))
+        .unwrap_or_else(|| "done".to_owned());
+    format!(
+        "{} {} {} · stage {stage} · {}{}",
+        t.id,
+        t.source.label(),
+        t.source.title,
+        t.state.label(),
+        running_cost(runner, t, pipeline.as_ref(), now)
+    )
+}
+
+/// ` · ~$1.23 so far` from the ticket's counts cache as it stands: no
+/// transcript is read, so a brief stays cheap and is as of the last
+/// report or Usage tab read. Nothing when nothing is counted.
+fn running_cost(
+    runner: &Runner,
+    t: &Ticket,
+    pipeline: Option<&dispatch::pipeline::Pipeline>,
+    now: u64,
+) -> String {
+    let Ok(cache) = dispatch::store::read_usage(&runner.data.usage_file(&t.id)) else {
+        return String::new();
+    };
+    let mut tokens = std::collections::BTreeMap::new();
+    for a in dispatch::usage::of(t, pipeline, &cache, now) {
+        dispatch_control::add_models(&mut tokens, &a.models);
+    }
+    if tokens.is_empty() {
+        return String::new();
+    }
+    let cost = report::price(&tokens, &runner.rates_for(t));
+    if cost.priced == 0 {
+        return format!(" · no rate for {}", cost.unpriced.join(", "));
+    }
+    format!(" · ~{} so far", cost_cell(&cost))
 }
 
 /// `dispatch subscribe <ticket> [--for move] [--since <seq>]`.

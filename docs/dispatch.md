@@ -980,7 +980,7 @@ env = ["aws-dev"]             # Switchboard environment sets: added to the stage
 slots = 1                     # tickets with a running attempt or a held resource; read live from <project>.toml on every pass, not from a ticket's copy
 waiting_on_me = 2             # pending decisions across the project before nothing new starts; live as well
 ports = [3100, 3199]          # the range services' ports are allocated from, each tested free before use; required by a stage with services
-rates = { "claude-sonnet-5" = [3.0, 15.0], ... }   # $ per million input, output tokens
+rates = { "claude-sonnet-5-5" = [2.0, 10.0, 2.50, 4.0, 0.10], ... }   # $ per million tokens: input, output, 5m cache write, 1h cache write, cache read ([input, output] prices the cache at zero); read live, each row replacing the built-in default for its model
 decisions = { lanes = "ask", finalize = "ask", merge = "ask", budget = "ask", review-code = "ask", resolution = "ask" }
 trust_folders = false         # true: Claude Code's folder trust question, which every fresh worktree asks, is answered for the project's agents
 max_reruns = 3                # failed attempts a stage may collect in one context before the ticket parks instead of asking again
@@ -1258,7 +1258,7 @@ gate = { kind = "external", check = "pr-merged", decision = "merge" }   # pendin
 [policy]
 slots = 1
 waiting_on_me = 2
-rates = { "claude-sonnet-5" = [3.0, 15.0], "claude-opus-5-5" = [15.0, 75.0], "gpt-5-codex" = [1.25, 10.0] }
+rates = { "claude-sonnet-5-5" = [2.0, 10.0, 2.50, 4.0, 0.10], "claude-opus-5-5" = [4.0, 20.0, 5.0, 8.0, 0.20], "gpt-5-codex" = [1.25, 10.0] }
 decisions = { lanes = "auto", finalize = "ask", budget = "ask" }
 confine = false              # its tests start /bin/ps (setuid) and make a keychain, which the sandbox refuses
 ```
@@ -1348,7 +1348,7 @@ gate = { kind = "human", decision = "published", confirm = true }   # shows the 
 [policy]
 slots = 1
 waiting_on_me = 3
-rates = { "claude-sonnet-5" = [3.0, 15.0], "gpt-5-codex" = [1.25, 10.0] }
+rates = { "claude-sonnet-5-5" = [2.0, 10.0, 2.50, 4.0, 0.10], "gpt-5-codex" = [1.25, 10.0] }
 decisions = { lanes = "auto", finalize = "ask", budget = "ask" }
 ```
 
@@ -1573,7 +1573,7 @@ gate = { kind = "external", check = "pr-merged", provider = "bitbucket", decisio
 slots = 2                    # two tickets in flight; only one can hold my-dev
 waiting_on_me = 2
 ports = [3100, 3199]         # for services; one per service per ticket, tested free before use
-rates = { "claude-sonnet-5" = [3.0, 15.0], "claude-opus-5-5" = [15.0, 75.0], "gpt-5-codex" = [1.25, 10.0] }
+rates = { "claude-sonnet-5-5" = [2.0, 10.0, 2.50, 4.0, 0.10], "claude-opus-5-5" = [4.0, 20.0, 5.0, 8.0, 0.20], "gpt-5-codex" = [1.25, 10.0] }
 decisions = { lanes = "ask", finalize = "ask", budget = "ask" }
 confine = false              # on once its gates have passed confined; the setup has (spikes/11-gate-sandbox)
 ```
@@ -2514,12 +2514,27 @@ not counted, with its span. `dispatch report <ticket> --refresh` (or
 `--project <name> --refresh`) asks Switchboard once for the transcripts
 of a ticket that ran before they were recorded.
 
-The counts are reported; prices are not yet. `rates` is parsed but
-nothing reads it, and its `[input, output]` pair cannot price cache
-writes and reads. When prices come, crossing an operator's or the
-project's budget is a decision that blocks the *next* launch for the
-ticket; it never stops a running agent. Operator budgets are per
-ticket across the operator's attempts.
+`dispatch report` prices the counts as a dollar estimate beside the
+tokens, recomputed from the cache each time; no price is stored.
+Dispatch carries a dated default table for `claude-haiku-5-5`,
+`claude-sonnet-5-5` and `claude-opus-5-5` at the list API rates, all
+five token kinds. `[policy] rates` in the project's pipeline file, read
+live like `slots`, overrides it per model: a row replaces the default
+for that model only, and model ids match exactly (`claude-sonnet-5`
+does not price `claude-sonnet-5-5`). A row is five numbers `[input,
+output, cache_write_5m, cache_write_1h, cache_read]`, or two `[input,
+output]`, which prices the cache at zero. A model with tokens and no
+rate is named, and the figure is then partial; a model whose cache a
+two-number row left unpriced is named as well. The estimate leaves out
+the fast-mode, batch and US-only modifiers, which a transcript's rows
+do not carry, and prices Haiku 5.5 at its lower tier for prompts up to
+100k, so its figure there is a floor. `dispatch report --project` has a
+cost column, and `dispatch brief` shows each open ticket's estimate so
+far from the cache as it stands. Budgets are not wired: when they come,
+crossing an operator's or the project's budget is a decision that
+blocks the *next* launch for the ticket; it never stops a running
+agent. Operator budgets are per ticket across the operator's
+attempts.
 
 ## Control port
 

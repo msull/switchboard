@@ -305,9 +305,10 @@ guidance = "Address one round of review points on the branch. For each point, fi
 
 **`budget_usd`** on an operator is meant as a budget per ticket across
 that operator's attempts, priced by `[policy] rates` (step 7).
-Budget reporting is not built yet: both keys parse and nothing reads
-them, so neither stops or asks anything today. Set them only as a
-record of intent. [Budget](dispatch.md#budget) is the design.
+Budgets are not built yet: `budget_usd` parses and nothing reads it,
+so it stops or asks nothing today; set it only as a record of intent.
+`rates` already prices `dispatch report`'s estimate.
+[Budget](dispatch.md#budget) is the design.
 
 ```toml
 version = 1
@@ -433,7 +434,7 @@ context = "each"
 gate = { kind = "external", check = "pr-merged", decision = "merge" }
 
 [policy]
-rates = { "claude-sonnet-5" = [3.0, 15.0], "claude-opus-5-5" = [15.0, 75.0] }
+rates = { "claude-sonnet-5-5" = [2.0, 10.0, 2.50, 4.0, 0.10], "claude-opus-5-5" = [4.0, 20.0, 5.0, 8.0, 0.20] }
 decisions = { lanes = "auto", finalize = "ask", review-code = "auto" }
 ```
 
@@ -1355,9 +1356,14 @@ with step 6 merged in and every policy key below set.
   some suites cannot run confined at all. Switchboard's own tests start
   `/bin/ps` and make a keychain, which the sandbox refuses, so its
   file keeps `confine = false`.
-- **`rates`** are dollars per million input and output tokens, per
-  model, for budget reporting. Like `budget_usd`, they parse but
-  nothing reads them yet.
+- **`rates`** are dollars per million tokens per model, `[input,
+  output, cache_write_5m, cache_write_1h, cache_read]` (or `[input,
+  output]`, which prices the cache at zero). `dispatch report` and
+  `brief` price a ticket's tokens with them as an estimate. Dispatch
+  has a dated default table for the current Haiku, Sonnet and Opus;
+  this key, read live from the project's file, replaces the default
+  row for each model it names, matched exactly by id. A model with no
+  row is named in the report as unpriced.
 - **`ports`** is the range services are allocated from (step 5).
 - **`rebaser`**, **`max_rebases`**, **`fixer`**, **`max_fixes`** and
   **`resolution_reviewer`** are step 6's.
@@ -1561,7 +1567,7 @@ trust_folders = true
 confine = true
 network = "deny"
 ports = [3100, 3199]
-rates = { "claude-sonnet-5" = [3.0, 15.0], "claude-opus-5-5" = [15.0, 75.0], "gpt-5-codex" = [1.25, 10.0] }
+rates = { "claude-sonnet-5-5" = [2.0, 10.0, 2.50, 4.0, 0.10], "claude-opus-5-5" = [4.0, 20.0, 5.0, 8.0, 0.20], "gpt-5-codex" = [1.25, 10.0] }
 rebaser = "rebaser"
 max_rebases = 2
 fixer = "fixer"
@@ -1747,7 +1753,7 @@ gate = { kind = "external", check = "pr-merged", decision = "merge" }
 slots = 2
 waiting_on_me = 3
 trust_folders = true      # every fresh worktree asks once; answered for the project's agents
-rates = { "claude-sonnet-5" = [3.0, 15.0], "claude-opus-5-5" = [15.0, 75.0] }
+rates = { "claude-sonnet-5-5" = [2.0, 10.0, 2.50, 4.0, 0.10], "claude-opus-5-5" = [4.0, 20.0, 5.0, 8.0, 0.20] }
 decisions = { lanes = "auto", review-code = "auto" }
 ```
 
@@ -1824,7 +1830,7 @@ Each row is a key from the steps above, and what goes wrong without it.
 | `refresh` | (default on) turning it off implements plans on stale branches |
 | `trust_folders` | each fresh tree's first agent waits on the folder trust question |
 | `confine`, `network` | setup and gates can write anywhere the runner can and reach anything |
-| `rates` | nothing today: budget reporting is not built |
+| `rates` | the built-in default table prices the current Haiku, Sonnet and Opus; any other model is named as unpriced |
 | `[supervisor] decides` | every decision is the owner's |
 | `[supervisor] merges` | the supervisor reports a green pull request and stops |
 | `[supervisor] may` | runner and ticket restarts stay the owner's |
