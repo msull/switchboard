@@ -3332,6 +3332,12 @@ Built so far:
   launch-time `SWITCHBOARD_INVITE` pairs it with a host without
   typing. Measured: the simulator paired with a throwaway host on this
   Mac and listed its sessions under the source label.
+  The Mac host's bundle (`scripts/bundle.sh`) carries the same pair, so
+  the first launch of a signed bundle after that change may show the
+  Local Network prompt once, with that text: at launch if the LAN
+  listen setting is saved on, otherwise at the first tick of "Allow
+  devices on the local network". The keys are necessary but not shown
+  to be sufficient for a Developer ID build that sends raw multicast.
 - **B2, card windows.** A session in the browser opens as a window of
   its own through `WindowGroup(for: CardWindowRequest.self)`: a
   request is the qualified session plus a window id, so two requests

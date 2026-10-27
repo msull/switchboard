@@ -68,9 +68,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key>  <string>13.0</string>
   <key>NSHighResolutionCapable</key> <true/>
   <key>NSAppleEventsUsageDescription</key>
-  <string>Switchboard raises the terminal window of a session you return to.</string>
+  <string>Switchboard uses System Events to bring the Ghostty window of a session to the front.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Switchboard listens to your voice to dictate prompts to an agent.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Switchboard announces this Mac to the devices you pair with on your local network and answers them.</string>
+  <key>NSBonjourServices</key>
+  <array><string>_switchboard._tcp</string></array>
 </dict>
 </plist>
 PLIST

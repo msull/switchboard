@@ -187,12 +187,15 @@ first "Developer ID Application" identity (has a Team ID, so Keychain
 items stay allowed across rebuilds), else a "Switchboard Dev" or "Prompt
 Box Dev" certificate from Keychain Access (keeps the Accessibility grant,
 but the Keychain asks for its items again after each build), else ad-hoc
-(the grant is reset each rebuild). `scripts/icon.sh`
-renders the SVG with AppKit into `assets/Switchboard.icns` for Finder and
-`assets/icon-256.rgba`, which `src/main.rs` embeds for the Dock, and the
-three layers of the visionOS icon (`assets/vision/*.svg`, the same
-drawing split for the headset's parallax and circular mask) into the
-client's asset catalog.
+(the grant is reset each rebuild). The bundle's `Info.plist` gives macOS
+the usage text for Automation (System Events), the microphone and the
+Local Network, and names the `_switchboard._tcp` Bonjour service; a bare
+`cargo run` binary has no `Info.plist` and so carries none of that text.
+`scripts/icon.sh` renders the SVG with AppKit into
+`assets/Switchboard.icns` for Finder and `assets/icon-256.rgba`, which
+`src/main.rs` embeds for the Dock, and the three layers of the visionOS
+icon (`assets/vision/*.svg`, the same drawing split for the headset's
+parallax and circular mask) into the client's asset catalog.
 
 Releases are numbered by [semantic versioning](https://semver.org) and
 listed in `CHANGELOG.md`; the version in `Cargo.toml` is the one source,
