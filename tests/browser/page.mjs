@@ -30,6 +30,25 @@ async function invite(name) {
 
 const text = (page, selector) => page.locator(selector).textContent();
 
+/** Waits until `check()` holds, polling, or fails saying `what`. */
+async function until(check, what, ms = 15000) {
+  const end = Date.now() + ms;
+  while (!(await check())) {
+    if (Date.now() > end) throw new Error(`timed out: ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+/** The turn numbers drawn, from each turn's `Turn N` line. */
+const turnNumbers = (page) => page.$$eval('#turn-list .turn > .meta', (metas) => metas.map((m) => Number(m.textContent.match(/^Turn (\d+)/)[1])));
+
+/** A promise that resolves on `release()`, for holding a request. */
+function gate() {
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  return { held, release };
+}
+
 /** No horizontal scroll: what a phone shows is the page's width. */
 async function fitsWidth(page) {
   const [scroll, inner] = await page.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
@@ -126,6 +145,117 @@ try {
   assert.equal(await page.inputValue('#reply-text'), 'draft');
   const sockets = await page.evaluate(() => window.__sockets);
   console.log(`socket: ${sockets.includes('open') ? 'opened' : 'refused'}`);
+
+  // 4a. "Earlier turns" asks for the turns before the lowest held when
+  //     its turn in the queue comes: a list refresh queued ahead of it
+  //     that replaced the turns leaves no gap.
+  await step('grow-45');
+  await page.locator('#turn-list', { hasText: 'prompt 45' }).waitFor({ timeout: 15000 });
+  assert.deepEqual(await turnNumbers(page), Array.from({ length: 20 }, (_, i) => 26 + i));
+  assert.ok(await page.isVisible('#earlier'), 'the Earlier button shows');
+  {
+    // Held requests reach the host only once released, after its step.
+    const list = gate();
+    let reached;
+    const seen = new Promise((resolve) => { reached = resolve; });
+    await page.route('**/api/v1/projects', async (route) => {
+      reached();
+      await list.held;
+      await route.continue();
+    });
+    await step('grow-70');
+    await seen;
+    await page.click('#earlier');
+    list.release();
+    await until(async () => (await turnNumbers(page)).length > 20, 'the earlier page merged');
+    await page.unroute('**/api/v1/projects');
+    const ns = await turnNumbers(page);
+    assert.equal(ns[ns.length - 1], 70);
+    ns.forEach((n, i) => assert.equal(n, ns[0] + i, `turns ${ns.join(',')} are consecutive`));
+  }
+
+  // 4b. A switch clears the conversation's chrome: no Earlier button
+  //     over the next session's screen while it loads, and no error
+  //     left from the last one.
+  {
+    const screen = gate();
+    let reached;
+    const seen = new Promise((resolve) => { reached = resolve; });
+    await page.route('**/api/v1/sessions/*/screen', async (route) => {
+      reached();
+      await screen.held;
+      await route.continue();
+    });
+    await page.click('#back');
+    await page.locator('#sessions .row', { hasText: 'shell' }).click();
+    await seen;
+    assert.ok(await page.isHidden('#turns'), 'the turns hide while the screen loads');
+    assert.ok(await page.isHidden('#earlier'), 'the Earlier button hides while the screen loads');
+    screen.release();
+    await page.locator('#session-text').waitFor({ state: 'visible', timeout: 15000 });
+    await page.unroute('**/api/v1/sessions/*/screen');
+
+    await page.click('#back');
+    await page.locator('#sessions .row', { hasText: 'investigator' }).click();
+    await page.locator('#turn-list', { hasText: 'prompt 70' }).waitFor({ timeout: 15000 });
+    const older = (u) => u.pathname.endsWith('/conversation') && u.searchParams.has('before');
+    await page.route(older, (route) => route.fulfill({
+      status: 500,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: { code: 'failed', message: 'earlier failed' } }),
+    }));
+    await page.click('#earlier');
+    await page.locator('#earlier-error', { hasText: 'earlier failed' }).waitFor({ timeout: 15000 });
+    await page.unroute(older);
+    await page.click('#back');
+    await page.locator('#sessions .row', { hasText: 'shell' }).click();
+    assert.equal(await text(page, '#earlier-error'), '');
+    await page.click('#back');
+    await page.locator('#sessions .row', { hasText: 'investigator' }).click();
+    await page.locator('#turn-list', { hasText: 'prompt 70' }).waitFor({ timeout: 15000 });
+  }
+
+  // 4c. The open conversation is read again only when its own entry
+  //     moved: another session's rename redraws the list alone.
+  let reads = 0;
+  page.on('request', (r) => { if (new URL(r.url()).pathname.endsWith('/conversation')) reads += 1; });
+  {
+    await page.waitForTimeout(1000);
+    const before = reads;
+    await step('rename-other');
+    await until(async () => (await text(page, '#sessions')).includes('helper 2'), 'the list shows the rename');
+    await page.waitForTimeout(1000);
+    assert.equal(reads, before, 'another session moving reads nothing');
+    await step('rename-open');
+    await page.locator('#session-name', { hasText: 'investigator 5' }).waitFor({ timeout: 15000 });
+    await until(() => reads === before + 1, 'one read for the open session moving');
+    await page.waitForTimeout(1000);
+    assert.equal(reads, before + 1, 'one read, not more');
+  }
+
+  // 4d. A turn's boundary is read once more a moment later: the
+  //     transcript changes after the read the Stop caused, and nothing
+  //     else moves.
+  {
+    const before = reads;
+    await step('stop');
+    await until(() => reads === before + 1, 'the read the Stop caused');
+    await step('transcript-5');
+    await until(async () => (await turnNumbers(page)).length === 5, 'the confirming re-read drew 5 turns', 6000);
+  }
+
+  // 4e. Back before the confirming re-read cancels it; reopening the
+  //     session reads again instead of trusting the read the Stop caused.
+  {
+    await page.waitForTimeout(1100);
+    const before = reads;
+    await step('stop');
+    await until(() => reads === before + 1, 'the read the second Stop caused');
+    await step('transcript-6');
+    await page.click('#back');
+    await page.locator('#sessions .row', { hasText: 'investigator' }).click();
+    await until(async () => (await turnNumbers(page)).length === 6, 'the reopened session drew 6 turns', 6000);
+  }
 
   // 5. Tab switches never start a second polling chain. Without a
   //    socket the page polls every 3 s.

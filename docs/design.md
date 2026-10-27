@@ -3839,17 +3839,27 @@ Built so far:
   `conversation?from=last&limit=20`, then `before=<lowest held
   turn>` for "Earlier turns", merged by turn number in memory only
   (`mergeTurns`; a page that starts past the turn after the last held
-  one replaces them, and turns past `total` or under another
-  `resume_id` are dropped). Each turn shows its prompt, its steps'
-  one-line summaries folded under "N steps" (errors marked), and its
-  answer. Any other kind keeps the screen, and `400 no_conversation`
+  one, or ends short of the turn before the first, replaces them, and
+  turns past `total` or under another `resume_id` are dropped).
+  "Earlier turns" reads its lowest held turn when its turn in the
+  queue comes, so a refresh queued ahead of it that replaced the turns
+  leaves no gap, and a session switch hides the turns and the button
+  and clears the earlier-turns error. Each turn shows its prompt, its
+  steps' one-line summaries folded under "N steps" (errors marked), and
+  its answer. Any other kind keeps the screen, and `400 no_conversation`
   says the host's message in the block. The page's requests go one at
   a time through one queue, the list's, `/waiting`'s and the
   conversation's alike. The open conversation is refetched when the
-  list is, which the `/waiting` mark decides: by reading the revision
-  fingerprint, a turn moves it (the card on the prompt, the Stop
-  hook's `last_stop_at_ms`, and `last_activity_ms` as the pane
-  prints), not checked against a live session. No host code changed;
+  session's own list entry moved (anything on it but `quiet_secs`,
+  which the host's revision leaves out too, compared by `entryMark`
+  against the entry the drawn read was made against) and skipped when
+  only another session's did; a failed or discarded read leaves no
+  mark, so the next refresh reads. A turn's boundary (the card or
+  `last_stop_at_ms` changed) is read once more 3 s later, since the
+  order of the transcript line and the hook is Claude Code's and the
+  entry goes quiet after a Stop; a line later than that shows on the
+  entry's next move or a reopen. The shell's screen is still refetched
+  on every list refresh. No host code changed;
   the route-table test now fails on a path placeholder it does not
   fill. Known gaps: Safari was not driven (headless Chromium is, by
   the browser test below). A step's tool input and
@@ -3900,6 +3910,13 @@ Built so far:
   and draws the list with no horizontal scroll at 390 px; a chosen
   sort survives a reload; a conversation opens; a poll that redraws
   the list and the open session leaves the reply box's text alone;
+  "Earlier turns" clicked while a list refresh is held behind a grown
+  transcript ends with consecutive turns up to the last; switching to
+  a shell hides the turns and the button while its screen loads, and
+  an earlier-turns error does not survive a switch; another session's
+  rename reads no conversation while the open one's reads it once; and
+  a transcript that changes after the read a Stop caused is drawn by
+  the confirming re-read;
   five tab switches leave one polling chain; a send is typed once and
   says "Sent."; and a 401 says "Identity changed" or "removed" as
   `/info` decides. It is `#[ignore]`d, so neither the hook nor CI runs

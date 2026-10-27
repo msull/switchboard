@@ -234,7 +234,8 @@ function conversationQuery(before) {
  * turn replaces a held one of the same number; held turns past the
  * conversation's `total` are gone; a page that starts past the turn
  * after the last held one replaces them all, since keeping them would
- * show a stale middle as if nothing were missing.
+ * show a stale middle as if nothing were missing, and so does a page
+ * that ends short of the turn before the first held one.
  */
 function mergeTurns(held, page) {
   const turns = page.turns || [];
@@ -242,9 +243,45 @@ function mergeTurns(held, page) {
   if (turns.length === 0) return kept;
   const highest = kept.length ? kept[kept.length - 1].n : 0;
   if (turns[0].n > highest + 1) kept = [];
+  // The same on the low side: a page ending short of the first held
+  // turn would leave a gap below it.
+  if (kept.length && turns[turns.length - 1].n < kept[0].n - 1) kept = [];
   const byNumber = new Map(kept.map((t) => [t.n, t]));
   for (const t of turns) byNumber.set(t.n, t);
   return [...byNumber.values()].sort((a, b) => a.n - b.n);
+}
+
+/**
+ * What a session's list entry is compared by, to tell whether the open
+ * conversation needs reading again: `key` is the whole entry but
+ * `quiet_secs`, which ages with the clock (the host's revision leaves it
+ * out too); `card` and `stop` mark a turn's boundary.
+ */
+function entryMark(s) {
+  return {
+    key: JSON.stringify({ ...s, quiet_secs: undefined }),
+    card: s.card,
+    stop: s.last_stop_at_ms,
+  };
+}
+
+/**
+ * Whether the entry crossed a turn's boundary between two marks: its
+ * card or its last stop changed. False when either mark is unknown.
+ */
+function turnBoundary(prev, next) {
+  if (!prev || !next) return false;
+  return prev.card !== next.card || prev.stop !== next.stop;
+}
+
+/**
+ * The turn to ask for the turns before, or null when nothing is held or
+ * the first turn already is.
+ */
+function earlierBefore(turns) {
+  if (!turns || turns.length === 0) return null;
+  const lowest = turns[0].n;
+  return lowest > 1 ? lowest : null;
 }
 
 /**
@@ -277,6 +314,9 @@ if (typeof module !== 'undefined' && module.exports) {
     route,
     conversationQuery,
     mergeTurns,
+    entryMark,
+    turnBoundary,
+    earlierBefore,
     afterSend,
   };
 }
@@ -300,6 +340,11 @@ if (typeof document !== 'undefined') {
     // The open conversation's turns, kept in memory only.
     turns: [],
     resumeId: null,
+    // The `entryMark` of the entry the drawn conversation was read
+    // against, null when unknown, which makes the next refresh read.
+    readMark: null,
+    // The timer of a pending confirming re-read after a turn's boundary.
+    confirm: null,
     scrollToEnd: false,
     pending: null,
     chain: Promise.resolve(),
@@ -633,7 +678,11 @@ if (typeof document !== 'undefined') {
       state.turns = [];
       state.resumeId = null;
       $('turn-list').replaceChildren();
+      $('turns').hidden = true;
+      $('earlier').hidden = true;
+      $('earlier-error').textContent = '';
       state.scrollToEnd = true;
+      clearConfirm();
     }
     state.open = id;
     show('session');
@@ -642,7 +691,19 @@ if (typeof document !== 'undefined') {
 
   function closeSession() {
     state.open = null;
+    clearConfirm();
     show('list');
+  }
+
+  /**
+   * Cancels the pending confirming read. The mark goes with it: a read
+   * the confirmation was to correct must not be skipped as current when
+   * the session is opened again.
+   */
+  function clearConfirm() {
+    if (state.confirm) clearTimeout(state.confirm);
+    state.confirm = null;
+    state.readMark = null;
   }
 
   async function loadSession() {
@@ -657,7 +718,12 @@ if (typeof document !== 'undefined') {
     $('reply').hidden = !canReply || s.prompt_refusal != null;
     $('session-refusal').hidden = !canReply || s.prompt_refusal == null;
     $('session-refusal').textContent = s.prompt_refusal ? `No reply from here: ${s.prompt_refusal}` : '';
-    if (s.kind === 'claude') return loadConversation(id, null);
+    if (s.kind === 'claude') {
+      // Another session's print moves the list but not this entry; the
+      // conversation it was read against is still the one drawn.
+      if (state.readMark && state.readMark.key === entryMark(s).key) return null;
+      return readLatest(id, s);
+    }
     const key = `${API.screen} ${id}`;
     try {
       const reply = await call(API.screen, id);
@@ -671,16 +737,42 @@ if (typeof document !== 'undefined') {
   }
 
   /**
+   * The last turns of `id`'s conversation, read against its list entry
+   * `entry` and marked once drawn, so the next refresh skips while the
+   * entry stays put; a read that fails or is discarded leaves no mark.
+   */
+  async function readLatest(id, entry) {
+    const previous = state.readMark;
+    state.readMark = null;
+    if (!(await loadConversation(id, null))) return null;
+    state.readMark = entryMark(entry);
+    // The hook may arrive before the transcript has the turn's last
+    // line, and after a stop the entry goes quiet, so a turn's
+    // boundary is read once more a moment later.
+    if (turnBoundary(previous, state.readMark)) {
+      const mark = state.readMark;
+      clearConfirm();
+      state.readMark = mark;
+      state.confirm = setTimeout(() => {
+        state.confirm = null;
+        state.readMark = null;
+        serial(loadSession);
+      }, POLL_FAST_MS);
+    }
+    return null;
+  }
+
+  /**
    * A conversation page, the last turns or those before turn `before`,
-   * merged into the turns held. A session that has not started its
-   * conversation answers `no_conversation`, which is said in the block
-   * and is not an error.
+   * merged into the turns held; true when it was drawn. A session that
+   * has not started its conversation answers `no_conversation`, which is
+   * said in the block and is not an error.
    */
   async function loadConversation(id, before) {
     const key = `${API.conversation} ${id}`;
     try {
       const reply = await call(API.conversation, id, undefined, conversationQuery(before));
-      if (state.open !== id || !isCurrent(state.held[key], reply)) return null;
+      if (state.open !== id || !isCurrent(state.held[key], reply)) return false;
       state.held[key] = { epoch: reply.epoch, revision: reply.revision };
       // Another transcript (a new conversation under the same session)
       // shares no turn numbers with the one held.
@@ -688,28 +780,36 @@ if (typeof document !== 'undefined') {
       state.resumeId = reply.body.resume_id;
       state.turns = mergeTurns(state.turns, reply.body);
       drawTurns();
+      return true;
     } catch (error) {
       // A failed request for older turns must not hide the turns held.
       if (before && error instanceof HttpError && error.status !== 401) {
         if (state.open === id) $('earlier-error').textContent = error.message;
-        return null;
+        return false;
       }
-      return blockFailed(id, error);
+      await blockFailed(id, error);
+      return false;
     }
-    return null;
   }
 
   async function loadEarlier() {
     const id = state.open;
     if (!id || state.turns.length === 0) return null;
-    const lowest = state.turns[0].n;
-    const keepPlace = document.documentElement.scrollHeight;
     $('earlier').disabled = true;
     $('earlier-error').textContent = '';
     try {
-      await serial(() => loadConversation(id, lowest));
-      // The older turns land above the reader's place; keep the place.
-      window.scrollBy(0, document.documentElement.scrollHeight - keepPlace);
+      // The lowest turn is read when this request's turn in the queue
+      // comes: a refresh queued before it may have replaced the turns.
+      await serial(async () => {
+        if (state.open !== id) return null;
+        const lowest = earlierBefore(state.turns);
+        if (lowest == null) return null;
+        const keepPlace = document.documentElement.scrollHeight;
+        await loadConversation(id, lowest);
+        // The older turns land above the reader's place; keep the place.
+        window.scrollBy(0, document.documentElement.scrollHeight - keepPlace);
+        return null; // serial's callers all resolve to null
+      });
     } finally {
       $('earlier').disabled = false;
     }
