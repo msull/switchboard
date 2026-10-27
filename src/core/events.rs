@@ -21,6 +21,19 @@ impl AppCore {
         }
     }
 
+    /// Mark a send to `id` as not the owner's, so the prompt it becomes
+    /// leaves the session's ask standing. Only an asking session with a
+    /// running pane is marked: nothing reaches a pane that is gone, so
+    /// no prompt would consume the mark.
+    pub(super) fn mark_relayed(&mut self, id: RecordId) {
+        if self.session(id).is_some_and(|s| s.asking.is_some())
+            && self.is_running(id)
+            && !self.relayed.contains(&id)
+        {
+            self.relayed.push(id);
+        }
+    }
+
     /// The new Claude Code session id an event carries for a pane that
     /// Switchboard started, when it differs from the record's: `/clear`
     /// keeps the process and starts a fresh conversation under a new

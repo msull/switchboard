@@ -1073,12 +1073,11 @@ started no turn since it was asked (no typed `UserPromptSubmit` after
 the ask: `SessionRecord::last_prompt_at`; an injected notification does
 not show the ask was taken), whose pane runs, whose card is not on an
 open turn or at a permission dialog, and that holds nothing for the
-owner (the trust question, an outside wait, its own ask) fails the run
-the same way once
-`LOST_PROMPT_AFTER` (three minutes) has passed since the ask: a dialog
-in the pane swallowed the prompt, and no Stop will ever come. Codex has
-no hooks, so a Codex reviewer whose prompt is lost still only gets the
-stall notice.
+owner (the trust question, an outside wait) fails the run the same way
+once `LOST_PROMPT_AFTER` (three minutes) has passed since the ask: a
+dialog in the pane swallowed the prompt, and no Stop will ever come.
+Codex has no hooks, so a Codex reviewer whose prompt is lost still only
+gets the stall notice.
 
 An approval prompt inside the agent (Codex asking to run `gh`, say) is
 invisible the same way, and a round can sit on it for as long as nobody
@@ -2787,6 +2786,16 @@ Schema v14.
     the app and never a wire field, since any socket client could set
     one: everything on `control.sock` is a tool's, `session.prompt`
     included, even from a pane holding its launch token.
+  - A prompt a workflow sends on its own account: a reviewer's
+    `review_first` or `review_round`, the planner's `respond` after a
+    Changes verdict, a Continue re-prompt, and the `/compact` at a
+    Compact hand-off. Each marks an asking session the same way
+    (`AppCore::mark_relayed`, shared with `session.send`). The owner's
+    own words through a workflow (`respond_to_user` for a note,
+    `workflow.object`'s objection, the `owner_round` a rerun opens with)
+    set no mark and clear the ask as a typed send does. A send that
+    becomes a launch's first prompt sets no mark either: the spawn
+    clears the ask.
 - **The supervisor.** Its seed gains one line telling it to run
   `<abs>/switchboard-ask` before it stops on something the owner must
   answer, and its launch flags an allow rule
@@ -2818,7 +2827,10 @@ Known gaps:
 - The `relayed` mark is transient. A send to a running pane that never
   becomes a prompt (Claude Code drops it) leaves the mark until the
   owner's next prompt, which then leaves the ask; a restart between a
-  send and its prompt loses the mark, and the send clears the ask.
+  send and its prompt loses the mark, and the send clears the ask. The
+  hand-off `/compact` is such a send if the hook does not report it as
+  a prompt (not measured). A mark pushed for a Codex reviewer is never
+  consumed, since Codex reports no hooks; it goes with the record.
 - The `started` mark is transient too, while the record's `Working`
   persists. A restart between a `SessionStart` outside a turn (a
   `/clear` after the ask) and the owner's reply loses the mark, the
@@ -2893,6 +2905,10 @@ tag). Schema v15.
 Known gaps:
 
 - Codex panes and shells take plain asks only.
+- A Codex agent's ask is never cleared by a prompt, the owner's or a
+  workflow's: Codex reports no hooks and no turn signal, so only
+  Dismiss question or a new spawn clears it. A Codex turn signal is a
+  separate piece of work.
 - A pane that dies with an answer pending loses it: a new spawn clears
   the ask.
 - A failed write loses the answer; the error toast ("send input to
@@ -4077,6 +4093,11 @@ that never reports any event is no longer blamed by this check.
 its 5 s timeout (whether the log line was already appended is not
 documented), and a turn that then uses no tool for `LOST_PROMPT_AFTER`
 fails as unprompted; any tool use or Stop covers it.
+
+The agent's own standing ask no longer excuses it from the check: a
+workflow's round prompt leaves the ask standing (see Asking the owner),
+and a prompt that was taken stamps `last_prompt_at` whether or not it
+answered, so only a prompt that was lost fails the run.
 
 ## A human gate's own question (2026-10-25)
 

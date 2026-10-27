@@ -314,14 +314,7 @@ impl AppCore {
                     .map_or_else(Vec::new, |id| vec![made(K::Session, id.0)])
             }
             ControlAction::SendInput { id, text } => {
-                // Nothing reaches a pane that is gone, so no prompt
-                // would consume the mark.
-                if self.session(id).is_some_and(|s| s.asking.is_some())
-                    && self.is_running(id)
-                    && !self.relayed.contains(&id)
-                {
-                    self.relayed.push(id);
-                }
+                self.mark_relayed(id);
                 self.session_action(AppAction::SendInput { id, text }, now, out);
                 Vec::new()
             }
