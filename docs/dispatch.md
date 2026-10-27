@@ -1403,6 +1403,15 @@ The hard case, and the one the vocabulary was shaped for. Facts from
   `my-dev` would overwrite each other, which is exactly what a
   resource with `count = 1` prevents.
 
+The block below is the pipeline as this section first wrote it. What
+it grew into on the client project, under the same names, is
+`pipelines/examples/Orchard.toml`: a decisions gate before lanes, two
+reviewers and a fixer on `review-code` with `commits = "one"`, a deploy
+check whose verdict the `inspect` gate shows, an evidence directory and
+an env set on `try`, a `pr` stage of its own, a supervisor block, a
+rebaser and a CI fixer. That file is the one to copy to another
+machine; this block is the one to read for why each mechanism exists.
+
 ```toml
 version = 1
 

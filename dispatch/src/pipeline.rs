@@ -3526,6 +3526,41 @@ ports = [3100, 3199]
         );
     }
 
+    /// The example under `pipelines/examples/` is copied to other machines
+    /// the same way, so it is held to the same bar.
+    #[test]
+    fn the_orchard_example_is_a_pipeline_the_parser_knows() {
+        let text = include_str!("../../pipelines/examples/Orchard.toml");
+        let source: toml::Table = toml::from_str(text).unwrap();
+        let p = Pipeline::parse(text)
+            .unwrap_or_else(|e| panic!("pipelines/examples/Orchard.toml: {e:#}"));
+        p.validate_for_take()
+            .unwrap_or_else(|e| panic!("pipelines/examples/Orchard.toml: {e:#}"));
+        let parsed = toml::Table::try_from(&p).unwrap();
+        keys_survive(&source, &parsed, "", 0);
+        let names: Vec<&str> = p.stages.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "investigate",
+                "decisions",
+                "lanes",
+                "plan",
+                "review",
+                "implement",
+                "review-code",
+                "deploy-check",
+                "inspect",
+                "deploy",
+                "try",
+                "tried",
+                "pr",
+                "ready",
+                "merge"
+            ]
+        );
+    }
+
     fn back_half_refused(from: &str, to: &str, expected: &str) {
         let text = DEPLOYING_BACK_HALF.replace(from, to);
         assert_ne!(text, DEPLOYING_BACK_HALF, "{from}");
