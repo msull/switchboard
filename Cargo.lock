@@ -4706,7 +4706,7 @@ name = "switchboard"
 version = "0.8.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "directories",
  "dispatch-control",
