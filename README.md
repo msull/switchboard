@@ -391,6 +391,7 @@ src/core/
   revision.rs            the read-model fingerprints behind the remote port's revision: every exported view hashed with its time-derived fields held still, and the `changed`/`removed` diff between two passes (and a record's runs as the `runs` collection)
   diff.rs                a changed file's diff as held per ticket, lane and path, when a re-read is due, which unchanged runs fold
   dispatch.rs            Dispatch as the app shows it: the runner's last status as views, decisions answered as calls, a ticket's events and full view read once per change and its timeline, a project's supervisor chip, the console session
+  window_fit.rs          a saved window frame fitted before a window is asked for it: to its display's visible frame and to 8192 device pixels a side; the first launch's frame from the primary display
   tests.rs               state-transition tests for the core
 src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, changes (a branch's commits and files over its base, one file's diff), controller, control (the operations log), dispatch (Dispatch's port), remote (the identity and paired-device files, and the Bonjour advertisement), updates (the release source: the newest release, its bundle fetched and checked, the swap arranged)
 src/adapters/
@@ -403,6 +404,7 @@ src/adapters/
   web.rs                 the remote port's web page: the three files of `web/` built in by path and type, the content security policy and the headers every page file carries
   bonjour.rs             `_switchboard._tcp` over `mdns-sd` while the remote port is on the local network (macOS; a stub elsewhere): the display name with a short id suffix, TXT `v`, `name`, `id`
   dispatch.rs            the Dispatch port's client over <Dispatch data dir>/dispatch.sock, reconnecting after an error; the `dispatch` beside the app's binary
+  displays.rs            the attached displays with their backing scale (promptbox's screen list, `NSScreen` on macOS; empty elsewhere)
   dock.rs                Dock badge with the waiting-session count (macOS)
   controller.rs          the nunchuk over USB serial: a thread owns the port, reconnects, hands events over a channel
   files.rs               project file index: gitignore-aware scan, lazy children, fuzzy match; the existing file a path an agent typed names; `open_pinned`, the descriptor walk the remote port reads a pinned file through (no symlink followed, a FIFO refused, dotenv refused, the version from the inode, change time and size)

@@ -18,6 +18,7 @@ pub mod revision;
 mod sessions;
 pub mod tickets;
 pub mod updates;
+pub mod window_fit;
 mod workflow;
 
 #[cfg(test)]

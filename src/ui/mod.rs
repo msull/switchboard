@@ -221,6 +221,10 @@ pub struct UiState {
     pub jump_to_turn: Option<usize>,
     /// The Prompt Box preview panel's place, tracked per opening.
     pub preview_panel: prompt_box::PreviewPanel,
+    /// The attached displays for the launch hold, read once from `AppKit`
+    /// so its per-frame check does not ask again. Later window opens read
+    /// the list afresh.
+    pub displays: Option<Vec<crate::core::window_fit::Display>>,
     /// Previews for the working set's file cards, one per path.
     pub previews: HashMap<PathBuf, Option<document::Preview>>,
     /// How each file card shows its file: rendered or raw, wrapped or
@@ -363,6 +367,7 @@ impl Default for UiState {
             turn_cursor: None,
             jump_to_turn: None,
             preview_panel: prompt_box::PreviewPanel::default(),
+            displays: None,
             previews: HashMap::new(),
             file_modes: HashMap::new(),
             set_rename: None,

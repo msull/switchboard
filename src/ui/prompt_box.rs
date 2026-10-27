@@ -314,7 +314,9 @@ fn preview_frame(cx: &mut DrawCtx<'_>, ctx: &egui::Context, open: bool, settings
         if let Some(saved) = &settings.preview_frame
             && super::zoom::monitor_attached(&saved.monitor)
         {
-            let r = super::popout::rect_of(saved);
+            let displays = crate::adapters::displays::displays();
+            let fitted = crate::core::window_fit::fit(saved, &displays);
+            let r = super::popout::rect_of(&fitted);
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::OuterPosition(r.min / factor));
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::InnerSize(r.size() / factor));
             return;
