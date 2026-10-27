@@ -4408,17 +4408,16 @@ comment. `.github/dependabot.yml` proposes weekly updates for the cargo
 lockfile (minor and patch grouped into one pull request), the actions,
 and `tests/browser`'s npm lockfile. No record or schema change.
 
-Known gaps: none of the macOS job has run on a runner yet; whether the
-Keychain round trip passes in a headless runner session, and how long
-the job takes against its 45-minute bound, are open until the first
-run. If the Keychain test fails there it is to be marked `#[ignore]`
-with its command in the doc comment; if the job is too slow or flaky,
-its test step drops to `cargo test --locked --lib`. `macos-latest` is
+The first runs settled what was open: both Keychain round-trip tests
+pass in a headless runner session, the tmux adapter tests run for real
+once brew has installed tmux, and the job takes about 5 minutes on a
+warm cache against its 45-minute bound. Known gaps: `macos-latest` is
 moving from macOS 15 to 26, and `macos-15` is the label to pin if the
-move breaks the build. Whether Dependabot proposes `rev` bumps for the
-promptbox git dependency is unknown. Nothing builds or signs the bundle
-in CI, the Swift client stays outside it, and which checks `main`
-requires is the owner's branch-protection setting.
+move breaks the build. Dependabot's first pass proposed no `rev` bump
+for the promptbox git dependency, so whether it ever will is still
+unknown. Nothing builds or signs the bundle in CI, the Swift client
+stays outside it, and which checks `main` requires is the owner's
+branch-protection setting.
 
 The `browser` job runs the web page's `#[ignore]`d browser test on
 `ubuntu-latest`: `ci-apt.sh`, the stable toolchain, node 22, `npm ci`
@@ -4430,12 +4429,13 @@ agent items out. It has no flaky-test retry. Playwright advises
 against caching browsers (the restore costs about what the download
 does), so the cache is an optimisation the job passes without. It is
 advisory: branch protection gets `browser` only after it has passed on
-`main`. Known gaps: the job has not run yet, so its elapsed time
-against the test's 120 s deadline, whether `--with-deps` is needed on
-the runner image, whether node 22 suffices, and whether Linux
+`main`. Its first run on `main` was green: about 11 minutes, nearly all
+the Chromium download before the cache was saved, with the test itself
+24 seconds against its 120 s deadline; node 22 suffices, and Linux
 Chromium keeps the `__Host-` cookie and connects `wss://` to the
-self-signed IP host as the macOS build does are open until the first
-run.
+self-signed IP host as the macOS build does. Known gaps: whether
+`--with-deps` is needed on the runner image, and the job's time once
+the cache restores.
 
 ## Open questions
 
