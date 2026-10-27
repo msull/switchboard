@@ -2509,6 +2509,16 @@ Later: a notes-only review stage before the sign-off; posting the
 approval or a request for changes to the provider from the decision;
 a PR that moves after sign-off asking again.
 
+`pipelines/examples/Orchard.pr.toml` is that tail as the client project
+runs it, under the Orchard names: an `investigate` stage first, whose
+notes end with a `QUEUE: yes` or `QUEUE: no` line; `review-code` with
+two reviewers whose findings are a question; `deploy-check`; `inspect`
+as the decision to queue on the stack, with its own question; then
+`deploy`, `try` and `tried` holding `my-dev`, `ready` with
+`checks = "none"` and `merge`. It is the file to copy for reading
+someone else's change across several repositories and trying it on one
+shared stack.
+
 ## Budget
 
 Budgets are reporting, not enforcement. Dispatch reads each session's

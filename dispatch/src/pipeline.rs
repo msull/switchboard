@@ -3561,6 +3561,36 @@ ports = [3100, 3199]
         );
     }
 
+    /// The pull-request companion of that example: someone else's pull
+    /// requests, read, tried on the stack and signed off.
+    #[test]
+    fn the_orchard_pull_request_example_is_a_pipeline_the_parser_knows() {
+        let text = include_str!("../../pipelines/examples/Orchard.pr.toml");
+        let source: toml::Table = toml::from_str(text).unwrap();
+        let p = Pipeline::parse(text)
+            .unwrap_or_else(|e| panic!("pipelines/examples/Orchard.pr.toml: {e:#}"));
+        p.validate_for_take()
+            .unwrap_or_else(|e| panic!("pipelines/examples/Orchard.pr.toml: {e:#}"));
+        assert_eq!(p.source, Source::PullRequest);
+        let parsed = toml::Table::try_from(&p).unwrap();
+        keys_survive(&source, &parsed, "", 0);
+        let names: Vec<&str> = p.stages.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "investigate",
+                "review-code",
+                "deploy-check",
+                "inspect",
+                "deploy",
+                "try",
+                "tried",
+                "ready",
+                "merge"
+            ]
+        );
+    }
+
     fn back_half_refused(from: &str, to: &str, expected: &str) {
         let text = DEPLOYING_BACK_HALF.replace(from, to);
         assert_ne!(text, DEPLOYING_BACK_HALF, "{from}");
