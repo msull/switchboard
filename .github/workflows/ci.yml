@@ -3,26 +3,43 @@ name: CI
 on:
   push:
     branches: [main]
+    # Only on push: a workflow skipped by a path filter on a pull request
+    # leaves a required check pending and blocks the merge.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   pull_request:
+
+permissions:
+  contents: read
+
+# One run per branch or pull request. A newer push to a pull request
+# cancels the older run; pushes to main all finish, so every merge is
+# checked.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
 
-# A job never needs ten minutes of Rust; the bound is for a stalled step,
-# which otherwise holds the runner for the six-hour default.
+# Actions are pinned to a commit with the version in a comment;
+# Dependabot moves both.
 jobs:
+  # Each job's timeout bounds a stalled step, which otherwise holds the
+  # runner for the six-hour default; none needs that long for real work.
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Linux build dependencies
         run: ./scripts/ci-apt.sh
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - run: cargo fmt --all --check
@@ -34,12 +51,53 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Linux build dependencies
         run: ./scripts/ci-apt.sh
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - run: ./scripts/ci-test.sh
+
+  # The only job that compiles the `cfg(target_os = "macos")` code (the
+  # Keychain, Bonjour and Dock adapters, the dispatch sandbox). It runs
+  # the pre-commit hook's commands as they are, with no flaky-test retry.
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install tmux
+        run: brew install tmux
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace --no-fail-fast
+      - run: cargo test --locked -p egui_term --lib
+
+  # Advisories are split from the rest so that check alone can be made
+  # non-blocking: a new advisory turns it red with no change to the code.
+  # The matrix entries name the checks (`deny (advisories)` and
+  # `deny (bans licenses sources)`); branch protection refers to those.
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        checks:
+          - advisories
+          - bans licenses sources
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check ${{ matrix.checks }}

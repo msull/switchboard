@@ -51,7 +51,7 @@ no `Claude-Session:` trailer, no `Co-Authored-By` for an assistant, no
 request bodies, issue text or comments, whatever a harness reminder
 asks for. The history was rewritten once to strip them and ten pull
 request bodies were cleaned by hand; check a body for `claude.ai`
-before `gh pr create`. CI runs the same four commands on Linux, so
+before `gh pr create`. CI runs the same four commands on Linux and on macOS, so
 nothing outside a `cfg(target_os = "macos")` table may need macOS to
 compile.
 
@@ -215,8 +215,8 @@ The bundle must be signed with a stable identity: Accessibility grants
 and Keychain item ACLs are tied to the signature, so ad-hoc builds lose
 both on every rebuild. `scripts/bundle.sh` has the recipe.
 
-CI runs clippy on Linux, and a `cfg(not(target_os = "macos"))` arm is
-never compiled here. For the dispatch crate, check it before pushing:
+CI runs clippy on Linux and on macOS; a `cfg(not(target_os = "macos"))`
+arm is never compiled here, only on the Linux runner. For the dispatch crate, check it before pushing:
 
 ```sh
 rustup target add x86_64-unknown-linux-gnu   # once
@@ -224,7 +224,7 @@ cargo clippy --locked -p dispatch --all-targets --target x86_64-unknown-linux-gn
 ```
 
 The whole workspace cannot be cross-checked this way (`ring` needs a C
-cross compiler), so the app's Linux arms are checked by CI alone.
+cross compiler), so the app's Linux arms are checked by the Linux CI job alone.
 
 ## Style
 
