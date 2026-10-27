@@ -1,6 +1,6 @@
 //! Desktop entry point: assembles the real adapters and starts the app.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use eframe::egui_wgpu::{self, wgpu};
 
@@ -17,6 +17,7 @@ use switchboard::adapters::store::JsonStore;
 use switchboard::adapters::tmux::TmuxHost;
 use switchboard::adapters::transcript::ClaudeTranscripts;
 use switchboard::app::Services;
+use switchboard::core::window_fit;
 
 /// Screen points are whole numbers far below what `f32` counts exactly.
 #[allow(clippy::cast_precision_loss)]
@@ -97,6 +98,41 @@ fn tmux_host(data_dir: &std::path::Path) -> TmuxHost {
     host
 }
 
+/// Where the window was last seen, if that display is attached, fitted
+/// to it and to the GPU's surface limit, which a frame saved on a larger
+/// setup would otherwise exceed before any error handler exists.
+///
+/// With nothing saved, the primary display's visible frame as an
+/// explicit size. Native points: zoom is applied from the first frame on.
+fn main_viewport(store: &JsonStore, data_dir: &Path) -> egui::ViewportBuilder {
+    let viewport = egui::ViewportBuilder::default().with_min_inner_size([600.0, 400.0]);
+    let loaded = store.load_settings().main_window;
+    let displays = switchboard::adapters::displays::displays();
+    let screens: Vec<&str> = displays.iter().map(|d| d.name.as_str()).collect();
+    let saved = loaded
+        .clone()
+        .filter(|f| switchboard::ui::zoom::monitor_attached(&f.monitor))
+        .map(|f| window_fit::fit(&f, &displays));
+    let opening = saved
+        .clone()
+        .or_else(|| window_fit::first_launch(&displays));
+    let decision = format!(
+        "main window: saved {loaded:?}; displays {screens:?}; restoring {saved:?}; opening {opening:?}"
+    );
+    log::info!("{decision}");
+    // A Dock launch has no stderr, so the decision is also left in the
+    // data directory for the last launch.
+    if let Err(e) = std::fs::write(data_dir.join("launch.log"), format!("{decision}\n")) {
+        log::warn!("could not write launch.log: {e}");
+    }
+    match opening {
+        Some(f) => viewport
+            .with_position([points(f.x), points(f.y)])
+            .with_inner_size([points(f.w), points(f.h)]),
+        None => viewport.with_inner_size([1100.0, 720.0]),
+    }
+}
+
 /// The GPU device's limits. egui asks for a surface of at most 8192
 /// pixels a side, enough for a 4K display, but a display macOS reports
 /// at an odd scale (a Sidecar screen counted at 5120 points and doubled
@@ -168,42 +204,25 @@ fn main() -> eframe::Result {
         width: 256,
         height: 256,
     };
-    // Where the window was last seen, if that display is attached: a
-    // window zoomed to its screen comes back as that frame. Otherwise
-    // zoomed to the main screen, with a size to fall back to when
-    // un-zoomed. Native points: zoom is applied from the first frame on.
     let store = JsonStore::new(data_dir.clone());
-    let viewport = egui::ViewportBuilder::default().with_min_inner_size([600.0, 400.0]);
-    let loaded = store.load_settings().main_window;
-    let screens: Vec<String> = promptbox::adapters::screens::screens()
-        .into_iter()
-        .map(|s| s.name)
-        .collect();
-    let saved = loaded
-        .clone()
-        .filter(|f| switchboard::ui::zoom::monitor_attached(&f.monitor));
-    let decision =
-        format!("main window: saved {loaded:?}; displays {screens:?}; restoring {saved:?}");
-    log::info!("{decision}");
-    // A Dock launch has no stderr, so the decision is also left in the
-    // data directory for the last launch.
-    if let Err(e) = std::fs::write(data_dir.join("launch.log"), format!("{decision}\n")) {
-        log::warn!("could not write launch.log: {e}");
-    }
-    let viewport = match saved {
-        Some(f) => viewport
-            .with_position([points(f.x), points(f.y)])
-            .with_inner_size([points(f.w), points(f.h)]),
-        None => viewport
-            .with_inner_size([1100.0, 720.0])
-            .with_maximized(true),
-    };
-    let options = native_options(viewport.with_icon(icon));
+    let options = native_options(main_viewport(&store, &data_dir).with_icon(icon));
 
     eframe::run_native(
         "Switchboard",
         options,
         Box::new(move |cc| {
+            // An over-limit resize of a live window is a device error;
+            // unhandled, wgpu panics inside an AppKit callback, which
+            // aborts. One device serves every viewport. The launch
+            // surface is configured before this runs, so the fit above
+            // is what protects the first frame.
+            if let Some(render) = &cc.wgpu_render_state {
+                render
+                    .device
+                    .on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
+                        log::error!("wgpu: {e}");
+                    }));
+            }
             // Image previews decode through egui's loaders.
             egui_extras::install_image_loaders(&cc.egui_ctx);
             // Fonts and styles apply from the next frame on, so they go

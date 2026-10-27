@@ -13847,3 +13847,84 @@ mod tickets {
         assert_eq!(read.events[0].text, "joined #2 agent");
     }
 }
+
+mod window_fit {
+    use super::super::window_fit::{
+        Area, Display, MAX_SURFACE_PIXELS, TITLE_BAR, first_launch, fit,
+    };
+    use super::WindowFrame;
+
+    fn frame(x: i32, y: i32, w: i32, h: i32, monitor: &str) -> WindowFrame {
+        WindowFrame {
+            x,
+            y,
+            w,
+            h,
+            monitor: monitor.into(),
+        }
+    }
+
+    fn display(name: &str, x: i32, y: i32, w: i32, h: i32, scale: f64) -> Display {
+        let frame = Area { x, y, w, h };
+        Display {
+            name: name.into(),
+            frame,
+            // A menu bar on top and a Dock below.
+            visible: Area {
+                x,
+                y: y + 25,
+                w,
+                h: h - 25 - 80,
+            },
+            scale,
+        }
+    }
+
+    #[test]
+    fn an_oversize_frame_fits_the_surface_limit_and_the_visible_frame() {
+        let studio = display("Studio", 0, 0, 5120, 2880, 2.0);
+        let fitted = fit(
+            &frame(-300, -200, 20000, 12000, "Studio"),
+            std::slice::from_ref(&studio),
+        );
+        assert_eq!(fitted.w, 4096, "8192 device pixels at 2x");
+        assert!(fitted.h <= studio.visible.h - TITLE_BAR);
+        assert!(fitted.x >= studio.visible.x && fitted.y >= studio.visible.y);
+        assert!(fitted.x + fitted.w <= studio.visible.x + studio.visible.w);
+        assert!(fitted.y + TITLE_BAR + fitted.h <= studio.visible.y + studio.visible.h);
+        assert_eq!(fitted.monitor, "Studio");
+        assert_eq!(fit(&fitted, &[studio]), fitted, "fitting is idempotent");
+    }
+
+    #[test]
+    fn a_display_left_of_the_primary_keeps_the_frame_in_its_negative_range() {
+        let laptop = display("Built-in", 0, 0, 1512, 982, 2.0);
+        let left = display("DELL", -3440, -400, 3440, 1440, 1.0);
+        let displays = [laptop, left.clone()];
+        let fitted = fit(&frame(-3600, -500, 4000, 2000, ""), &displays);
+        assert_eq!(fitted.x, -3440);
+        assert_eq!(fitted.w, 3440);
+        assert_eq!(fitted.y, left.visible.y);
+        assert_eq!(fitted.h, left.visible.h - TITLE_BAR);
+        let inside = frame(-2000, 0, 800, 600, "DELL");
+        assert_eq!(fit(&inside, &displays), inside, "a frame that fits is kept");
+    }
+
+    #[test]
+    fn with_no_display_only_the_size_is_capped() {
+        let fitted = fit(&frame(-50, 70, 20000, 300, "Gone"), &[]);
+        assert_eq!(fitted, frame(-50, 70, MAX_SURFACE_PIXELS, 300, "Gone"));
+    }
+
+    #[test]
+    fn first_launch_fills_the_primary_visible_frame() {
+        assert_eq!(first_launch(&[]), None);
+        let laptop = display("Built-in", 0, 0, 1512, 982, 2.0);
+        let other = display("DELL", -3440, -400, 3440, 1440, 1.0);
+        let v = laptop.visible;
+        assert_eq!(
+            first_launch(&[laptop, other]),
+            Some(frame(v.x, v.y, v.w, v.h - TITLE_BAR, "Built-in"))
+        );
+    }
+}

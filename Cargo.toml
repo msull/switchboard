@@ -71,7 +71,7 @@ ureq = "3"
 # Native calls stay behind `cfg(target_os = "macos")`; CI builds on Linux.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSResponder"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSResponder", "NSScreen"] }
 objc2-foundation = { version = "0.3", features = ["NSString"] }
 security-framework = "3"
 mdns-sd = "0.21"

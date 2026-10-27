@@ -799,12 +799,14 @@ Built:
 - Dialogs, the Go-to palette, the Environment dialog, and the Run tab
   restyled with the same helpers; notices and the host error are toasts
   at the top centre. Dark theme is the token inversion from the hand-off.
-- The window opens maximized, on the screen it showed last: the current
-  board or session is kept in `settings.json` (`last_view`, written
-  whenever the view moves) and pushed back onto the view stack when the
-  store loads, if the project or record still exists. Restoring is only
-  a view change: nothing is launched or resumed. A document preview
-  remembers its board.
+- The window opens filling the primary display's visible frame, by an
+  explicit size rather than the system's zoomed state (which the app
+  cannot bound to the GPU's surface limit), on the screen it showed
+  last. The current board or session is kept in `settings.json`
+  (`last_view`, written whenever the view moves) and pushed back onto
+  the view stack when the store loads, if the project or record still
+  exists. Restoring is only a view change: nothing is launched or
+  resumed. A document preview remembers its board.
 
 Known gaps:
 
@@ -1287,6 +1289,13 @@ display and clamps it to that screen after the window exists, so for
 the first moment after launch the main window is asked back to its
 saved frame instead of being saved where the system put it. A window zoomed to its screen comes back as that frame rather
 than as a zoomed state, which macOS would put on the main screen.
+
+Every restore (the main window at launch, a pop-out, the Dispatch
+window, the preview panel, and the launch hold) fits the saved frame
+to its display's visible frame and to 8192 device pixels a side
+(`core::window_fit::fit`) after the attached check, and the launch log
+records the fitted frame next to the saved one. With nothing saved, the
+main window opens at the primary display's visible frame.
 
 ## Zoom per display (2026-09-24)
 
@@ -4149,6 +4158,40 @@ Known gaps, left out:
   read in `pump_live`, the mic error mutex written from the audio error
   callback); whether cpal calls that callback on its own thread was not
   checked. A fix is upstream plus a rev bump.
+
+## Window frames fit the surface limit (2026-10-26)
+
+A frame saved on a larger display setup asked for a window bigger than
+the GPU makes a surface (and, maximized, a size the app could not
+bound); wgpu's surface error had no handler, so its default panic ran
+inside an `AppKit` callback and aborted the app at launch.
+`core::window_fit` fits a frame to its display (the one it names, else
+the one holding its centre, else the first): the size to `8192 / scale`
+points a side and to the visible frame less a title bar (`TITLE_BAR`, 32
+points, measured on macOS 26), the origin inside the visible frame. The
+displays and their backing scales come from `adapters::displays`
+(promptbox's screen list with `NSScreen.backingScaleFactor`); with no
+display listed the fit is scale 1 and the 8192 cap alone. The fit runs
+wherever a stored frame is read: `main.rs` before eframe starts,
+`popout::opening` (pop-outs and the Dispatch window), `hold_at_launch`,
+and the preview panel's restore. Each window open reads the display list
+afresh, so a display attached during the run is known; only the launch
+hold keeps one read in `UiState` for its per-frame check. A stored
+oversize frame stays on disk until the window settles at its fitted frame and the settle path saves
+that. The first launch with nothing saved opens at the primary display's
+visible frame, position and size explicit, in place of `with_maximized`.
+The wgpu device gets an uncaptured-error handler in the app creator, so
+a later over-limit configure is logged. No record or schema change.
+
+Known gaps: a live window dragged or resized past the limit logs the
+error, and whether it then keeps drawing its previous surface or goes
+blank was not established. The launch fit uses the displays listed when
+`main` runs; a display that attaches later in startup (Sidecar) is not
+seen. The ceiling is a fixed 8192 device pixels, so a frame of 4097 to
+8192 points on a 2x display opens at 4096 although the GPU could draw
+more. `TITLE_BAR` was measured on one macOS release; an older one with a
+shorter title bar opens the first window a few points short of the
+visible frame.
 
 ## Open questions
 

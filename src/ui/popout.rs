@@ -14,7 +14,8 @@ use egui::{Context, Key, Modifiers, Ui, ViewportBuilder, ViewportCommand, Viewpo
 const HOLD_AT_LAUNCH: Duration = Duration::from_millis(1500);
 
 use super::{DrawCtx, session, side_panel, theme, zoom};
-use crate::core::{AppAction, Popout, RecordId, SessionKind, View, WindowFrame};
+use crate::core::window_fit::{Display, fit};
+use crate::core::{AppAction, AppCore, Popout, RecordId, SessionKind, View, WindowFrame};
 
 /// Size of a new window before it is moved or resized.
 const DEFAULT_SIZE: egui::Vec2 = egui::vec2(1100.0, 780.0);
@@ -79,10 +80,13 @@ fn dispatch_window(cx: &mut DrawCtx<'_>, ctx: &Context) {
     let mut builder = ViewportBuilder::default()
         .with_title("Dispatch · Switchboard")
         .with_inner_size(DEFAULT_SIZE);
-    let opened = *cx
-        .state
-        .dispatch_opened
-        .get_or_insert_with(|| opening(page.frame.as_ref(), factor));
+    let opened = *cx.state.dispatch_opened.get_or_insert_with(|| {
+        opening(
+            page.frame.as_ref(),
+            factor,
+            &crate::adapters::displays::displays(),
+        )
+    });
     if let Some((pos, size)) = opened {
         builder = builder.with_position(pos).with_inner_size(size);
     }
@@ -158,11 +162,13 @@ fn window(cx: &mut DrawCtx<'_>, ctx: &Context, popout: &Popout) {
     let mut builder = ViewportBuilder::default()
         .with_title(format!("{} · Switchboard", record.name))
         .with_inner_size(DEFAULT_SIZE);
-    let opened = *cx
-        .state
-        .popout_opened
-        .entry(id)
-        .or_insert_with(|| opening(popout.frame.as_ref(), factor));
+    let opened = *cx.state.popout_opened.entry(id).or_insert_with(|| {
+        opening(
+            popout.frame.as_ref(),
+            factor,
+            &crate::adapters::displays::displays(),
+        )
+    });
     if let Some((pos, size)) = opened {
         builder = builder.with_position(pos).with_inner_size(size);
     }
@@ -195,13 +201,18 @@ fn window(cx: &mut DrawCtx<'_>, ctx: &Context, popout: &Popout) {
 }
 
 /// Where a window first opens, in its own zoomed points: its saved
-/// frame, unless that display is gone. Fixed when the window is first
-/// shown and given unchanged after, so the builder never moves it.
-fn opening(saved: Option<&WindowFrame>, factor: f32) -> Option<(egui::Pos2, egui::Vec2)> {
+/// frame fitted to its display and the surface limit, unless that
+/// display is gone. Fixed when the window is first shown and given
+/// unchanged after, so the builder never moves it.
+fn opening(
+    saved: Option<&WindowFrame>,
+    factor: f32,
+    displays: &[Display],
+) -> Option<(egui::Pos2, egui::Vec2)> {
     saved
         .filter(|f| zoom::monitor_attached(&f.monitor))
         .map(|f| {
-            let r = rect_of(f);
+            let r = rect_of(&fit(f, displays));
             (r.min / factor, r.size() / factor)
         })
 }
@@ -288,7 +299,11 @@ pub fn remember_main_window(cx: &mut DrawCtx<'_>, ctx: &Context, monitor: String
     let now = frame_of(inner * factor, outer * factor, monitor);
     let first = *cx.state.first_frame.get_or_insert_with(Instant::now);
     if first.elapsed() < HOLD_AT_LAUNCH {
-        hold_at_launch(cx, ctx, &now, factor);
+        let displays = cx
+            .state
+            .displays
+            .get_or_insert_with(crate::adapters::displays::displays);
+        hold_at_launch(cx.core, ctx, &now, factor, displays);
         return;
     }
     let seen = cx
@@ -303,14 +318,27 @@ pub fn remember_main_window(cx: &mut DrawCtx<'_>, ctx: &Context, monitor: String
 /// The saved frame is asked for again while the window is elsewhere,
 /// in the window's own zoomed points, which is what viewport commands
 /// take.
-fn hold_at_launch(cx: &DrawCtx<'_>, ctx: &Context, now: &WindowFrame, factor: f32) {
-    let Some(saved) = cx.core.settings().main_window.as_ref() else {
+fn hold_at_launch(
+    core: &AppCore,
+    ctx: &Context,
+    now: &WindowFrame,
+    factor: f32,
+    displays: &[Display],
+) {
+    let Some(saved) = core.settings().main_window.as_ref() else {
         return;
     };
-    if !zoom::monitor_attached(&saved.monitor) || saved == now {
+    if !zoom::monitor_attached(&saved.monitor) {
         return;
     }
-    let r = rect_of(saved);
+    // Fitted as at launch, or the hold would ask for the oversize frame
+    // again; a fitted frame fits to itself, so a window already there
+    // is left alone.
+    let saved = fit(saved, displays);
+    if saved == *now {
+        return;
+    }
+    let r = rect_of(&saved);
     ctx.send_viewport_cmd(ViewportCommand::OuterPosition(r.min / factor));
     ctx.send_viewport_cmd(ViewportCommand::InnerSize(r.size() / factor));
     ctx.request_repaint_after(Duration::from_millis(100));
@@ -340,4 +368,48 @@ fn shortcuts(cx: &mut DrawCtx<'_>, ctx: &Context, id: &RecordId, kind: SessionKi
         cx.state.terminal_open = !cx.state.terminal_open;
     }
     super::side_tab_keys(cx, ctx, true);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::window_fit::{Area, MAX_SURFACE_PIXELS};
+
+    fn display(scale: f64) -> Display {
+        let area = |w, h| Area { x: 0, y: 0, w, h };
+        Display {
+            name: "Built-in".to_owned(),
+            frame: area(1440, 900),
+            visible: area(1440, 860),
+            scale,
+        }
+    }
+
+    fn oversize() -> WindowFrame {
+        WindowFrame {
+            x: 0,
+            y: 0,
+            w: 20000,
+            h: 12000,
+            monitor: String::new(),
+        }
+    }
+
+    #[test]
+    fn an_oversize_saved_frame_opens_under_the_surface_limit() {
+        let saved = oversize();
+        let cap = points(MAX_SURFACE_PIXELS);
+        let (_, native) = opening(Some(&saved), 1.0, &[]).expect("opens at the saved frame");
+        assert!(native.x <= cap && native.y <= cap);
+        let (_, zoomed) = opening(Some(&saved), 2.0, &[]).expect("opens at the saved frame");
+        assert_eq!(zoomed, native / 2.0);
+        assert_eq!(opening(None, 1.0, &[]), None);
+    }
+
+    #[test]
+    fn a_saved_frame_opens_clamped_to_its_display_in_zoomed_points() {
+        let (pos, size) = opening(Some(&oversize()), 2.0, &[display(2.0)]).expect("opens");
+        assert_eq!(pos, egui::pos2(0.0, 0.0));
+        assert_eq!(size, egui::vec2(720.0, 414.0));
+    }
 }

@@ -8,6 +8,7 @@ pub mod control;
 pub mod controller;
 pub mod diff;
 pub mod dispatch;
+pub mod displays;
 pub mod dock;
 pub mod dotenv;
 pub mod fakes;
