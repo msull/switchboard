@@ -3876,7 +3876,7 @@ and reaches the binary, the bundle's `Info.plist` and the host's
 `scripts/release.sh` publishes that version as a GitHub release tagged
 `v<version>` with the signed bundle, its SHA-256 and the changelog
 section as notes. The app updates itself from there: `core::updates`
-checks twenty seconds after launch and hourly through the
+checks thirty seconds after launch and once a day through the
 `UpdateSource` port (`adapters::updates::GitHubReleases`, the fake in
 tests), offers a newer release as a notice and a rail item, downloads
 it on a click to a staging directory, checks the zip against its
@@ -3888,11 +3888,31 @@ offered; a bare binary or an unsigned bundle refuses to install.
 
 `Settings::check_for_updates` (on by default; a `settings.json` from
 before it reads as on, so it needs no schema step) gates only the
-scheduled check: off, the tick at launch and the hourly one do nothing,
+scheduled check: off, the tick at launch and the daily one do nothing,
 while Check for updates in the Settings menu still looks and a release
 it finds is offered, downloaded and installed as before. The schedule
 counts from launch and from the last check of either kind, so turning
-the setting back on checks at once unless one ran within the hour.
+the setting back on checks at once unless one was answered within the
+day.
+
+The schedule is on the wall clock: `settings.json` keeps when the host
+last answered, so a relaunch or a sleep does not move the next check,
+and the day is stretched by up to thirty minutes derived from that
+answer's second, so copies that answered at different times ask at
+different minutes; the 30 s launch delay applies on every launch. The
+reply's `ETag` is kept with the release it described and sent back as
+`If-None-Match`, and a 304 judges that kept release, which is also
+offered again after a relaunch. A host that answers with an error
+(403, 429, 5xx) is asked again only after the day; a check that got no
+HTTP answer at all is retried after an hour; a scheduled failure is
+quiet and leaves an offer in place, while a click on Check for updates
+shows its reason. The check request alone is capped at 1 MiB and
+follows redirects only over `https` to `api.github.com` or
+`github.com`; the download path is not pinned or capped. Known gaps:
+an unauthenticated 304 may still count against GitHub's 60 an hour, so
+the `ETag` is relied on only to spare the body and the parse, and no
+system-wake notification is observed (a due check starts on the next
+tick).
 
 Settings' "What's new" shows the changelog. The built-in one is
 `CHANGELOG.md` compiled in (`core::changelog`, `include_str!`), from the

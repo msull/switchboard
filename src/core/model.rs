@@ -165,9 +165,24 @@ pub struct Settings {
     /// Dispatch runner and resolved only by `switchboard-env`.
     pub env_sets: Vec<EnvSet>,
     /// Look for a newer release on a schedule: once the app has
-    /// settled, then hourly. Off, only "Check for updates" looks; a
+    /// settled, then once a day. Off, only "Check for updates" looks; a
     /// file written before this field existed reads as on.
     pub check_for_updates: bool,
+    /// When the release host last answered, and the release it last
+    /// described with the `ETag` that vouches for it.
+    pub update_check: UpdateCheckRecord,
+}
+
+/// What the last answered update check left behind.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateCheckRecord {
+    /// Unix seconds when the release host last answered (any status).
+    pub checked_at: Option<u64>,
+    /// The `ETag` of the last 200 that carried a release.
+    pub etag: Option<String>,
+    /// The release that 200 described, newer or not; what a 304 vouches for.
+    pub release: Option<crate::ports::updates::Release>,
 }
 
 /// A page (not a session) in a window of its own.
@@ -204,6 +219,7 @@ impl Default for Settings {
             dispatch_window: None,
             env_sets: Vec::new(),
             check_for_updates: true,
+            update_check: UpdateCheckRecord::default(),
         }
     }
 }

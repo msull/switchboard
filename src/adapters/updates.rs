@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-use crate::ports::updates::{Release, UpdateSource};
+use crate::ports::updates::{CheckOutcome, Release, UpdateSource};
 
 /// How long the whole download may take.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
@@ -22,6 +22,13 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const API_TIMEOUT: Duration = Duration::from_secs(30);
 /// More than any bundle will be; a reply past it is refused.
 const ZIP_LIMIT: u64 = 256 << 20;
+/// More than the release listing will be; a reply past it is refused.
+const API_BODY_LIMIT: u64 = 1 << 20;
+/// Redirects the check follows before it gives up.
+const API_HOPS: usize = 3;
+/// The hosts the check may be sent to: the API, and the site a
+/// release's page is on.
+const CHECK_HOSTS: [&str; 2] = ["api.github.com", "github.com"];
 const USER_AGENT: &str = concat!("switchboard/", env!("CARGO_PKG_VERSION"));
 
 /// The releases of one GitHub repository.
@@ -92,6 +99,74 @@ fn agent(timeout: Duration) -> ureq::Agent {
             .user_agent(USER_AGENT)
             .build(),
     )
+}
+
+/// The check's own agent: it follows no redirect by itself, so a 304
+/// and every 3xx reach `check`, which follows only the hosts it trusts.
+fn check_agent() -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(API_TIMEOUT))
+            .user_agent(USER_AGENT)
+            .max_redirects(0)
+            .build(),
+    )
+}
+
+/// Where a redirect from `current` to `location` goes, when the check
+/// may follow it: `https` to one of `CHECK_HOSTS` exactly (no port, no
+/// user), or a path on the current host. Pure, so a test covers it.
+pub fn next_hop(current: &str, location: &str) -> Result<String, String> {
+    let target = if location.starts_with('/') && !location.starts_with("//") {
+        let uri: ureq::http::Uri = current
+            .parse()
+            .map_err(|e| format!("{current} is not a URL: {e}"))?;
+        let authority = uri
+            .authority()
+            .ok_or_else(|| format!("{current} has no host"))?;
+        format!("https://{authority}{location}")
+    } else {
+        location.to_owned()
+    };
+    let refused = || format!("redirect to {location} refused");
+    let uri: ureq::http::Uri = target.parse().map_err(|_| refused())?;
+    let authority = uri.authority().ok_or_else(refused)?;
+    if uri.scheme_str() != Some("https") || !CHECK_HOSTS.contains(&authority.as_str()) {
+        return Err(refused());
+    }
+    Ok(target)
+}
+
+/// The listing's body, read up to `API_BODY_LIMIT`, as a check outcome.
+fn read_listing(reply: &mut ureq::http::Response<ureq::Body>, url: &str) -> CheckOutcome {
+    let etag = reply
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let text = match reply
+        .body_mut()
+        .with_config()
+        .limit(API_BODY_LIMIT)
+        .lossy_utf8(true)
+        .read_to_string()
+    {
+        Ok(text) => text,
+        Err(ureq::Error::BodyExceedsLimit(_)) => {
+            return CheckOutcome::Http {
+                status: 200,
+                detail: "the reply is over 1 MiB".into(),
+            };
+        }
+        Err(e) => return CheckOutcome::NoAnswer(format!("{url}: {e}")),
+    };
+    match parse_latest(&text) {
+        Ok(release) => CheckOutcome::Answer { release, etag },
+        Err(detail) => CheckOutcome::Http {
+            status: 200,
+            detail,
+        },
+    }
 }
 
 fn fetch_text(url: &str, timeout: Duration) -> Result<String, String> {
@@ -186,21 +261,75 @@ fi
 
 impl UpdateSource for GitHubReleases {
     fn latest(&self) -> Result<Option<Release>, String> {
-        let url = format!("https://api.github.com/repos/{}/releases/latest", self.repo);
-        match agent(API_TIMEOUT)
-            .get(&url)
-            .header("Accept", "application/vnd.github+json")
-            .call()
-        {
-            Ok(mut reply) => parse_latest(
-                &reply
-                    .body_mut()
-                    .read_to_string()
-                    .map_err(|e| format!("{url}: {e}"))?,
-            ),
-            // No release yet.
-            Err(ureq::Error::StatusCode(404)) => Ok(None),
-            Err(e) => Err(format!("{url}: {e}")),
+        match self.check(None) {
+            CheckOutcome::Answer { release, .. } => Ok(release),
+            // Unreachable: `check(None)` sends no `If-None-Match`, so the
+            // host has nothing to answer 304 to.
+            CheckOutcome::NotModified => Err("the release host reported no change".into()),
+            CheckOutcome::NoAnswer(reason) | CheckOutcome::Http { detail: reason, .. } => {
+                Err(reason)
+            }
+        }
+    }
+
+    /// One request, sent with the `ETag` when there is one, following
+    /// at most `API_HOPS` redirects and only to `CHECK_HOSTS`.
+    fn check(&self, etag: Option<&str>) -> CheckOutcome {
+        let agent = check_agent();
+        let mut url = format!("https://api.github.com/repos/{}/releases/latest", self.repo);
+        let mut redirected = 0;
+        for _ in 0..=API_HOPS {
+            let mut request = agent
+                .get(&url)
+                .header("Accept", "application/vnd.github+json");
+            if let Some(etag) = etag {
+                request = request.header("If-None-Match", etag);
+            }
+            let mut reply = match request.call() {
+                Ok(reply) => reply,
+                // No release yet.
+                Err(ureq::Error::StatusCode(404)) => {
+                    return CheckOutcome::Answer {
+                        release: None,
+                        etag: None,
+                    };
+                }
+                Err(ureq::Error::StatusCode(status)) => {
+                    return CheckOutcome::Http {
+                        status,
+                        detail: format!("{url} answered {status}"),
+                    };
+                }
+                Err(e) => return CheckOutcome::NoAnswer(format!("{url}: {e}")),
+            };
+            let status = reply.status().as_u16();
+            match status {
+                200 => return read_listing(&mut reply, &url),
+                304 => return CheckOutcome::NotModified,
+                301 | 302 | 307 | 308 => {
+                    let location = reply
+                        .headers()
+                        .get("location")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_owned();
+                    redirected = status;
+                    match next_hop(&url, &location) {
+                        Ok(next) => url = next,
+                        Err(detail) => return CheckOutcome::Http { status, detail },
+                    }
+                }
+                _ => {
+                    return CheckOutcome::Http {
+                        status,
+                        detail: format!("{url} answered {status}"),
+                    };
+                }
+            }
+        }
+        CheckOutcome::Http {
+            status: redirected,
+            detail: format!("more than {API_HOPS} redirects"),
         }
     }
 
@@ -290,6 +419,34 @@ impl UpdateSource for GitHubReleases {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_check_follows_only_https_redirects_to_the_two_hosts() {
+        let from = "https://api.github.com/repos/o/n/releases/latest";
+        for to in [
+            "https://api.github.com/repositories/1/releases/latest",
+            "https://github.com/o/n/releases/latest",
+        ] {
+            assert_eq!(next_hop(from, to).as_deref(), Ok(to));
+        }
+        assert_eq!(
+            next_hop(from, "/repositories/1/releases/latest").as_deref(),
+            Ok("https://api.github.com/repositories/1/releases/latest"),
+            "a path stays on the current host"
+        );
+        for to in [
+            "http://api.github.com/repos/o/n/releases/latest",
+            "https://example.com/latest",
+            "https://api.github.com.example/latest",
+            "https://github.com@host/latest",
+            "https://api.github.com:8443/latest",
+            "//example.com/latest",
+            "latest",
+            "",
+        ] {
+            assert!(next_hop(from, to).is_err(), "{to} is refused");
+        }
+    }
 
     const LISTING: &str = r###"{
       "tag_name": "v0.3.0", "draft": false, "prerelease": false,

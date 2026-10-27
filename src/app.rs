@@ -50,6 +50,7 @@ use crate::ports::round_files::RoundFiles;
 use crate::ports::secrets::SecretStore;
 use crate::ports::store::{Store, StoreError};
 use crate::ports::transcript::TranscriptReader;
+use crate::ports::updates::CheckOutcome;
 use crate::ui::{UiState, prompt_box};
 
 /// How often the host is listed and the event log read.
@@ -1400,8 +1401,26 @@ impl SwitchboardApp {
         let tx = self.update_results.tx.clone();
         match effect {
             Effect::CheckForUpdate => {
+                // The core keeps the `ETag` only with the release it
+                // vouches for, so a 304 always has something to compare.
+                let etag = self.core.settings().update_check.etag.clone();
                 std::thread::spawn(move || {
-                    let _ = tx.send(AppAction::UpdateChecked(source.latest()));
+                    // A panic still answers, or the core would wait on
+                    // this check for good.
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        source.check(etag.as_deref())
+                    }))
+                    .unwrap_or_else(|_| CheckOutcome::NoAnswer("the update check panicked".into()));
+                    match &outcome {
+                        CheckOutcome::NoAnswer(reason) => {
+                            log::warn!("update check: no answer: {reason}");
+                        }
+                        CheckOutcome::Http { status, detail } => {
+                            log::warn!("update check: {status}: {detail}");
+                        }
+                        CheckOutcome::Answer { .. } | CheckOutcome::NotModified => {}
+                    }
+                    let _ = tx.send(AppAction::UpdateAnswered(outcome));
                 });
                 None
             }

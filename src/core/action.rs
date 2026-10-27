@@ -359,7 +359,7 @@ pub enum AppAction {
     SetFilesOpen(bool),
     /// Whether an agent's terminal window opens as it starts or resumes.
     SetOpenTerminalOnLaunch(bool),
-    /// Whether the update check runs on its own at launch and hourly.
+    /// Whether the update check runs on its own at launch and once a day.
     SetCheckForUpdates(bool),
     /// Whether agent sessions get the Prompt Box editor as their message box.
     SetPromptBox(bool),
@@ -718,9 +718,13 @@ pub enum AppAction {
     /// Ask the release source for the newest release now; the tick
     /// does this on its own schedule.
     CheckForUpdate,
-    /// What the source answered: the newest release, nothing
-    /// published, or why it could not say.
+    /// Shorthand for an answer with no `ETag` and no failure kind: the
+    /// newest release, nothing published, or why it could not say.
+    /// `UpdateAnswered` is what the app dispatches.
     UpdateChecked(Result<Option<crate::ports::updates::Release>, String>),
+    /// What the source answered, with the kind of failure kept: a host
+    /// that answered waits out the period, one that did not is retried.
+    UpdateAnswered(crate::ports::updates::CheckOutcome),
     /// Fetch and check the release on offer.
     DownloadUpdate,
     /// The staged bundle's path, or why the download failed.
@@ -731,7 +735,11 @@ pub enum AppAction {
 }
 
 /// Work the shell performs on the core's behalf.
+// `SaveSettings(Settings)` is the largest variant, now that `Settings`
+// holds a `Release`; it is saved on a click or an update check, never
+// in a hot loop, and boxing it would change the contract for no gain.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Effect {
     /// Bring the session's own window to the front.
     FocusWindow(RecordId),
@@ -908,7 +916,7 @@ pub enum Effect {
         range: crate::core::diff::DiffRange,
     },
     /// Ask the release source for the newest release, on a thread;
-    /// the answer returns as `AppAction::UpdateChecked`.
+    /// the answer returns as `AppAction::UpdateAnswered`.
     CheckForUpdate,
     /// Fetch and check a release's bundle, on a thread; the answer
     /// returns as `AppAction::UpdateDownloaded`.
@@ -1194,9 +1202,11 @@ pub struct AppCore {
     pub(super) version_override: Option<String>,
     /// Where an update of the app stands. Transient.
     pub(super) update: super::updates::UpdateState,
-    /// When the last check for an update started, on the monotonic
-    /// clock; `None` before the first.
-    pub(super) last_update_check: Option<Duration>,
+    /// The update check that is out, if any. Only a manual one's
+    /// failure shows.
+    pub(super) update_inflight: Option<super::updates::UpdateCheck>,
+    /// When a scheduled check that got no answer is tried again.
+    pub(super) update_retry_at: Option<SystemTime>,
 }
 
 impl AppCore {
@@ -1317,6 +1327,7 @@ impl AppCore {
             AppAction::ViewColumns(columns) => self.view_columns = Some(columns),
             AppAction::CheckForUpdate
             | AppAction::UpdateChecked(_)
+            | AppAction::UpdateAnswered(_)
             | AppAction::DownloadUpdate
             | AppAction::UpdateDownloaded(_)
             | AppAction::InstallUpdate
