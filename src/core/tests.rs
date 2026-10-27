@@ -8647,12 +8647,13 @@ mod control {
 mod dispatch_page {
     use super::*;
     use crate::core::dispatch::{
-        ArtifactRead, CONSOLE_NAME, CONSOLE_SPACE, RUNNER_NAME, RUNNER_NO_COMMAND, RUNNER_OUTSIDE,
-        RUNNER_STILL_ANSWERS, RUNNER_STOP_OUTSIDE, RunnerStanding, RunnerStop, revisable,
+        ArtifactRead, CONSOLE_NAME, CONSOLE_SPACE, RUNNER_GATE_RUNS, RUNNER_NAME,
+        RUNNER_NO_COMMAND, RUNNER_NOT_UP, RUNNER_OUTSIDE, RUNNER_STILL_ANSWERS,
+        RUNNER_STOP_OUTSIDE, RunnerStanding, RunnerStop, revisable,
     };
     use crate::ports::dispatch::{
-        AttemptView, Body, DecisionView, EventView, EventsView, ProjectView, Reply, Status,
-        TicketView, WorktreesView,
+        AttemptView, Body, BuildId, DecisionView, EventView, EventsView, ProjectView, Reply,
+        StaleWhy, Status, TicketView, WorktreesView,
     };
 
     fn status(session: Option<RecordId>) -> Status {
@@ -8701,6 +8702,10 @@ mod dispatch_page {
                 }],
                 ..TicketView::default()
             }],
+            runner: BuildId {
+                version: env!("CARGO_PKG_VERSION").into(),
+                ..BuildId::default()
+            },
         }
     }
 
@@ -9316,6 +9321,184 @@ mod dispatch_page {
         let e = core.dispatch(AppAction::DispatchStatus(None), Clock::at(4100));
         assert_eq!(spawns(&e, id), 1);
         assert!(saved_autostart(&e, id).iter().all(|a| *a));
+    }
+
+    /// `status(None)` from a runner that started with `runner`, plus an
+    /// open attempt of `kind` at `stage` when given.
+    fn stale_status(runner: BuildId, open: Option<(&str, &str)>) -> Status {
+        let mut st = status(None);
+        st.runner = runner;
+        if let Some((kind, stage)) = open {
+            st.tickets[0].attempts.push(AttemptView {
+                stage: stage.into(),
+                n: 1,
+                kind: kind.into(),
+                state: "running".into(),
+                ..AttemptView::default()
+            });
+        }
+        st
+    }
+
+    fn notices_with(core: &AppCore, text: &str) -> usize {
+        core.notices()
+            .iter()
+            .filter(|n| n.text.contains(text))
+            .count()
+    }
+
+    /// After a restart's kill: the old runner gone, the new one spawned
+    /// and listed, as the next polls would find it.
+    fn restarted(core: &mut AppCore, id: RecordId, at: u64) {
+        let e = core.dispatch(AppAction::DispatchStatus(None), Clock::at(at));
+        assert_eq!(spawns(&e, id), 1, "the new runner launched");
+        core.dispatch(AppAction::Spawned { id, result: Ok(()) }, Clock::at(at + 1));
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(at + 2));
+    }
+
+    #[test]
+    fn a_runner_with_no_recorded_build_is_restarted_once_while_idle() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        let id = runner_up(&mut core);
+        let blank = stale_status(BuildId::default(), None);
+        let e = core.dispatch(AppAction::DispatchStatus(Some(blank.clone())), Clock::at(5));
+        assert_eq!(kills(&e), 1);
+        assert_eq!(core.runner_standing(), RunnerStanding::StartQueued);
+        assert!(core.session(id).unwrap().autostart);
+        assert_eq!(notices_with(&core, "Restarting the runner"), 1);
+        restarted(&mut core, id, 4100);
+        // The disk binary is as old: no second restart, one notice.
+        for at in 0..5 {
+            let e = core.dispatch(
+                AppAction::DispatchStatus(Some(blank.clone())),
+                Clock::at(5000 + at),
+            );
+            assert_eq!(kills(&e), 0);
+        }
+        assert_eq!(notices_with(&core, "Restarting the runner"), 1);
+        assert_eq!(notices_with(&core, "was restarted and still runs"), 1);
+        // A new file on disk is worth one more.
+        core.dispatch(
+            AppAction::DispatchBuildOnDisk(Some(BuildId {
+                mtime_ms: 9,
+                len: 9,
+                ..BuildId::default()
+            })),
+            Clock::at(6000),
+        );
+        let e = core.dispatch(AppAction::DispatchStatus(Some(blank)), Clock::at(6001));
+        assert_eq!(kills(&e), 1);
+        assert_eq!(notices_with(&core, "Restarting the runner"), 2);
+    }
+
+    #[test]
+    fn an_open_agent_attempt_holds_the_restart_and_is_noticed_once() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        runner_up(&mut core);
+        let old = BuildId {
+            version: "0.0.1".into(),
+            ..BuildId::default()
+        };
+        let busy = stale_status(old.clone(), Some(("agent", "plan")));
+        for at in 0..5 {
+            let e = core.dispatch(
+                AppAction::DispatchStatus(Some(busy.clone())),
+                Clock::at(5 + at),
+            );
+            assert_eq!(kills(&e), 0, "an attempt is open");
+        }
+        assert_eq!(core.runner_stale(), Some(StaleWhy::Version));
+        assert_eq!(
+            notices_with(&core, "It restarts when no attempt is open"),
+            1
+        );
+        let e = core.dispatch(
+            AppAction::DispatchStatus(Some(stale_status(old, None))),
+            Clock::at(20),
+        );
+        assert_eq!(kills(&e), 1, "restarted on the poll after it closed");
+    }
+
+    #[test]
+    fn a_stale_runner_started_outside_the_app_is_noticed_and_not_restarted() {
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        let old = BuildId {
+            version: "0.0.1".into(),
+            ..BuildId::default()
+        };
+        for at in 0..3 {
+            let e = core.dispatch(
+                AppAction::DispatchStatus(Some(stale_status(old.clone(), None))),
+                Clock::at(5 + at),
+            );
+            assert_eq!(kills(&e), 0, "the app restarts only its own");
+        }
+        assert_eq!(core.runner_standing(), RunnerStanding::Outside);
+        assert_eq!(core.runner_stale(), Some(StaleWhy::Version));
+        assert_eq!(notices_with(&core, "started outside the app"), 1);
+    }
+
+    #[test]
+    fn a_gate_waiting_on_the_owner_is_not_busy_and_a_working_gate_is() {
+        let old = BuildId {
+            version: "0.0.1".into(),
+            ..BuildId::default()
+        };
+        // `status` has a pending `lanes` decision.
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        runner_up(&mut core);
+        let waiting = stale_status(old.clone(), Some(("gate-only", "lanes")));
+        let e = core.dispatch(AppAction::DispatchStatus(Some(waiting)), Clock::at(5));
+        assert_eq!(kills(&e), 1, "an owner wait is not busy");
+
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        runner_up(&mut core);
+        let deploy = stale_status(old, Some(("gate-only", "deploy")));
+        let e = core.dispatch(AppAction::DispatchStatus(Some(deploy)), Clock::at(5));
+        assert_eq!(kills(&e), 0, "a working gate may be a deploy");
+        assert_eq!(core.runner_restart_refusal(), Some(RUNNER_GATE_RUNS));
+        let e = core.dispatch(AppAction::DispatchRunnerRestart, Clock::at(6));
+        assert_eq!(kills(&e), 0);
+        assert_eq!(notices_with(&core, RUNNER_GATE_RUNS), 1);
+    }
+
+    #[test]
+    fn the_restart_button_restarts_whenever_no_gate_works() {
+        let old = BuildId {
+            version: "0.0.1".into(),
+            ..BuildId::default()
+        };
+        // Idle, and with an agent attempt open: the click accepts it.
+        for open in [None, Some(("agent", "plan"))] {
+            let (mut core, _) = loaded(vec![], vec![]);
+            configured(&mut core, "/opt/sb/dispatch");
+            runner_up(&mut core);
+            let st = stale_status(old.clone(), open);
+            core.dispatch(AppAction::DispatchStatus(Some(st)), Clock::at(5));
+            let e = core.dispatch(AppAction::DispatchRunnerRestart, Clock::at(6));
+            assert_eq!(kills(&e), usize::from(open.is_some()), "{open:?}");
+        }
+        // After the automatic restart is spent, a click still restarts.
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        let id = runner_up(&mut core);
+        let st = stale_status(old, None);
+        core.dispatch(AppAction::DispatchStatus(Some(st.clone())), Clock::at(5));
+        restarted(&mut core, id, 4100);
+        core.dispatch(AppAction::DispatchStatus(Some(st)), Clock::at(5000));
+        let e = core.dispatch(AppAction::DispatchRunnerRestart, Clock::at(5001));
+        assert_eq!(kills(&e), 1);
+        // Not up: refused.
+        let (mut core, _) = loaded(vec![], vec![]);
+        configured(&mut core, "/opt/sb/dispatch");
+        let e = core.dispatch(AppAction::DispatchRunnerRestart, Clock::at(5));
+        assert_eq!(kills(&e), 0);
+        assert_eq!(core.runner_restart_refusal(), Some(RUNNER_NOT_UP));
     }
 
     #[test]

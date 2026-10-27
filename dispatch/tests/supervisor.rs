@@ -616,6 +616,9 @@ fn brief_shows_the_tickets_what_waits_the_events_and_the_handoff() {
         "taken",
         "follow from seq ",
         "watching #12",
+        // No runner ran here, so only the command's own build.
+        "build: cli/app ",
+        "no runner build to compare",
     ] {
         assert!(text.contains(want), "brief lacks {want:?}:\n{text}");
     }

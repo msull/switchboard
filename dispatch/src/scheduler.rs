@@ -145,6 +145,10 @@ pub struct Runner {
     /// a restarted runner sweeps again at once, which removes nothing
     /// new.
     last_evidence_sweep_ms: Option<u64>,
+    /// The build this process started with, read once by `run` before
+    /// its first pass; the status reply carries it. Blank for a runner
+    /// made for a one-off command.
+    pub build: dispatch_control::BuildId,
 }
 
 /// The runner's own Switchboard record and launch token, from
@@ -327,6 +331,7 @@ impl Runner {
             env_bin: None,
             credentials: None,
             last_evidence_sweep_ms: None,
+            build: dispatch_control::BuildId::default(),
         }
     }
 
@@ -1997,7 +2002,10 @@ impl Runner {
             .operators
             .get(operator)
             .map_or("", |o| o.guidance.as_str());
-        let mut prompt = guidance_prelude(guidance, &vars);
+        let mut prompt = match guidance_prelude(guidance, &vars) {
+            Ok(prompt) => prompt,
+            Err(e) => return self.fail_unrendered(t, ps, (REFRESH, &name), n, &e, now_ms),
+        };
         let plan = plan_clause(t, p, Some(&name));
         let checks = p
             .stages
@@ -4840,8 +4848,17 @@ impl Runner {
             }
             let mut question = self.human_question(t, p, stage, &attempt, &cwd, lane.as_deref());
             if let Some(q) = own_question {
-                question.push_str("\n\n");
-                question.push_str(&vars_for(t, p, lane.as_deref()).render(q));
+                // A question naming a decision this runner did not set
+                // is left out rather than asked with the field as
+                // written; there is no attempt to fail before the
+                // decision exists.
+                match vars_for(t, p, lane.as_deref()).render_checked(q) {
+                    Ok(q) => {
+                        question.push_str("\n\n");
+                        question.push_str(&q);
+                    }
+                    Err(e) => log::error!("{} {}: question: {e:#}", t.id, stage.name),
+                }
             }
             let (kind, options): (DecisionKind, &[&str]) = if confirm {
                 (
@@ -6395,8 +6412,15 @@ impl Runner {
                 ev.dir.display().to_string(),
             );
         }
-        let mut prompt = guidance_prelude(guidance, &vars);
-        prompt.push_str(&vars.render(template));
+        // A prompt naming a decision this runner did not set fails the
+        // attempt, with a rerun offered, rather than reach the agent with
+        // the field as written.
+        let rendered = guidance_prelude(guidance, &vars)
+            .and_then(|prelude| Ok(prelude + &vars.render_checked(template)?));
+        let mut prompt = match rendered {
+            Ok(prompt) => prompt,
+            Err(e) => return self.fail_unrendered(t, ps, (&stage.name, ctx), n, &e, now_ms),
+        };
         if let Some(moved) = lane
             .and_then(|l| t.lanes.iter().find(|x| x.name == l))
             .and_then(|l| l.refreshed.as_ref())
@@ -6750,7 +6774,12 @@ impl Runner {
         );
         let mut vars = vars_for(t, p, lane);
         vars.set("notes", notes.display().to_string());
-        let mut prompt = guidance_prelude(&p.operators[&operator].guidance, &vars);
+        let mut prompt = match guidance_prelude(&p.operators[&operator].guidance, &vars) {
+            Ok(prompt) => prompt,
+            Err(err) => {
+                return self.fail_unrendered(t, ps, (&a.stage, &a.context), n, &err, now_ms);
+            }
+        };
         let plan = plan_clause(t, p, lane);
         let branch = lane_record.map_or("", |l| l.branch.as_str());
         let _ = write!(
@@ -7347,6 +7376,30 @@ impl Runner {
         }
     }
 
+    /// An agent attempt that never started because its prompt names a
+    /// decision with no value: recorded and failed, so the ticket offers
+    /// a rerun and a park rather than erroring on every pass.
+    fn fail_unrendered(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        (stage, ctx): (&str, &str),
+        n: u32,
+        why: &anyhow::Error,
+        now_ms: u64,
+    ) -> Result<()> {
+        t.attempts.push(new_attempt(
+            stage,
+            n,
+            ctx,
+            AttemptKind::Agent,
+            AttemptState::Starting,
+            BTreeMap::new(),
+            now_ms,
+        ));
+        self.fail_attempt(t, ps, stage, n, &format!("{why:#}"), now_ms)
+    }
+
     pub(crate) fn fail_attempt(
         &mut self,
         t: &mut Ticket,
@@ -7673,21 +7726,18 @@ impl Runner {
             let why = format!("{subject} was not written by a session");
             return self.park(t, ps, &format!("stage {}: {why}", stage.name), now_ms);
         };
+        // Rendered before anything is written, so a template naming a
+        // decision with no value holds the ticket at no cost.
+        let definition = match definition_of(&reviewer_name, review.clone(), &vars_for(t, p, lane))
+        {
+            Ok(definition) => definition,
+            Err(e) => return self.park(t, ps, &format!("stage {}: {e:#}", stage.name), now_ms),
+        };
         let dir = self.attempt_dir(t, &stage.name, n, ctx)?;
         let copy = dir.join(format!("{subject}.md"));
         std::fs::copy(&source.path, &copy)
             .with_context(|| format!("copy {} to {}", source.path.display(), copy.display()))?;
-        // The owner's round is on disk before the send, as a `revise`
-        // writes its round, so a reader finds it whatever the reply.
-        let owner_file = crate::report::round_file(&copy, 1);
-        if let Some(owner) = &source.owner {
-            let body = format!(
-                "{}\n\n{}\n",
-                crate::OWNER_ROUND_HEADING,
-                owner.text.trim_end()
-            );
-            crate::store::atomic_write(&owner_file, body.as_bytes())?;
-        }
+        let owner_file = write_owner_round(&source, &copy)?;
         // The reviewer's feedback lives beside the copy, in Dispatch's
         // directory. A reviewer that can be told to write there runs in
         // the ticket's tree, with the code and the trust the earlier
@@ -7701,7 +7751,6 @@ impl Runner {
             }
             _ => dir.clone(),
         };
-        let definition = definition_of(&reviewer_name, review, &vars_for(t, p, lane));
         t.attempts.push(review_attempt(
             &stage.name,
             n,
@@ -10763,7 +10812,7 @@ fn definition_of(
     reviewer_name: &str,
     review: crate::pipeline::Review,
     vars: &Vars,
-) -> wire::Definition {
+) -> Result<wire::Definition> {
     // A template that names neither the tree nor the root gets told
     // where the repository is; the reviewer's cwd is the attempt
     // directory, and "CLAUDE.md" means nothing there.
@@ -10772,29 +10821,29 @@ fn definition_of(
         .get("worktree")
         .or_else(|| vars.0.get("project.root"))
         .cloned();
-    let with_repo = |text: &str| {
-        let rendered = vars.render(text);
-        match &tree {
+    let with_repo = |text: &str| -> Result<String> {
+        let rendered = vars.render_checked(text)?;
+        Ok(match &tree {
             Some(tree) if !text.contains("{worktree}") && !text.contains("{project.root}") => {
                 format!(
                     "The repository this is about is at {tree}; paths like CLAUDE.md are relative to it. {rendered}"
                 )
             }
             _ => rendered,
-        }
+        })
     };
     let review = crate::pipeline::Review {
         reviewer: review.reviewer,
-        review_first: with_repo(&review.review_first),
-        review_round: with_repo(&review.review_round),
-        respond: vars.render(&review.respond),
-        respond_to_user: vars.render(&review.respond_to_user),
-        handoff: vars.render(&review.handoff),
+        review_first: with_repo(&review.review_first)?,
+        review_round: with_repo(&review.review_round)?,
+        respond: vars.render_checked(&review.respond)?,
+        respond_to_user: vars.render_checked(&review.respond_to_user)?,
+        handoff: vars.render_checked(&review.handoff)?,
         no_feedback: review.no_feedback,
         cap: review.cap,
     };
     let text = serde_json::to_string(&review).unwrap_or_default();
-    wire::Definition {
+    Ok(wire::Definition {
         // Switchboard prunes by this prefix (`DISPATCH_WORKFLOW_PREFIX`).
         name: format!("Dispatch: {reviewer_name}@{}", Pipeline::fingerprint(&text)),
         reviewer: match review.reviewer {
@@ -10810,7 +10859,7 @@ fn definition_of(
         handoff: review.handoff,
         no_feedback: review.no_feedback,
         cap: review.cap,
-    }
+    })
 }
 
 /// A plan review's new attempt on `copy` of `subject`: one that opens
@@ -10940,6 +10989,22 @@ fn rerun_round(t: &Ticket, stage: &str, ctx: &str) -> Option<OwnerRound> {
         text: non_blank(&note?)?,
         by,
     })
+}
+
+/// The owner's round, written beside the copy before the send, as a
+/// `revise` writes its round, so a reader finds it whatever the reply.
+/// Returns the file's path.
+fn write_owner_round(source: &ReviewSource, copy: &Path) -> Result<PathBuf> {
+    let owner_file = crate::report::round_file(copy, 1);
+    if let Some(owner) = &source.owner {
+        let body = format!(
+            "{}\n\n{}\n",
+            crate::OWNER_ROUND_HEADING,
+            owner.text.trim_end()
+        );
+        crate::store::atomic_write(&owner_file, body.as_bytes())?;
+    }
+    Ok(owner_file)
 }
 
 /// What a plan review in `ctx` reviews: the newer of the latest
@@ -11619,13 +11684,14 @@ fn deployed_and_served(t: &Ticket, p: &Pipeline) -> String {
 
 /// An operator's guidance, rendered like the stage prompt it opens (it
 /// may name the branch, the worktree or an artifact), and the blank line
-/// after it; nothing when the operator has none.
-pub(crate) fn guidance_prelude(guidance: &str, vars: &Vars) -> String {
+/// after it; nothing when the operator has none. Refused, as
+/// `render_checked` refuses, when it names a decision with no value.
+pub(crate) fn guidance_prelude(guidance: &str, vars: &Vars) -> Result<String> {
     let guidance = guidance.trim();
     if guidance.is_empty() {
-        String::new()
+        Ok(String::new())
     } else {
-        format!("{}\n\n", vars.render(guidance))
+        Ok(format!("{}\n\n", vars.render_checked(guidance)?))
     }
 }
 

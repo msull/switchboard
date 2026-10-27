@@ -8,7 +8,7 @@
 use std::io;
 use std::path::PathBuf;
 
-use dispatch_control::{Body, Client, Reply, Request, SOCKET_FILE};
+use dispatch_control::{Body, BuildId, Client, Reply, Request, SOCKET_FILE};
 
 use crate::ports::dispatch::DispatchPort;
 
@@ -64,6 +64,10 @@ impl DispatchPort for DispatchSocket {
 
     fn data_dir(&self) -> PathBuf {
         self.data_dir.clone()
+    }
+
+    fn build_on_disk(&self) -> Option<BuildId> {
+        BuildId::of_exe(&self.command, "")
     }
 
     fn call(&mut self, body: &Body) -> io::Result<Reply> {

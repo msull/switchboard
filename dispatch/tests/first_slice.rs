@@ -2280,6 +2280,47 @@ fn a_stage_failing_past_max_reruns_parks_the_ticket() {
     assert!(env.pending(&id).is_empty(), "nothing more is asked");
 }
 
+/// A stage prompt naming a decision no gate asks, as a runner older
+/// than the pipeline file sees one: the attempt fails with a rerun
+/// offered, and nothing reaches an agent with the field as written.
+#[test]
+fn a_prompt_naming_an_unset_decision_fails_the_attempt() {
+    let mut env = Env::new();
+    let t = env.take(7);
+    let text = std::fs::read_to_string(&t.pipeline_file).unwrap().replace(
+        "Write to {notes}.",
+        "Write to {notes}; mind {decisions.nope.note}.",
+    );
+    std::fs::write(&t.pipeline_file, text).unwrap();
+    env.steps_until(&t.id, "the failure", |t, _| {
+        t.attempts_of("investigate")
+            .last()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    let t = env.ticket(&t.id);
+    let AttemptState::Failed { reason } = &t.attempts_of("investigate").last().unwrap().state
+    else {
+        panic!()
+    };
+    assert!(
+        reason.starts_with("{decisions.nope.note} was not set for this render"),
+        "{reason}"
+    );
+    let pending = env.pending(&t.id);
+    assert_eq!(pending[0].name, "rerun");
+    assert!(
+        pending[0].options.iter().any(|o| o == "park"),
+        "{pending:?}"
+    );
+    assert!(
+        env.sb()
+            .calls
+            .iter()
+            .all(|c| !format!("{c:?}").contains("{decisions.")),
+        "nothing was sent with the field"
+    );
+}
+
 /// Under `on_dirty = "ask"` a dirty stop is the question at once, with
 /// nothing typed into the session.
 #[test]

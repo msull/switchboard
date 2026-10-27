@@ -5188,7 +5188,7 @@ fn a_flick_left_steps_back_through_the_users_messages_and_right_forward() {
 /// Two Dispatch projects, one with a pending lanes decision that takes
 /// several lanes, the other held by its one slot.
 fn dispatch_status() -> switchboard::ports::dispatch::Status {
-    use switchboard::ports::dispatch::{DecisionView, ProjectView, Status, TicketView};
+    use switchboard::ports::dispatch::{BuildId, DecisionView, ProjectView, Status, TicketView};
     Status {
         data_dir: "/dispatch".into(),
         worktrees: "/wt".into(),
@@ -5249,6 +5249,10 @@ fn dispatch_status() -> switchboard::ports::dispatch::Status {
                 ..TicketView::default()
             },
         ],
+        runner: BuildId {
+            version: env!("CARGO_PKG_VERSION").into(),
+            ..BuildId::default()
+        },
     }
 }
 
@@ -5353,6 +5357,81 @@ fn dispatch_runner_toggle_starts_and_stops() {
     click(&mut harness, "Stop");
     assert!(actions(&harness).contains(&AppAction::DispatchRunnerStop));
     assert!(!harness.state().core().is_running(runner));
+}
+
+/// A runner older than the app, held from its automatic restart by an
+/// open attempt: the row says so and offers Restart, which a working
+/// gate disables. A runner on this build shows neither.
+#[test]
+fn an_older_runner_is_named_on_its_row_with_a_restart() {
+    use switchboard::ports::dispatch::{AttemptView, BuildId};
+    let up_with = |harness: &mut Harness<'static, SwitchboardApp>, status| {
+        harness.state_mut().dispatch(AppAction::DispatchConfigured {
+            command: "/opt/sb/dispatch".into(),
+            data_dir: "/dispatch".into(),
+            switchboard_data_dir: "/sb".into(),
+        });
+        harness.run_steps(2);
+        click(harness, "Dispatch");
+        click(harness, "▶ Start");
+        let runner = harness.state().core().runner().expect("a runner was made");
+        harness
+            .state_mut()
+            .dispatch(AppAction::HostListed(vec![HostStatus {
+                id: HostId(runner.host_name()),
+                liveness: Liveness::Running {
+                    pid: 77,
+                    command: "dispatch".into(),
+                },
+                cwd: None,
+                last_activity: None,
+                title: None,
+            }]));
+        harness
+            .state_mut()
+            .dispatch(AppAction::DispatchStatus(Some(status)));
+        harness.state_mut().dispatched.clear();
+        harness.run_steps(2);
+    };
+    let with_open = |kind: &str, stage: &str| {
+        let mut st = dispatch_status();
+        st.runner = BuildId {
+            version: "0.0.1".into(),
+            ..BuildId::default()
+        };
+        st.tickets[0].attempts.push(AttemptView {
+            stage: stage.into(),
+            n: 1,
+            kind: kind.into(),
+            state: "running".into(),
+            ..AttemptView::default()
+        });
+        st
+    };
+
+    let (mut h, _) = harness();
+    up_with(&mut h, dispatch_status());
+    assert!(
+        h.query_all_by_label_contains("older build")
+            .next()
+            .is_none()
+    );
+    assert!(h.query_by_label("Restart").is_none());
+
+    let (mut h, _) = harness();
+    up_with(&mut h, with_open("agent", "investigate"));
+    assert!(
+        h.query_all_by_label_contains("older build")
+            .next()
+            .is_some()
+    );
+    assert!(!h.get_by_label("Restart").accesskit_node().is_disabled());
+    click(&mut h, "Restart");
+    assert!(actions(&h).contains(&AppAction::DispatchRunnerRestart));
+
+    let (mut h, _) = harness();
+    up_with(&mut h, with_open("gate-only", "investigate"));
+    assert!(h.get_by_label("Restart").accesskit_node().is_disabled());
 }
 
 /// A ticket's page with `edit` applied to Orchard's ticket first.

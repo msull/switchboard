@@ -340,6 +340,111 @@ impl Reply {
     }
 }
 
+/// Which build of `dispatch` a process runs, or a file on disk holds.
+/// A runner keeps the binary it started with after the file is
+/// replaced, so what it recorded at its start is compared with the file
+/// now: unequal means it runs an older build.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BuildId {
+    /// The app version the binary was built from; blank when the runner
+    /// predates this field.
+    pub version: String,
+    /// The executable's modification time in ms, as `stat` showed it
+    /// when the process started; 0 when unknown.
+    pub mtime_ms: u64,
+    /// The executable's length in bytes, beside `mtime_ms`.
+    pub len: u64,
+}
+
+impl BuildId {
+    /// The file at `path` as `stat` shows it now, following symlinks,
+    /// stamped with `version`; `None` when it cannot be read.
+    #[must_use]
+    pub fn of_exe(path: &Path, version: &str) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        let mtime_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        Some(Self {
+            version: version.to_owned(),
+            mtime_ms,
+            len: meta.len(),
+        })
+    }
+
+    /// For a person: `0.8.1 (12345678 bytes, mtime 1730000000000 ms)`, or
+    /// `unknown` for a runner from before builds were recorded.
+    #[must_use]
+    pub fn label(&self) -> String {
+        if self.version.is_empty() {
+            return "unknown".to_owned();
+        }
+        if self.mtime_ms == 0 && self.len == 0 {
+            return self.version.clone();
+        }
+        format!(
+            "{} ({} bytes, mtime {} ms)",
+            self.version, self.len, self.mtime_ms
+        )
+    }
+}
+
+/// Why a runner counts as older than the binary it would restart into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaleWhy {
+    /// The runner records no build: it started before builds were.
+    Unrecorded,
+    /// The runner was built from another app version.
+    Version,
+    /// Same version, but the file on disk is not the one it started.
+    Build,
+}
+
+impl StaleWhy {
+    /// The reason as a clause: "it runs <this>".
+    #[must_use]
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Unrecorded => "a build from before builds were recorded",
+            Self::Version => "a build of another app version",
+            Self::Build => "a build other than the `dispatch` on disk",
+        }
+    }
+}
+
+/// Whether the runner that recorded `runner` is older than what a
+/// restart would run: an app at `wanted_version`, and the binary
+/// `on_disk` when it could be read. The first rule that matches names
+/// the reason. Builds compare for inequality only: an install may keep
+/// the archive's times, so a later file is not always a newer mtime.
+#[must_use]
+pub fn stale(
+    runner: &BuildId,
+    wanted_version: &str,
+    on_disk: Option<&BuildId>,
+) -> Option<StaleWhy> {
+    if runner.version.is_empty() {
+        return Some(StaleWhy::Unrecorded);
+    }
+    if runner.version != wanted_version {
+        return Some(StaleWhy::Version);
+    }
+    let known = |b: &BuildId| b.mtime_ms != 0 && b.len != 0;
+    match on_disk {
+        Some(disk)
+            if known(runner)
+                && known(disk)
+                && (runner.mtime_ms != disk.mtime_ms || runner.len != disk.len) =>
+        {
+            Some(StaleWhy::Build)
+        }
+        _ => None,
+    }
+}
+
 /// The runner and everything it drives.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -351,6 +456,9 @@ pub struct Status {
     /// The projects with a pipeline file, each with its queue.
     pub projects: Vec<ProjectView>,
     pub tickets: Vec<TicketView>,
+    /// The build the runner started with. Blank from a runner older than
+    /// this field, which reads as stale.
+    pub runner: BuildId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1067,6 +1175,89 @@ mod tests {
     }
 
     #[test]
+    fn stale_names_the_first_rule_that_matches() {
+        let build = |version: &str, mtime_ms, len| BuildId {
+            version: version.into(),
+            mtime_ms,
+            len,
+        };
+        let disk = build("", 2_000, 900);
+        let cases = [
+            (
+                build("", 0, 0),
+                "0.8.1",
+                Some(&disk),
+                Some(StaleWhy::Unrecorded),
+            ),
+            (
+                build("", 2_000, 900),
+                "0.8.1",
+                None,
+                Some(StaleWhy::Unrecorded),
+            ),
+            (
+                build("0.8.0", 2_000, 900),
+                "0.8.1",
+                Some(&disk),
+                Some(StaleWhy::Version),
+            ),
+            (
+                build("0.8.1", 1_000, 900),
+                "0.8.1",
+                Some(&disk),
+                Some(StaleWhy::Build),
+            ),
+            (
+                build("0.8.1", 2_000, 800),
+                "0.8.1",
+                Some(&disk),
+                Some(StaleWhy::Build),
+            ),
+            // An earlier mtime on disk still differs: inequality, not order.
+            (
+                build("0.8.1", 3_000, 900),
+                "0.8.1",
+                Some(&disk),
+                Some(StaleWhy::Build),
+            ),
+            (build("0.8.1", 2_000, 900), "0.8.1", Some(&disk), None),
+            (build("0.8.1", 2_000, 900), "0.8.1", None, None),
+            // An unknown stat on either side says nothing.
+            (build("0.8.1", 0, 0), "0.8.1", Some(&disk), None),
+            (
+                build("0.8.1", 1_000, 900),
+                "0.8.1",
+                Some(&build("", 0, 0)),
+                None,
+            ),
+        ];
+        for (runner, wanted, on_disk, why) in cases {
+            assert_eq!(
+                stale(&runner, wanted, on_disk),
+                why,
+                "{runner:?} {on_disk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_status_from_an_older_runner_reads_with_a_blank_build() {
+        let s: Status = serde_json::from_str(r#"{"tickets": []}"#).unwrap();
+        assert_eq!(s.runner, BuildId::default());
+        assert_eq!(stale(&s.runner, "0.8.1", None), Some(StaleWhy::Unrecorded));
+        assert_eq!(s.runner.label(), "unknown");
+    }
+
+    #[test]
+    fn of_exe_reads_the_file_as_it_is_now() {
+        let path = std::env::current_exe().unwrap();
+        let b = BuildId::of_exe(&path, "1.2.3").unwrap();
+        assert_eq!(b.version, "1.2.3");
+        assert!(b.len > 0 && b.mtime_ms > 0, "{b:?}");
+        assert_eq!(BuildId::of_exe(Path::new("/no/such/file"), "1.2.3"), None);
+    }
+
+    #[test]
     fn paths_from_an_older_runner_read_with_no_plan_label() {
         let v: PathsView = serde_json::from_str(r#"{"plan": "/plan/1/plan.md"}"#).unwrap();
         assert_eq!(v.plan, Some(PathBuf::from("/plan/1/plan.md")));
@@ -1147,6 +1338,11 @@ mod tests {
                     supervisor: None,
                 }],
                 tickets: vec![ticket.clone()],
+                runner: BuildId {
+                    version: "0.8.1".into(),
+                    mtime_ms: 1_000,
+                    len: 900,
+                },
             }),
             Reply::Ticket(ticket.clone()),
             Reply::Artifact {

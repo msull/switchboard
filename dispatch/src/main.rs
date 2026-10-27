@@ -264,13 +264,22 @@ fn take(project: &str, issue: &str) -> Result<()> {
 }
 
 fn run(once: bool) -> Result<()> {
+    // Read once, before anything else: after an update the path names
+    // the new file, and a later read would hide that this process still
+    // runs the old one.
+    let build = dispatch::own_build();
+    // Both runners (the stepping one and the port's) report this build.
+    let mut port_runner = runner()?;
+    port_runner.build = build.clone();
     let mut runner = runner()?;
+    runner.build = build.clone();
+    runner.health.borrow_mut().build = build;
     // One runner per data directory; a second exits here.
     let _owner = runner.data.claim_runner()?;
     // The port answers on its own runner over the same records; the
     // writer lock keeps the two apart.
     let handler = Handler {
-        runner: self::runner()?,
+        runner: port_runner,
         issues: Box::new(Gh),
     };
     let _port = Server::bind(&runner.data, handler)?;
@@ -1634,6 +1643,7 @@ fn health(args: &[&str]) -> Result<()> {
         stale_ms,
         now_ms(),
         f.on("--verbose"),
+        &dispatch::own_build(),
     );
     if f.on("--json") {
         say!(
@@ -1665,6 +1675,15 @@ fn brief(args: &[&str]) -> Result<()> {
         Ok(s) => say!("{}", supervisor_line(project, &s, now)),
         Err(e) => say!("supervisor: {e:#}"),
     }
+    say!(
+        "{}",
+        health::build_line(
+            health::read_runner_file(&runner.data)
+                .as_ref()
+                .map(|f| &f.build),
+            &dispatch::own_build()
+        )
+    );
     let tickets: Vec<Ticket> = runner
         .tickets()?
         .into_iter()

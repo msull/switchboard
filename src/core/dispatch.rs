@@ -16,7 +16,8 @@ use super::model::{
     SpaceId,
 };
 use crate::ports::dispatch::{
-    Body, DecisionView, EventView, ProjectView, Reply, Status, TicketView, UsageView,
+    AttemptView, Body, BuildId, DecisionView, EventView, ProjectView, Reply, StaleWhy, Status,
+    TicketView, UsageView, stale,
 };
 use crate::ports::host::Liveness;
 
@@ -420,6 +421,31 @@ pub fn runner_launch(state: &DispatchState) -> Launch {
     ])
 }
 
+/// The version a runner should have been built from: this app's, since
+/// the bundle ships both binaries from one `Cargo.toml`.
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Why the offered Restart is refused while the app's runner is not up.
+pub(crate) const RUNNER_NOT_UP: &str = "the app's runner is not up";
+/// Why the offered Restart is refused while a gate works.
+pub(crate) const RUNNER_GATE_RUNS: &str =
+    "a gate is running, perhaps a deploy the restart would cut short; restart once it ends";
+
+/// Whether an attempt is starting or running.
+fn attempt_open(a: &AttemptView) -> bool {
+    matches!(a.state.as_str(), "starting" | "running")
+}
+
+/// Whether an open attempt only waits for the owner: a gate-only one
+/// with a pending decision at its stage. The view's decision names its
+/// stage but not its attempt, so the match is by stage; a deploy has no
+/// pending decision of its own while it runs, so it stays busy.
+fn owner_wait(t: &TicketView, a: &AttemptView) -> bool {
+    a.kind == "gate-only"
+        && t.decisions
+            .iter()
+            .any(|d| d.state == "pending" && d.stage == a.stage)
+}
+
 /// Why Start is refused when no `dispatch` sits beside the app.
 pub(crate) const RUNNER_NO_COMMAND: &str =
     "no `dispatch` beside this app: build it with `cargo build -p dispatch`, or run the bundle";
@@ -472,6 +498,28 @@ pub struct DispatchState {
     pub switchboard_data_dir: PathBuf,
     /// A Stop of the runner service still letting go. Never saved.
     pub(crate) runner_stop: RunnerStop,
+    /// The `dispatch` on disk as last read, which a restart would run.
+    /// Never saved.
+    pub build_on_disk: Option<BuildId>,
+    /// What the automatic restart of an older runner has done for the
+    /// build on disk now. Never saved.
+    pub(crate) stale_guard: StaleGuard,
+}
+
+/// The automatic restart's memory for one key: the build on disk and
+/// the version wanted. A restart installs only what is on disk, which
+/// can itself be older than the app, so the key restarts at most once;
+/// a new file on disk is a new key. The runner's own build is not in
+/// the key, since the restart changes it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct StaleGuard {
+    pub key: Option<(Option<BuildId>, String)>,
+    /// The runner was restarted for this key.
+    pub restarted: bool,
+    /// The notice that the restart waits for open attempts was posted.
+    pub waiting_noted: bool,
+    /// The notice that the restarted runner is still older was posted.
+    pub still_noted: bool,
 }
 
 /// `#104` for an issue, `PR #3` for a pull request, nothing for a
@@ -1226,6 +1274,56 @@ impl AppCore {
         }
     }
 
+    /// Why the runner counts as older than this app, while one answers
+    /// (the app's, or one started outside it): it records no build,
+    /// another version, or a file other than the `dispatch` on disk now.
+    #[must_use]
+    pub fn runner_stale(&self) -> Option<StaleWhy> {
+        if !self.dispatch.connected
+            || !matches!(
+                self.runner_standing(),
+                RunnerStanding::Up { .. } | RunnerStanding::Outside
+            )
+        {
+            return None;
+        }
+        stale(
+            &self.dispatch.status.runner,
+            APP_VERSION,
+            self.dispatch.build_on_disk.as_ref(),
+        )
+    }
+
+    /// Whether a restart now would cut something short: any open
+    /// attempt (an agent's pane, a review, a gate at work) but a gate
+    /// waiting on the owner, whose question is on the ticket record and
+    /// survives. Only the automatic restart waits for this.
+    fn runner_is_busy(&self) -> bool {
+        self.dispatch.status.tickets.iter().any(|t| {
+            t.attempts
+                .iter()
+                .any(|a| attempt_open(a) && !owner_wait(t, a))
+        })
+    }
+
+    /// Why the offered Restart is refused now, if it is: the app's
+    /// runner is not up, or a gate is at work, which may be a deploy
+    /// whose command the kill would cut short (the CLI's refusal). An
+    /// open agent attempt is not a reason: the owner who clicks accepts
+    /// restarting it.
+    #[must_use]
+    pub fn runner_restart_refusal(&self) -> Option<&'static str> {
+        if !matches!(self.runner_standing(), RunnerStanding::Up { .. }) {
+            return Some(RUNNER_NOT_UP);
+        }
+        let working_gate = self.dispatch.status.tickets.iter().any(|t| {
+            t.attempts
+                .iter()
+                .any(|a| attempt_open(a) && a.kind == "gate-only" && !owner_wait(t, a))
+        });
+        working_gate.then_some(RUNNER_GATE_RUNS)
+    }
+
     /// Why a Start would be refused now, if it would.
     #[must_use]
     pub fn runner_refusal(&self) -> Option<&'static str> {
@@ -1252,6 +1350,8 @@ impl AppCore {
             }
             AppAction::DispatchRunnerStart => self.runner_start(now, out),
             AppAction::DispatchRunnerStop => self.runner_stop(now, out),
+            AppAction::DispatchBuildOnDisk(build) => self.dispatch.build_on_disk = build,
+            AppAction::DispatchRunnerRestart => self.runner_restart(now, out),
             AppAction::DispatchStatus(status) => self.dispatch_status(status, now, out),
             AppAction::ShowDispatch => self.show(View::Dispatch, now, out),
             AppAction::ShowTicket(id) => {
@@ -1359,6 +1459,80 @@ impl AppCore {
             self.dispatch.status = status;
             self.dispatch.seen = true;
         }
+        self.restart_stale_runner(now, out);
+    }
+
+    /// The offered Restart: refused with its reason, else a kill and a
+    /// Start as the control port's restart does.
+    fn runner_restart(&mut self, now: Clock, out: &mut Out) {
+        if let Some(why) = self.runner_restart_refusal() {
+            self.error(format!("restart refused: {why}"));
+            return;
+        }
+        self.runner_relaunch(now, out);
+    }
+
+    /// A kill and a Start, as the control port's restart does.
+    fn runner_relaunch(&mut self, now: Clock, out: &mut Out) {
+        self.runner_kill(now, out);
+        self.runner_start(now, out);
+    }
+
+    /// Tried on every status poll: a runner older than this app is
+    /// restarted once no attempt is open, at most once for the build on
+    /// disk, and otherwise named in one notice. A poll that finds no
+    /// stale runner changes nothing, so a restart's brief gap keeps the
+    /// guard.
+    fn restart_stale_runner(&mut self, now: Clock, out: &mut Out) {
+        let Some(why) = self.runner_stale() else {
+            return;
+        };
+        let key = Some((self.dispatch.build_on_disk.clone(), APP_VERSION.to_owned()));
+        if self.dispatch.stale_guard.key != key {
+            self.dispatch.stale_guard = StaleGuard {
+                key,
+                ..StaleGuard::default()
+            };
+        }
+        if self.dispatch.stale_guard.restarted {
+            if !self.dispatch.stale_guard.still_noted {
+                self.dispatch.stale_guard.still_noted = true;
+                self.info(
+                    format!(
+                        "The runner was restarted and still runs {}; the `dispatch` at {} is older than this app",
+                        why.text(),
+                        self.dispatch.command.display()
+                    ),
+                    now,
+                );
+            }
+            return;
+        }
+        let outside = self.runner_standing() == RunnerStanding::Outside;
+        if outside || self.runner_is_busy() {
+            if !self.dispatch.stale_guard.waiting_noted {
+                self.dispatch.stale_guard.waiting_noted = true;
+                let when = if outside {
+                    "It was started outside the app, which only restarts its own; stop it and Start one here"
+                } else {
+                    "It restarts when no attempt is open; Restart on the Dispatch page restarts it now"
+                };
+                self.info(
+                    format!(
+                        "The runner is older than this app ({}). {when}.",
+                        why.text()
+                    ),
+                    now,
+                );
+            }
+            return;
+        }
+        self.dispatch.stale_guard.restarted = true;
+        self.info(
+            format!("Restarting the runner: it runs {}", why.text()),
+            now,
+        );
+        self.runner_relaunch(now, out);
     }
 
     /// A read of an artifact's text, asked unless it is already read

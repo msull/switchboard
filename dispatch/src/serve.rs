@@ -438,6 +438,7 @@ pub fn status(runner: &Runner) -> Result<Status> {
         worktrees: runner.data.worktrees_dir(),
         projects,
         tickets,
+        runner: runner.build.clone(),
     })
 }
 

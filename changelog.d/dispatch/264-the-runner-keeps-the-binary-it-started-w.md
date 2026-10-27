@@ -1,0 +1,1 @@
+Fixed: A runner older than the app or its CLI is now named by `dispatch health` and `dispatch brief`, restarted by the app when no attempt is open (or offered otherwise), and a prompt naming a `{decisions.*}` value the runner did not set fails the attempt instead of reaching the agent as written.

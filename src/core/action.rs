@@ -709,6 +709,13 @@ pub enum AppAction {
     DispatchRunnerStart,
     /// Kill the runner service and stop relaunching it.
     DispatchRunnerStop,
+    /// The `dispatch` on disk as the app read it just before a status
+    /// poll's answer; `None` when it could not be read.
+    DispatchBuildOnDisk(Option<crate::ports::dispatch::BuildId>),
+    /// Restart the runner now, as offered while it runs an older build:
+    /// refused only while it is not up or a gate's command may be mid
+    /// apply. An open agent attempt is the clicker's cost to accept.
+    DispatchRunnerRestart,
     /// The Dispatch page in a window of its own; the main window goes
     /// back to what was under it.
     PopOutDispatch,
@@ -1414,6 +1421,8 @@ impl AppCore {
             | AppAction::DispatchConsole(_)
             | AppAction::DispatchRunnerStart
             | AppAction::DispatchRunnerStop
+            | AppAction::DispatchBuildOnDisk(_)
+            | AppAction::DispatchRunnerRestart
             | AppAction::PopOutDispatch
             | AppAction::CloseDispatchWindow
             | AppAction::DispatchWindowMoved(_) => self.dispatch_action(action, now, &mut out),

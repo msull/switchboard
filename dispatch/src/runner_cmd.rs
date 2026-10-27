@@ -134,8 +134,15 @@ pub fn run(
             return Ok(line);
         }
         if started.elapsed() >= wait {
-            let checked =
-                crate::health::check(data, socket, CHECK_TIMEOUT, STALE_MS, clock(), false);
+            let checked = crate::health::check(
+                data,
+                socket,
+                CHECK_TIMEOUT,
+                STALE_MS,
+                clock(),
+                false,
+                &crate::own_build(),
+            );
             bail!(
                 "the runner did not {} within {}s:\n{}\nsee the Dispatch page in Switchboard",
                 verb.word(),

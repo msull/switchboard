@@ -445,16 +445,15 @@ impl Runner {
             return self.save_ticket(t, now_ms);
         }
         let project = a.project.clone().unwrap_or_default();
-        let mut prompt = self.prompt_of(t, p, stage, &a, &round, &r, cwd, lane);
-        // A reviewer is granted its operator's sets only: the stage's
-        // are for its implementer and its checks.
-        let sets = env_sets(Some(&op), None);
-        if let Err(reason) = self.with_env_sentence(&mut prompt, &sets) {
-            reviewer_mut(t, key, round_n, name).result = Some(ReviewerResult::Failed {
-                reason: format!("could not start: {reason}"),
-            });
-            return self.save_ticket(t, now_ms);
-        }
+        let prompt = match self.prompt_of(t, p, stage, &a, &round, &r, cwd, lane, &op) {
+            Ok(prompt) => prompt,
+            Err(reason) => {
+                reviewer_mut(t, key, round_n, name).result = Some(ReviewerResult::Failed {
+                    reason: format!("could not start: {reason}"),
+                });
+                return self.save_ticket(t, now_ms);
+            }
+        };
         let (launch, session_cwd) = reviewer_launch(&op, &r.dir, cwd);
         let notes = format!(
             "Dispatch ticket {} · #{} {} · stage {} attempt {} · round {round_n} reviewer {name}",
@@ -478,7 +477,7 @@ impl Runner {
                 prompt: Some(prompt),
                 notes,
                 env: BTreeMap::new(),
-                env_sets: sets,
+                env_sets: env_sets(Some(&op), None),
                 replaces: None,
             },
             now_ms,
@@ -507,7 +506,7 @@ impl Runner {
         r: &ReviewerRun,
         cwd: &Path,
         lane: Option<&str>,
-    ) -> String {
+    ) -> Result<String> {
         let mut vars = vars_for(t, p, lane);
         vars.set("base", round.base.clone())
             .set("head", round.head.clone())
@@ -542,8 +541,10 @@ impl Runner {
                     .unwrap_or_default(),
             );
         }
-        let mut prompt = guidance_prelude(&p.operators[&r.name].guidance, &vars);
-        prompt.push_str(&vars.render(stage.review_prompt.as_deref().unwrap_or(REVIEW_PROMPT)));
+        let mut prompt = guidance_prelude(&p.operators[&r.name].guidance, &vars)?;
+        prompt.push_str(
+            &vars.render_checked(stage.review_prompt.as_deref().unwrap_or(REVIEW_PROMPT))?,
+        );
         if round.n == 1
             && let Some(carry) = carry_of(t, a, &no_feedback_of(stage))
         {
@@ -564,13 +565,12 @@ impl Runner {
         }
         prompt.push_str("\n\n");
         prompt.push_str(REVIEW_STYLE);
-        prompt
+        Ok(prompt)
     }
 
-    /// An agent reviewer's prompt: `reviewer_prompt`, or for a resolution
-    /// review `resolution_prompt` over the lane's last bring-up and its
-    /// conflict, with the fork point of the reviewed head from the new
-    /// base standing in for a base that was not recorded.
+    /// An agent reviewer's whole prompt, `prompt_text` and the sentence
+    /// for its operator's environment sets; the reason it cannot start
+    /// when either is refused.
     #[allow(clippy::too_many_arguments)]
     fn prompt_of(
         &self,
@@ -582,7 +582,33 @@ impl Runner {
         r: &ReviewerRun,
         cwd: &Path,
         lane: Option<&str>,
-    ) -> String {
+        op: &crate::pipeline::Operator,
+    ) -> std::result::Result<String, String> {
+        let mut prompt = self
+            .prompt_text(t, p, stage, a, round, r, cwd, lane)
+            .map_err(|err| format!("{err:#}"))?;
+        // A reviewer is granted its operator's sets only: the stage's
+        // are for its implementer and its checks.
+        self.with_env_sentence(&mut prompt, &env_sets(Some(op), None))?;
+        Ok(prompt)
+    }
+
+    /// An agent reviewer's prompt: `reviewer_prompt`, or for a resolution
+    /// review `resolution_prompt` over the lane's last bring-up and its
+    /// conflict, with the fork point of the reviewed head from the new
+    /// base standing in for a base that was not recorded.
+    #[allow(clippy::too_many_arguments)]
+    fn prompt_text(
+        &self,
+        t: &Ticket,
+        p: &Pipeline,
+        stage: &Stage,
+        a: &Attempt,
+        round: &ReviewRound,
+        r: &ReviewerRun,
+        cwd: &Path,
+        lane: Option<&str>,
+    ) -> Result<String> {
         if a.stage != RESOLUTION {
             return Self::reviewer_prompt(t, p, stage, a, round, r, cwd, lane);
         }
@@ -621,7 +647,7 @@ impl Runner {
         r: &ReviewerRun,
         cwd: &Path,
         lane: Option<&str>,
-    ) -> String {
+    ) -> Result<String> {
         let mut vars = vars_for(t, p, lane);
         vars.set("worktree", cwd.display().to_string())
             .set("feedback", r.feedback.display().to_string())
@@ -634,7 +660,7 @@ impl Runner {
             )
             .set("commits", conflicted_commits(&conflict.commits))
             .set("from", from.unwrap_or_default());
-        let mut prompt = guidance_prelude(&p.operators[&r.name].guidance, &vars);
+        let mut prompt = guidance_prelude(&p.operators[&r.name].guidance, &vars)?;
         prompt.push_str(&vars.render(if from.is_some() {
             REVIEW_RESOLUTION
         } else {
@@ -647,7 +673,7 @@ impl Runner {
         prompt.push_str(&vars.render(REVIEW_RESOLUTION_WRITE));
         prompt.push_str("\n\n");
         prompt.push_str(REVIEW_STYLE);
-        prompt
+        Ok(prompt)
     }
 
     /// An open attempt, by its last round's state.
@@ -1242,7 +1268,13 @@ impl Runner {
             .and_then(|f| f.parent())
             .map_or_else(|| cwd.to_path_buf(), Path::to_path_buf);
         let response = rdir.join("response.md");
-        let mut prompt = Self::fix_prompt(t, p, stage, &a, round, cwd, lane, &response, &op);
+        let mut prompt = match Self::fix_prompt(t, p, stage, &a, round, cwd, lane, &response, &op) {
+            Ok(prompt) => prompt,
+            Err(e) => {
+                let reason = format!("round {}: the implementer could not start: {e:#}", round.n);
+                return self.fail_round(t, ps, key, round.n, &reason, now_ms);
+            }
+        };
         let sets = env_sets(Some(&op), Some(stage));
         if let Err(reason) = self.with_env_sentence(&mut prompt, &sets) {
             let reason = format!(
@@ -1321,7 +1353,7 @@ impl Runner {
         lane: Option<&str>,
         response: &Path,
         op: &crate::pipeline::Operator,
-    ) -> String {
+    ) -> Result<String> {
         let mut vars = vars_for(t, p, lane);
         vars.set("base", round.base.clone())
             .set("head", round.head.clone())
@@ -1339,8 +1371,8 @@ impl Runner {
         if let Some(plan) = plan_value(&plans) {
             vars.set("plan", plan);
         }
-        let mut prompt = guidance_prelude(&op.guidance, &vars);
-        prompt.push_str(&vars.render(stage.fix_prompt.as_deref().unwrap_or(FIX_PROMPT)));
+        let mut prompt = guidance_prelude(&op.guidance, &vars)?;
+        prompt.push_str(&vars.render_checked(stage.fix_prompt.as_deref().unwrap_or(FIX_PROMPT))?);
         // A record from `RECORD_VERSION` 2 or earlier keeps the note on
         // `t.rework` rather than on the attempt.
         if round.n == 1
@@ -1352,7 +1384,7 @@ impl Runner {
             prompt.push_str("\n\nThe user looked at the previous attempt and sent it back: ");
             prompt.push_str(&note);
         }
-        prompt
+        Ok(prompt)
     }
 
     /// The implementer: done on its Stop with `response.md` settled and
@@ -2468,7 +2500,13 @@ impl Runner {
         let mut vars = vars_for(t, p, lane);
         vars.set("worktree", cwd.display().to_string())
             .set("input", input.display().to_string());
-        let mut prompt = guidance_prelude(&op.guidance, &vars);
+        let mut prompt = match guidance_prelude(&op.guidance, &vars) {
+            Ok(prompt) => prompt,
+            Err(e) => {
+                let reason = format!("the rewriter could not start: {e:#}");
+                return self.message_failed(t, ps, p, key, &reason, now_ms);
+            }
+        };
         prompt.push_str(&vars.render(MESSAGE_PROMPT));
         let sets = env_sets(Some(&op), Some(stage));
         if let Err(reason) = self.with_env_sentence(&mut prompt, &sets) {
@@ -4481,7 +4519,8 @@ gate = { kind = "command", argv = ["true"] }
             &round.reviewers[0],
             dir.path(),
             Some("A"),
-        );
+        )
+        .unwrap();
         assert!(prompt.contains("plan-A.md"), "{prompt}");
         assert!(prompt.contains("Keep A."), "{prompt}");
         assert!(!prompt.contains("plan-B.md"), "{prompt}");
@@ -4555,7 +4594,8 @@ fix_prompt = "Per {plan}."
             &round.reviewers[0],
             dir.path(),
             None,
-        );
+        )
+        .unwrap();
         assert!(
             prompt.starts_with(&format!("Against {listed}.")),
             "{prompt}"
@@ -4580,7 +4620,8 @@ fix_prompt = "Per {plan}."
             None,
             &dir.path().join("response.md"),
             &p.operators["agent"],
-        );
+        )
+        .unwrap();
         assert!(fix.starts_with(&format!("Per {listed}.")), "{fix}");
     }
 
