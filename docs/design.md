@@ -3820,7 +3820,9 @@ Built so far:
   (403 `origin`). `GET /api/v1/me` tells the page its device and
   scope. The page lists sessions waiting first, reads a Claude Code
   session's last response and any other's screen, replies under
-  `control` with an op kept across a retry, polls `/waiting` every
+  `control` with an op kept across a retry (a failed or unsure send
+  leaves the box as it is, and the page's promise that a retry is not
+  typed twice holds while the box is unchanged), polls `/waiting` every
   3 s, and treats the events socket as a hastener; a 401 is told
   apart through `/info` (same key and id: removed on the host;
   otherwise: identity changed). Spike 23 says what was measured.
@@ -3904,10 +3906,12 @@ Built so far:
   it; the doc comment has the commands. Layout is checked at 390 px
   only, and Safari stays a hand check. The page's node tests now fail
   on CI without node, which CI installs, and print `SKIPPED:`
-  elsewhere. Known gaps: text typed into the reply box while a send is
-  in flight is cleared when it succeeds (the run prints `midflight
-  text:`, with `socket:` and `polls in 9 s:`, as measurements rather
-  than checks); what the box should do with it is the owner's call.
+  elsewhere. Text typed into the reply box while a send is in flight
+  stays: on success the sent text is removed as a prefix of the box
+  (leading whitespace ignored), only whitespace left clears it, and a
+  box edited away from the sent text is kept whole; the run checks
+  that ` extra` typed mid-flight remains. `socket:` and `polls in
+  9 s:` are printed as measurements rather than checks.
 - **A bounded request head (2026-10-25).** The request line and each
   header are read through `read_head_line`, which takes at most what
   is left of the 8 KiB head budget plus one byte, so a stranger who

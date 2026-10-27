@@ -189,3 +189,13 @@ test('turns merge by number', () => {
   assert.deepStrictEqual(ns(page.mergeTurns(held, { total: 3, turns: [] })), [3], 'past the total is gone');
   assert.deepStrictEqual(ns(page.mergeTurns([], { total: 2, turns: [turn(1), turn(2)] })), [1, 2]);
 });
+
+test('the reply box keeps what was typed after a send', () => {
+  assert.strictEqual(page.afterSend('second', 'second'), '');
+  assert.strictEqual(page.afterSend('second extra', 'second'), ' extra');
+  assert.strictEqual(page.afterSend('  second extra', 'second'), ' extra');
+  assert.strictEqual(page.afterSend('second\n', 'second'), '');
+  assert.strictEqual(page.afterSend('seco extra', 'second'), 'seco extra', 'an edited box is kept whole');
+  assert.strictEqual(page.afterSend('', 'second'), '');
+  assert.strictEqual(page.afterSend('secondary', 'second'), 'ary', 'the rule is a prefix rule');
+});

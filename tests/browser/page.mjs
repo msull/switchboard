@@ -5,9 +5,8 @@
 // `go`, or `invite <url>` for a pairing window it opened. The host is
 // served only while the Rust side pumps it, so this side never runs
 // ahead of an answer. The first failed check prints `FAIL <step>:` and
-// exits 1; a full run ends with `DONE`. The `midflight text:`,
-// `socket:` and `polls in 9 s:` lines are printed measurements, not
-// checks.
+// exits 1; a full run ends with `DONE`. The `socket:` and
+// `polls in 9 s:` lines are printed measurements, not checks.
 import assert from 'node:assert/strict';
 import readline from 'node:readline';
 import { chromium } from 'playwright';
@@ -166,7 +165,7 @@ try {
   release();
   await page.locator('#reply-status', { hasText: 'Sent.' }).waitFor({ timeout: 15000 });
   assert.equal(await text(page, '#reply-status'), 'Sent.');
-  console.log(`midflight text: ${(await page.inputValue('#reply-text')).includes(' extra') ? 'kept' : 'cleared'}`);
+  assert.equal(await page.inputValue('#reply-text'), ' extra');
   await page.unroute('**/api/v1/sessions/*/send');
   await step('sent');
 
