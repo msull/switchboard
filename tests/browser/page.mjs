@@ -299,6 +299,38 @@ try {
   await page.unroute('**/api/v1/sessions/*/send');
   await step('sent');
 
+  // 6a. A finished command lists its runs, newest chosen, with how each
+  //     ended and the files it made, and shows the chosen run's output
+  //     in place of "not running"; another run is a click away.
+  await step('finished-command');
+  await page.click('#back');
+  await page.click('#filters-toggle');
+  await page.selectOption('#f-state', 'all');
+  await page.fill('#search', 'build');
+  await page.locator('#sessions .row', { hasText: 'finished build' }).click();
+  await page.locator('#session-text', { hasText: 'second run ok' }).waitFor({ timeout: 15000 });
+  assert.equal(await page.locator('#run-list .run').count(), 2);
+  const runs = await text(page, '#run-list');
+  for (const word of ['Run 1', 'Run 2', 'exit 2', 'ok', 'report.txt']) assert.ok(runs.includes(word), `${word} in ${runs}`);
+  assert.ok(!(await text(page, '#session-text')).includes('not running'));
+  assert.ok((await text(page, '#run-list .run[aria-current="true"]')).startsWith('Run 2'), 'the newest run is chosen');
+  await page.locator('#run-list .run', { hasText: 'Run 1' }).click();
+  await page.locator('#session-text', { hasText: 'first run failed' }).waitFor({ timeout: 15000 });
+  await fitsWidth(page);
+
+  // 6b. While a command's pane runs, the block keeps its screen, and
+  //     the open run is listed beneath it; a poll tick leaves the
+  //     screen alone.
+  await step('running-command');
+  await page.click('#back');
+  await page.locator('#sessions .row', { hasText: 'live build' }).click();
+  await page.locator('#session-text', { hasText: 'live screen' }).waitFor({ timeout: 15000 });
+  await page.locator('#run-list', { hasText: 'running' }).waitFor({ timeout: 15000 });
+  await page.waitForTimeout(3500);
+  const screen = await text(page, '#session-text');
+  assert.ok(screen.includes('live screen') && !screen.includes('log text'), screen);
+  await fitsWidth(page);
+
   // 7. A 401 from a host under another identity says so; from the
   //    same host, that the device was removed.
   const real = await page.evaluate(() => localStorage.getItem('switchboard-host'));

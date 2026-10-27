@@ -3929,6 +3929,31 @@ Built so far:
   box edited away from the sent text is kept whole; the run checks
   that ` extra` typed mid-flight remains. `socket:` and `polls in
   9 s:` are printed as measurements rather than checks.
+- **A session's runs on the web page (2026-10-27).** A command or
+  service session lists its runs beneath the text block, newest first,
+  each a row in the Mac's run-list words (`Run 3`, when it started, how
+  long it took and `ok`, `exit 2`, `running` or `killed`) with the
+  files it produced by name only. Once the pane has stopped the block
+  shows the chosen run's output (`runs/{n}/output`, its last 200
+  lines, masked), the newest by default and any other a tap away; a
+  choice the host no longer keeps (it keeps 20 runs) falls back to the
+  newest. While the pane runs the block keeps its screen and the rows
+  are not buttons. The page calls `sessions/{id}/runs` and
+  `sessions/{id}/runs/{n}/output`, both served before; no host code or
+  wire field changed. A log that grows does not move the list's
+  revision (the `Runs` fingerprint is the count, the last end and the
+  last exit), so on each poll tick with the list unchanged an open
+  command or service reads its runs listing again, and an output again
+  while its run is open or once after it closed (`needsOutput`); the
+  requests go through the page's one queue. The browser test opens a
+  finished command, checks both runs' verdicts, the file name and the
+  output of each, and a running command keeping its screen across a
+  tick. Known gaps: two files of one name in different folders look
+  alike; the list's row carries no run verdict (that needs a
+  `SessionView` field); a live pane's screen is still read only when
+  the list moves; a pinned artifact is served whole by the files route,
+  which the page does not use; Safari at 390 px with a long output is
+  unchecked.
 - **A bounded request head (2026-10-25).** The request line and each
   header are read through `read_head_line`, which takes at most what
   is left of the 8 KiB head budget plus one byte, so a stranger who

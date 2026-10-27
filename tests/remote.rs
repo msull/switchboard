@@ -203,13 +203,21 @@ fn launched(port: &mut Port, session: &str) -> RecordId {
 /// A command session with its first run opened, and the run's log
 /// written with `text`.
 fn command_with_run(port: &mut Port, project: &str, text: &str) -> (String, RecordId) {
+    let session = new_command(port, project, "build");
+    let id = launched(port, &session);
+    write_last_log(port, id, text);
+    (session, id)
+}
+
+/// A command session named `name` that has never run.
+fn new_command(port: &mut Port, project: &str, name: &str) -> String {
     let reply = control(
         port,
         Request::new(
-            "cmd",
+            format!("cmd-{name}"),
             Body::SessionNew {
                 project: project.to_owned(),
-                name: "build".into(),
+                name: name.into(),
                 session_kind: SessionKind::Command,
                 cwd: PathBuf::from("/tmp"),
                 launch: Launch::Command {
@@ -224,8 +232,11 @@ fn command_with_run(port: &mut Port, project: &str, text: &str) -> (String, Reco
             },
         ),
     );
-    let session = made_id(&reply, RecordKind::Session);
-    let id = launched(port, &session);
+    made_id(&reply, RecordKind::Session)
+}
+
+/// Write `text` as the log of `id`'s last run.
+fn write_last_log(port: &Port, id: RecordId, text: &str) {
     let run = port
         .app
         .core()
@@ -240,7 +251,50 @@ fn command_with_run(port: &mut Port, project: &str, text: &str) -> (String, Reco
         switchboard::adapters::scrollback::scrollback_dir(&fakes::services().store.data_dir());
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(run), text).unwrap();
-    (session, id)
+}
+
+/// Make the fake host list `id`'s pane as exited with `code`, so the
+/// next poll closes its open run with that code.
+fn exited(port: &mut Port, id: RecordId, code: i32) {
+    let pane = HostId(id.host_name());
+    let mut host = port.host.state();
+    host.statuses.retain(|s| s.id != pane);
+    host.statuses.push(HostStatus {
+        id: pane,
+        liveness: HostLiveness::Exited { code: Some(code) },
+        cwd: None,
+        last_activity: None,
+        title: None,
+    });
+}
+
+/// A command run twice, the first run exiting 2 and the second 0 with
+/// a file found, each with its own log.
+fn finished_command(port: &mut Port, project: &str) -> RecordId {
+    let session = new_command(port, project, "finished build");
+    let id = RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    for (code, text) in [(2, "first run failed\n"), (0, "second run ok\n")] {
+        port.app.dispatch(AppAction::ReturnToSession(id));
+        write_last_log(port, id, text);
+        exited(port, id, code);
+        port.app.poll_now();
+    }
+    port.app.dispatch(AppAction::ArtifactsFound {
+        id,
+        n: 2,
+        paths: vec![PathBuf::from("/tmp/out/report.txt")],
+    });
+    id
+}
+
+/// A command whose pane runs, showing `screen`, its run open.
+fn running_command(port: &mut Port, project: &str, screen: &str) -> RecordId {
+    let session = new_command(port, project, "live build");
+    let id = RecordId(uuid::Uuid::parse_str(&session).unwrap());
+    port.app.dispatch(AppAction::ReturnToSession(id));
+    write_last_log(port, id, "log text\n");
+    running(port, &session, screen);
+    id
 }
 
 /// One HTTP request over a fresh pinned TLS connection: the status and
@@ -4213,7 +4267,7 @@ fn the_page_calls_only_routes_the_host_serves() {
         } else {
             &session
         };
-        let path = path.replace("{id}", id);
+        let path = path.replace("{id}", id).replace("{n}", "1");
         assert!(
             !path.contains('{'),
             "{path}: a placeholder this test does not fill"
@@ -4452,8 +4506,9 @@ fn page_requests_have_their_own_rate_window() {
 /// gap after a refresh queued ahead of it, a session switch clearing the
 /// conversation's chrome, the open conversation read only when its own
 /// entry moved and once more after a turn's boundary, one polling chain
-/// across tab switches, a send typed once, and the identity-changed and
-/// removed notices. `tests/browser/page.mjs` is the browser half; this
+/// across tab switches, a send typed once, a finished command's runs
+/// and the chosen run's output, a running command's screen with its
+/// runs beneath, and the identity-changed and removed notices. `tests/browser/page.mjs` is the browser half; this
 /// side pumps the host and does each step's part when the script asks.
 /// Not run by `cargo test`: it needs node and a Chromium download.
 ///
@@ -4534,7 +4589,7 @@ fn the_page_works_in_a_real_browser() {
             println!("{line}");
             continue;
         };
-        let answer = browser_step(&mut port, step, record, helper_id);
+        let answer = browser_step(&mut port, step, &project, record, helper_id);
         writeln!(stdin, "{answer}").unwrap();
         stdin.flush().unwrap();
     }
@@ -4554,7 +4609,13 @@ impl Drop for Browser {
 }
 
 /// The host's part of one step of `tests/browser/page.mjs`: its answer.
-fn browser_step(port: &mut Port, step: &str, record: RecordId, helper: RecordId) -> String {
+fn browser_step(
+    port: &mut Port,
+    step: &str,
+    project: &str,
+    record: RecordId,
+    helper: RecordId,
+) -> String {
     let invite = |port: &mut Port, code: &str| {
         port.app.dispatch(AppAction::OpenPairing {
             code: code.into(),
@@ -4621,6 +4682,15 @@ fn browser_step(port: &mut Port, step: &str, record: RecordId, helper: RecordId)
             let written = port.host.state().written.clone();
             let sent = written.iter().filter(|(_, text)| text == "second").count();
             assert_eq!(sent, 1, "{written:?}");
+            "go".into()
+        }
+        "finished-command" => {
+            finished_command(port, project);
+            port.app.poll_now();
+            "go".into()
+        }
+        "running-command" => {
+            running_command(port, project, "$ make\nlive screen");
             "go".into()
         }
         "changed-and-removed" => {

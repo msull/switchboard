@@ -1,8 +1,9 @@
 // Switchboard's web page: pair a browser from the pairing window's QR,
 // list the sessions (live ones by default, waiting first, narrowed by
 // state, kind, project and a name search), read one (a Claude Code
-// session as its conversation, anything else as its screen), and
-// reply.
+// session as its conversation, a command or service as its runs with
+// the chosen run's output or, while it runs, its screen, anything else
+// as its screen), and reply.
 // It speaks the remote port's /api/v1 as a native client does, with
 // two differences: the token is a cookie this script never sees, and
 // changes arrive by polling, the events socket only hastening them.
@@ -20,6 +21,8 @@ const API = {
   waiting: 'GET /api/v1/waiting',
   conversation: 'GET /api/v1/sessions/{id}/conversation',
   screen: 'GET /api/v1/sessions/{id}/screen',
+  runs: 'GET /api/v1/sessions/{id}/runs',
+  runOutput: 'GET /api/v1/sessions/{id}/runs/{n}/output',
   send: 'POST /api/v1/sessions/{id}/send',
   events: 'GET /api/v1/events',
 };
@@ -214,10 +217,77 @@ function sinceText(ms, now) {
   return `${Math.floor(secs / 86400)} d ago`;
 }
 
-/** A route from the table with its `{id}` filled. */
-function route(entry, id) {
+/** A route from the table with its `{id}` and `{n}` filled. */
+function route(entry, id, n) {
   const [method, path] = entry.split(' ');
-  return { method, path: path.replace('{id}', encodeURIComponent(id || '')) };
+  return {
+    method,
+    path: path
+      .replace('{id}', encodeURIComponent(id || ''))
+      .replace('{n}', encodeURIComponent(n == null ? '' : String(n))),
+  };
+}
+
+/** Whether a session keeps runs: a command or a service. */
+function hasRuns(s) {
+  return s.kind === 'command' || s.kind === 'service';
+}
+
+/**
+ * The run to show: the one numbered `picked` while the listing still
+ * holds it (the host keeps only the last runs), else the newest, or
+ * null when there are none.
+ */
+function defaultRun(runs, picked) {
+  const list = runs || [];
+  if (picked != null) {
+    const chosen = list.find((r) => r.n === picked);
+    if (chosen) return chosen;
+  }
+  let newest = null;
+  for (const r of list) if (!newest || r.n > newest.n) newest = r;
+  return newest;
+}
+
+/** `1.2 s`, `45 s`, `3 min 2 s`, `1 h 4 min`, as the Mac's run list says. */
+function durationText(ms) {
+  const secs = Math.floor(Math.max(0, ms) / 1000);
+  if (secs < 10) return `${(Math.max(0, ms) / 1000).toFixed(1)} s`;
+  if (secs < 60) return `${secs} s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)} min ${secs % 60} s`;
+  return `${Math.floor(secs / 3600)} h ${Math.floor((secs % 3600) / 60)} min`;
+}
+
+/**
+ * A run's row in the words of the Mac's run list: `Run 3`, then when it
+ * started, how long it took (so far, while open) and how it ended:
+ * `running`, `ok`, `exit 2`, or `killed` for one closed with no code
+ * (its pane was found gone). `artifacts` are file names only.
+ */
+function runRow(run, now) {
+  let verdict;
+  if (run.exit === 0) verdict = 'ok';
+  else if (run.exit != null) verdict = `exit ${run.exit}`;
+  else if (run.ended_ms == null) verdict = 'running';
+  else verdict = 'killed';
+  const end = run.ended_ms == null ? now : run.ended_ms;
+  return {
+    label: `Run ${run.n}`,
+    meta: [sinceText(run.started_ms, now), durationText(end - run.started_ms), verdict].join(' · '),
+    artifacts: run.artifacts || [],
+  };
+}
+
+/**
+ * Whether `run`'s output must be read, given `read`, the `{n, ended_ms}`
+ * of the read drawn (or null): when another run or nothing was read,
+ * while the run is open (its log grows without moving any revision the
+ * page sees), and once more when it closed since.
+ */
+function needsOutput(read, run) {
+  if (!read || read.n !== run.n) return true;
+  if (run.ended_ms == null) return true;
+  return read.ended_ms !== run.ended_ms;
 }
 
 /**
@@ -312,6 +382,11 @@ if (typeof module !== 'undefined' && module.exports) {
     changedCount,
     sinceText,
     route,
+    hasRuns,
+    defaultRun,
+    durationText,
+    runRow,
+    needsOutput,
     conversationQuery,
     mergeTurns,
     entryMark,
@@ -346,6 +421,10 @@ if (typeof document !== 'undefined') {
     // The timer of a pending confirming re-read after a turn's boundary.
     confirm: null,
     scrollToEnd: false,
+    // The run the reader chose of the open command or service (null
+    // follows the newest), and the `{n, ended_ms}` of the output drawn.
+    run: null,
+    runRead: null,
     pending: null,
     chain: Promise.resolve(),
     socket: null,
@@ -362,8 +441,8 @@ if (typeof document !== 'undefined') {
     }
   }
 
-  async function call(entry, id, body, query) {
-    const { method, path } = route(entry, id);
+  async function call(entry, id, body, query, n) {
+    const { method, path } = route(entry, id, n);
     const init = { method, credentials: 'same-origin', cache: 'no-store', headers: {} };
     if (body !== undefined) {
       init.headers['Content-Type'] = 'application/json';
@@ -682,6 +761,11 @@ if (typeof document !== 'undefined') {
       $('earlier').hidden = true;
       $('earlier-error').textContent = '';
       state.scrollToEnd = true;
+      state.run = null;
+      state.runRead = null;
+      $('run-list').replaceChildren();
+      $('runs-note').textContent = '';
+      $('runs').hidden = true;
       clearConfirm();
     }
     state.open = id;
@@ -691,6 +775,7 @@ if (typeof document !== 'undefined') {
 
   function closeSession() {
     state.open = null;
+    $('runs').hidden = true;
     clearConfirm();
     show('list');
   }
@@ -724,6 +809,13 @@ if (typeof document !== 'undefined') {
       if (state.readMark && state.readMark.key === entryMark(s).key) return null;
       return readLatest(id, s);
     }
+    if (hasRuns(s)) return loadRuns(id, s, {});
+    $('runs').hidden = true;
+    return readScreen(id);
+  }
+
+  /** The pane's screen, or the host's refusal, in the text block. */
+  async function readScreen(id) {
     const key = `${API.screen} ${id}`;
     try {
       const reply = await call(API.screen, id);
@@ -734,6 +826,106 @@ if (typeof document !== 'undefined') {
       return blockFailed(id, error);
     }
     return null;
+  }
+
+  /**
+   * A command's or service's runs, drawn beneath the text block. While
+   * its pane runs the block shows the screen, read only when the list
+   * moved (`tick` false), as for any other pane; once it stops, the
+   * chosen run's output, read when `needsOutput` says so. A run the host
+   * no longer keeps is dropped and the listing read once more. `opts.tick`
+   * is a poll's refresh; `opts.retried` marks that second reading.
+   */
+  async function loadRuns(id, s, { tick = false, retried = false }) {
+    let runs;
+    try {
+      runs = (await call(API.runs, id)).body.runs || [];
+    } catch (error) {
+      forgetRunRead(id);
+      return blockFailed(id, error);
+    }
+    if (state.open !== id) return null;
+    const live = isLive(s);
+    const run = defaultRun(runs, state.run);
+    drawRuns(runs, live ? null : run, live);
+    if (live || !run) {
+      state.runRead = null;
+      return tick ? null : readScreen(id);
+    }
+    if (!needsOutput(state.runRead, run)) return null;
+    const key = `${API.runOutput} ${id} ${run.n}`;
+    try {
+      const reply = await call(API.runOutput, id, undefined, '', run.n);
+      if (state.open !== id || !isCurrent(state.held[key], reply)) return null;
+      state.held[key] = { epoch: reply.epoch, revision: reply.revision };
+      state.runRead = { n: run.n, ended_ms: run.ended_ms };
+      $('runs-note').textContent = reply.body.truncated ? `Showing the last lines of run ${run.n}.` : '';
+      showText(reply.body.text || '');
+    } catch (error) {
+      forgetRunRead(id);
+      if (!retried && error instanceof HttpError && error.code === 'no_run') {
+        state.run = null;
+        return loadRuns(id, s, { tick, retried: true });
+      }
+      return blockFailed(id, error);
+    }
+    return null;
+  }
+
+  /**
+   * After a failed read, so the next poll draws the output again: the
+   * drawn mark and the held revisions would both call it already read.
+   */
+  function forgetRunRead(id) {
+    state.runRead = null;
+    $('runs-note').textContent = '';
+    for (const key of Object.keys(state.held)) {
+      if (key.startsWith(`${API.runOutput} ${id} `)) delete state.held[key];
+    }
+  }
+
+  /**
+   * The run list: a button per run, newest first, that shows its output;
+   * while the pane runs, plain rows, since the block shows the screen.
+   */
+  function drawRuns(runs, chosen, live) {
+    const list = $('run-list');
+    list.replaceChildren();
+    const now = Date.now();
+    for (const run of [...runs].sort((a, b) => b.n - a.n)) {
+      const row = runRow(run, now);
+      const item = document.createElement('li');
+      const body = document.createElement(live ? 'div' : 'button');
+      body.className = 'row run';
+      if (!live) {
+        body.type = 'button';
+        if (chosen && chosen.n === run.n) body.setAttribute('aria-current', 'true');
+        body.addEventListener('click', () => {
+          state.run = run.n;
+          state.runRead = null;
+          $('runs-note').textContent = '';
+          serial(loadSession);
+        });
+      }
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = row.label;
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = row.meta;
+      body.append(name, meta);
+      if (row.artifacts.length > 0) {
+        const files = document.createElement('div');
+        files.className = 'meta artifacts';
+        files.textContent = `Files: ${row.artifacts.join(', ')}`;
+        body.append(files);
+      }
+      item.append(body);
+      list.append(item);
+    }
+    if (runs.length === 0) $('runs-note').textContent = 'No runs yet.';
+    else if (live) $('runs-note').textContent = '';
+    $('runs').hidden = false;
   }
 
   /**
@@ -950,6 +1142,10 @@ if (typeof document !== 'undefined') {
             // Nothing changed, but an earlier failed poll may have put up
             // "Can't reach the host"; the answer just now takes it down.
             showCurrent();
+            // A run's log grows and its end lands without moving the
+            // list, so an open command or service reads its runs again.
+            const open = state.open && state.sessions[state.open];
+            if (open && hasRuns(open)) await loadRuns(state.open, open, { tick: true });
           }
         } catch (error) {
           await failed(error);

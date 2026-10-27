@@ -179,6 +179,29 @@ li.is-error { color: var(--wait); }
 
 #earlier { margin: 4px 0 8px; }
 
+/* A command's runs. Every child of the session may shrink to the
+   phone's width, so a long file name or line wraps instead of widening
+   the page. */
+#session > * { min-width: 0; max-width: 100%; }
+
+h3 { font-size: 16px; margin: 12px 0 4px; }
+
+#runs-note { margin: 0 0 4px; }
+
+#run-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.run { margin: 0; }
+
+.run[aria-current="true"] { border-color: var(--fg); }
+
+.run .artifacts { word-break: break-word; }
+
 /* A tablet reads the one column at a readable width, centred. */
 @media (min-width: 700px) {
   body { max-width: 760px; margin: 0 auto; }

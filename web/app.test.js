@@ -232,3 +232,56 @@ test('the reply box keeps what was typed after a send', () => {
   assert.strictEqual(page.afterSend('', 'second'), '');
   assert.strictEqual(page.afterSend('secondary', 'second'), 'ary', 'the rule is a prefix rule');
 });
+
+test('a route fills its session and its run', () => {
+  assert.deepStrictEqual(
+    page.route(page.API.runOutput, 'a b', 3),
+    { method: 'GET', path: '/api/v1/sessions/a%20b/runs/3/output' },
+  );
+  assert.deepStrictEqual(page.route(page.API.runs, 'x'), { method: 'GET', path: '/api/v1/sessions/x/runs' });
+  assert.deepStrictEqual(page.route(page.API.screen, 'x', 3), { method: 'GET', path: '/api/v1/sessions/x/screen' });
+});
+
+test('commands and services keep runs', () => {
+  const kinds = ['claude', 'codex', 'shell', 'command', 'service'];
+  assert.deepStrictEqual(kinds.filter((kind) => page.hasRuns({ kind })), ['command', 'service']);
+});
+
+test('the run shown is the one chosen while it is kept, else the newest', () => {
+  const runs = [{ n: 4 }, { n: 6 }, { n: 5 }];
+  assert.strictEqual(page.defaultRun(runs).n, 6, 'out of order');
+  assert.strictEqual(page.defaultRun(runs, null).n, 6);
+  assert.strictEqual(page.defaultRun(runs, 4).n, 4, 'an explicit choice');
+  assert.strictEqual(page.defaultRun(runs, 1).n, 6, 'a choice the host no longer keeps');
+  assert.strictEqual(page.defaultRun([]), null);
+  assert.strictEqual(page.defaultRun(undefined, 2), null);
+});
+
+test('durations read as the Mac says them', () => {
+  assert.strictEqual(page.durationText(1234), '1.2 s');
+  assert.strictEqual(page.durationText(45000), '45 s');
+  assert.strictEqual(page.durationText(182000), '3 min 2 s');
+  assert.strictEqual(page.durationText(64 * 60000), '1 h 4 min');
+  assert.strictEqual(page.durationText(-5), '0.0 s', 'a clock behind the host');
+});
+
+test('a run row says when, how long and how it ended', () => {
+  const now = 10 * 60000;
+  const run = (fields) => ({ n: 3, started_ms: now - 5 * 60000, artifacts: [], ...fields });
+  const open = page.runRow(run({ ended_ms: null, exit: null }), now);
+  assert.deepStrictEqual([open.label, open.meta], ['Run 3', '5 min ago · 5 min 0 s · running']);
+  const ok = page.runRow(run({ ended_ms: now - 5 * 60000 + 1200, exit: 0, artifacts: ['report.txt'] }), now);
+  assert.deepStrictEqual([ok.meta, ok.artifacts], ['5 min ago · 1.2 s · ok', ['report.txt']]);
+  assert.strictEqual(page.runRow(run({ ended_ms: now, exit: 2 }), now).meta.split(' · ').pop(), 'exit 2');
+  assert.strictEqual(page.runRow(run({ ended_ms: now, exit: null }), now).meta.split(' · ').pop(), 'killed', 'closed with no code');
+  assert.deepStrictEqual(page.runRow({ n: 1, started_ms: now, ended_ms: now, exit: 0 }, now).artifacts, []);
+});
+
+test('a run is read until it has been read since it closed', () => {
+  const closed = { n: 2, ended_ms: 50 };
+  assert.ok(page.needsOutput(null, closed), 'nothing read');
+  assert.ok(page.needsOutput({ n: 1, ended_ms: 50 }, closed), 'another run read');
+  assert.ok(page.needsOutput({ n: 2, ended_ms: null }, { n: 2, ended_ms: null }), 'open: every tick');
+  assert.ok(page.needsOutput({ n: 2, ended_ms: null }, closed), 'closed since the read');
+  assert.ok(!page.needsOutput({ n: 2, ended_ms: 50 }, closed), 'finished and read');
+});
