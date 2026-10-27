@@ -3900,10 +3900,13 @@ mod tests {
         );
     }
 
+    /// A spike's commit, the implementation's and a fixer's `fixup!`:
+    /// one commit with the implementation's message and author.
     #[test]
-    fn the_real_git_squashes_to_one_commit_with_the_first_message() {
+    fn the_real_git_squashes_to_one_commit_with_the_implementations_message() {
         let dir = tempfile::tempdir().unwrap();
         let (wt, base) = cut(dir.path());
+        commit(&wt, "s", "s1\n", &["-m", "Spike", "-m", "why the spike"]);
         let a = commit(
             &wt,
             "a",
@@ -3917,12 +3920,12 @@ mod tests {
                 "why A",
             ],
         );
-        commit(&wt, "b", "b1\n", &["-m", "B"]);
-        let head = commit(&wt, "a", "a2\n", &["-m", "plain fix"]);
+        let head = commit(&wt, "a", "a2\n", &["--fixup", &a]);
         let mut cli = GitCli::default();
         let tree_before = cli.tree(&wt, "HEAD").unwrap();
         let commits = cli.commits(&wt, &base, &head).unwrap();
-        let groups = crate::history::one_plan(&commits, &base, &[]).unwrap();
+        let ranges = [(a.clone(), head.clone())];
+        let groups = crate::history::one_plan(&commits, &base, &ranges).unwrap();
         let after = cli.replay(&wt, &base, &groups).unwrap();
         cli.set_head(&wt, &after, &head).unwrap();
         let count = sh(&wt, &["rev-list", "--count", &format!("{base}..HEAD")]);

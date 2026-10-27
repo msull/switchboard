@@ -121,19 +121,18 @@ pub fn fold_plan(
         let g = &mut groups[slot[&l]];
         g.picks.push(c.sha.clone());
         if squashed[i] {
-            let body = body_of(&c.message);
-            if !body.is_empty() {
-                g.message.push_str("\n\n");
-                g.message.push_str(body);
-            }
+            append_body(&mut g.message, c);
         }
     }
     Ok(groups)
 }
 
 /// The one-commit plan: every commit in one group, with the message and
-/// author of the first commit no fix round made (the first commit when
-/// every one is a fix).
+/// author of the last commit that no fix round made and that is not a
+/// `fixup!` or `squash!` commit (the first when every one is). The last,
+/// not the first, leads because a spike's commit can precede the
+/// implementation's. Each `squash!` body is appended as [`fold_plan`]
+/// appends it.
 ///
 /// # Errors
 /// A merge (or a root) among `commits`.
@@ -146,13 +145,29 @@ pub fn one_plan(commits: &[Commit], base: &str, ranges: &[(String, String)]) -> 
     let lead = commits
         .iter()
         .zip(&anchors)
-        .find(|(_, a)| a.is_none())
+        .rev()
+        .find(|(c, a)| a.is_none() && autosquash_target(c.subject()).is_none())
         .map_or(first, |(c, _)| c);
+    let mut message = lead.message.clone();
+    for c in commits.iter().filter(|c| c.sha != lead.sha) {
+        if autosquash_target(c.subject()).is_some_and(|(_, squash)| squash) {
+            append_body(&mut message, c);
+        }
+    }
     Ok(vec![Group {
         picks: commits.iter().map(|c| c.sha.clone()).collect(),
-        message: lead.message.clone(),
+        message,
         author_of: lead.sha.clone(),
     }])
+}
+
+/// Adds a `squash!` commit's body to a folded message.
+fn append_body(message: &mut String, c: &Commit) {
+    let body = body_of(&c.message);
+    if !body.is_empty() {
+        message.push_str("\n\n");
+        message.push_str(body);
+    }
 }
 
 fn refuse_merges(commits: &[Commit], base: &str) -> Result<()> {
@@ -499,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn one_takes_the_first_implementation_commits_message() {
+    fn one_takes_the_last_implementation_commits_message() {
         let commits = [
             c("pppp1", "plain fix"),
             c("aaaa1", "A\n\nwhy A"),
@@ -507,8 +522,8 @@ mod tests {
         ];
         let groups = one_plan(&commits, "base", &[r("base", "pppp1")]).unwrap();
         assert_eq!(picks(&groups), [vec!["pppp1", "aaaa1", "bbbb2"]]);
-        assert_eq!(groups[0].message, "A\n\nwhy A");
-        assert_eq!(groups[0].author_of, "aaaa1");
+        assert_eq!(groups[0].message, "B");
+        assert_eq!(groups[0].author_of, "bbbb2");
         // Every commit a fix: the first one's.
         let groups = one_plan(&commits, "base", &[r("base", "bbbb2")]).unwrap();
         assert_eq!(groups[0].author_of, "pppp1");
@@ -520,6 +535,52 @@ mod tests {
         ));
         assert!(one_plan(&[], "base", &[]).unwrap().is_empty());
         assert!(is_identity(&[], &[]));
+    }
+
+    /// A spike's commit, the implementation's, and a fixer's `fixup!` of
+    /// the implementation: one commit carrying the implementation's
+    /// message and author, not the spike's.
+    #[test]
+    fn one_folds_a_spike_and_its_fixes_under_the_implementation() {
+        let commits = [
+            c("spik1", "Spike: measure the thing\n\nwhy the spike"),
+            c("impl1", "Implement the thing\n\nwhy"),
+            c("ffff1", "fixup! Implement the thing"),
+        ];
+        let ranges = [r("impl1", "ffff1")];
+        let groups = one_plan(&commits, "base", &ranges).unwrap();
+        assert_eq!(picks(&groups), [vec!["spik1", "impl1", "ffff1"]]);
+        assert_eq!(groups[0].message, "Implement the thing\n\nwhy");
+        assert_eq!(groups[0].author_of, "impl1");
+    }
+
+    #[test]
+    fn one_skips_plain_fixes_and_autosquash_commits_and_appends_squash_bodies() {
+        let commits = [
+            c("aaaa1", "A\n\nwhy A"),
+            c("ssss1", "squash! A\n\nsquash body"),
+            c("pppp1", "plain fix"),
+            c("ffff1", "fixup! A"),
+        ];
+        // The plain fix came from a round; the autosquash commits from
+        // no recorded round at all.
+        let groups = one_plan(&commits, "base", &[r("ssss1", "pppp1")]).unwrap();
+        assert_eq!(groups[0].author_of, "aaaa1");
+        assert_eq!(groups[0].message, "A\n\nwhy A\n\nsquash body");
+        // Every commit an autosquash or a fix: the first one's.
+        let only = [c("ffff1", "fixup! A"), c("pppp1", "plain fix")];
+        let groups = one_plan(&only, "base", &[r("ffff1", "pppp1")]).unwrap();
+        assert_eq!(groups[0].author_of, "ffff1");
+    }
+
+    #[test]
+    fn one_folds_a_base_anchored_round() {
+        // The fixer's commit is the branch's first: its round opened at
+        // the base.
+        let commits = [c("pppp1", "plain fix"), c("aaaa1", "A")];
+        let groups = one_plan(&commits, "base", &[r("base", "pppp1")]).unwrap();
+        assert_eq!(picks(&groups), [vec!["pppp1", "aaaa1"]]);
+        assert_eq!(groups[0].author_of, "aaaa1");
     }
 
     #[test]

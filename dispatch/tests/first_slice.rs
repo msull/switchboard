@@ -13515,10 +13515,10 @@ fn one_completes_with_one_commit() {
         [(
             tree,
             "root0000".to_owned(),
-            vec![group(
-                &["impl0001", "base0000", "fix00001", "fix00002"],
-                "A"
-            )]
+            vec![Group {
+                author_of: "base0000".to_owned(),
+                ..group(&["impl0001", "base0000", "fix00001", "fix00002"], "B")
+            }]
         )]
     );
     let r = a.rewrite.clone().unwrap();
@@ -13528,6 +13528,164 @@ fn one_completes_with_one_commit() {
     assert!(
         summary.contains("Squashed 4 commits to one: `fix00002` → `fold0001`."),
         "{summary}"
+    );
+}
+
+// --- the commit count at the stage after the code review
+
+/// `at_final_checks` with an agent `pr` stage after `review-code`, its
+/// commits mode `mode`, and the implement stage keeping its commit
+/// when `keeps`; the final checks pass and the review ends.
+fn reviewed_with_pr(env: &mut Env, mode: &str, keeps: bool) -> (String, PathBuf) {
+    with_three_rounds(env);
+    with_commits(env, mode);
+    let path = env.data.pipeline(PROJECT);
+    let mut text = std::fs::read_to_string(&path).unwrap().replace(
+        "[[stages]]\nname = \"inspect\"\n",
+        "[[stages]]\nname = \"pr\"\noperator = \"implementer\"\ncontext = \"each\"\nwrites = [\"notes\"]\nprompt = \"Open a pull request for {branch}.\"\n\n[[stages]]\nname = \"inspect\"\n",
+    );
+    if keeps {
+        let implement = "prompt = \"Implement {inputs.plan} on {branch}.\"";
+        assert!(text.contains(implement));
+        text = text.replace(implement, &format!("keeps_commit = true\n{implement}"));
+    }
+    std::fs::write(path, text).unwrap();
+    let id = at_review(env);
+    let tree = seed_commits(env, &id);
+    two_fixes_then_the_final_checks(env, &id);
+    (id, tree)
+}
+
+fn commit(sha: &str, message: &str) -> Commit {
+    Commit {
+        sha: sha.to_owned(),
+        parents: 1,
+        message: message.to_owned(),
+    }
+}
+
+/// The fake's branch still holds the four commits after the fold, as a
+/// commit added after it would: `pr` refuses before any agent starts,
+/// with each commit in the reason and `rerun | park`, and a rerun once
+/// the lane holds one commit launches.
+#[test]
+fn pr_refuses_a_branch_over_its_commit_limit_and_a_rerun_counts_again() {
+    let mut env = Env::new();
+    let (id, tree) = reviewed_with_pr(&mut env, "one", false);
+    let a = final_checks_pass(&mut env, &id);
+    assert_eq!(a.state, AttemptState::Complete);
+    let launched = launches_of(&env, "implementer");
+    env.steps_until(&id, "pr failing", |t, _| {
+        t.attempts_of("pr")
+            .last()
+            .is_some_and(|a| matches!(a.state, AttemptState::Failed { .. }))
+    });
+    let t = env.ticket(&id);
+    let pr = t.attempts_of("pr").last().unwrap().clone();
+    assert_eq!(pr.session, None);
+    let AttemptState::Failed { reason } = &pr.state else {
+        unreachable!()
+    };
+    for expected in [
+        "the branch holds 4 commits since root000, and the pipeline allows 1 at pr",
+        "impl000 A; base000 B; fix0000 fixup! A; fix0000 plain fix",
+        "answer rerun, which counts again",
+    ] {
+        assert!(reason.contains(expected), "{reason}");
+    }
+    assert_eq!(launches_of(&env, "implementer"), launched, "no agent");
+    let d = env
+        .pending(&id)
+        .into_iter()
+        .find(|d| d.name == "rerun")
+        .unwrap();
+    assert_eq!(d.options, ["rerun", "park"]);
+    env.repo
+        .lock()
+        .unwrap()
+        .commits
+        .insert(tree, vec![commit("fold0001", "B")]);
+    answer_rerun(&mut env, &id, "rerun");
+    env.steps_until(&id, "the pr agent", |t, _| {
+        t.attempts_of("pr")
+            .last()
+            .is_some_and(|a| a.session.is_some())
+    });
+    assert_eq!(launches_of(&env, "implementer"), launched + 1);
+    assert!(!last_prompt_of(&env, "implementer").contains("Commits line"));
+}
+
+/// The `pr` agent launched, committed, and failed: the rerun holds more
+/// commits than the limit and is not counted against it again.
+#[test]
+fn a_rerun_of_pr_after_its_own_commits_is_not_counted_again() {
+    let mut env = Env::new();
+    let (id, tree) = reviewed_with_pr(&mut env, "one", false);
+    env.repo
+        .lock()
+        .unwrap()
+        .commits
+        .insert(tree.clone(), vec![commit("fold0001", "B")]);
+    final_checks_pass(&mut env, &id);
+    env.steps_until(&id, "the pr agent", |t, _| {
+        t.attempts_of("pr")
+            .last()
+            .is_some_and(|a| a.session.is_some())
+    });
+    let launched = launches_of(&env, "implementer");
+    let pr = session_of(&env.ticket(&id), "pr");
+    let now = env.now;
+    env.sb().stop(&pr, now);
+    for _ in 0..STOP_IDLE_POLLS + 5 {
+        env.step();
+    }
+    env.repo.lock().unwrap().commits.insert(
+        tree,
+        vec![commit("fold0001", "B"), commit("pr000001", "fragment")],
+    );
+    answer_rerun(&mut env, &id, "rerun");
+    env.steps_until(&id, "the second pr agent", |t, _| {
+        t.attempts_of("pr").count() == 2 && t.attempts_of("pr").last().unwrap().session.is_some()
+    });
+    assert_eq!(launches_of(&env, "implementer"), launched + 1);
+}
+
+/// A review that keeps its commits, or folds with none declared kept
+/// (a ticket's older copy of the pipeline), leaves the count alone.
+#[test]
+fn pr_counts_nothing_after_a_review_that_keeps_or_folds_with_nothing_kept() {
+    for mode in ["keep", "fold"] {
+        let mut env = Env::new();
+        let (id, _) = reviewed_with_pr(&mut env, mode, false);
+        final_checks_pass(&mut env, &id);
+        env.steps_until(&id, "the pr agent", |t, _| {
+            t.attempts_of("pr")
+                .last()
+                .is_some_and(|a| a.session.is_some())
+        });
+    }
+}
+
+/// A fold with the implement stage's commit declared kept: two commits
+/// are allowed at `pr`, and the prompt names the kept one.
+#[test]
+fn pr_allows_a_kept_commit_and_names_it_in_the_prompt() {
+    let mut env = Env::new();
+    let (id, tree) = reviewed_with_pr(&mut env, "fold", true);
+    env.repo.lock().unwrap().commits.insert(
+        tree,
+        vec![commit("fold0001", "A\n\nwhy A"), commit("fold0002", "B")],
+    );
+    final_checks_pass(&mut env, &id);
+    env.steps_until(&id, "the pr agent", |t, _| {
+        t.attempts_of("pr")
+            .last()
+            .is_some_and(|a| a.session.is_some())
+    });
+    let prompt = last_prompt_of(&env, "implementer");
+    assert!(
+        prompt.contains("The branch carries 2 commits by the pipeline's declaration: the earlier ones are kept as their own (A). Name them in the body under a Commits line."),
+        "{prompt}"
     );
 }
 

@@ -6281,6 +6281,21 @@ impl Runner {
                 now_ms,
             );
         }
+        let commit_note = match self.count_commits(t, p, stage, cwd, lane, now_ms)? {
+            CommitCount::Within(note) => note,
+            CommitCount::Refused(reason) => {
+                t.attempts.push(new_attempt(
+                    &stage.name,
+                    n,
+                    ctx,
+                    AttemptKind::Agent,
+                    AttemptState::Starting,
+                    BTreeMap::new(),
+                    now_ms,
+                ));
+                return self.fail_attempt(t, ps, &stage.name, n, &reason, now_ms);
+            }
+        };
         let dir = self.attempt_dir(t, &stage.name, n, ctx)?;
         let artifacts = artifact_paths(stage, &dir);
         let evidence = make_evidence(stage, &dir)?;
@@ -6313,6 +6328,9 @@ impl Runner {
                 moved.from, moved.to, moved.from, moved.to
             );
         }
+        if let Some(note) = commit_note {
+            prompt.push_str(&note);
+        }
         // The note is taken off only with the attempt that carries it:
         // a launch that stops short (a setup still running) keeps it.
         let key = rework_key(&stage.name, ctx);
@@ -6334,6 +6352,73 @@ impl Runner {
             evidence,
         };
         self.launch_agent(t, ps, p, &stage.name, ctx, cwd, n, spec, now_ms)
+    }
+
+    /// The branch's commits against `stage`'s limit, read in the lane
+    /// at the head the stage starts at, after any refresh: a commit made
+    /// after the code review, by anyone, is counted. A git count, never
+    /// what the forge reports. A stage whose agent already launched in
+    /// this context passed the count then; what the branch holds now
+    /// includes that agent's own commits, so a rerun is not counted.
+    fn count_commits(
+        &mut self,
+        t: &mut Ticket,
+        p: &Pipeline,
+        stage: &Stage,
+        cwd: &Path,
+        lane: Option<&str>,
+        now_ms: u64,
+    ) -> Result<CommitCount> {
+        let Some(limit) = p.commit_limit(stage) else {
+            return Ok(CommitCount::Within(None));
+        };
+        let ctx = lane.unwrap_or("root");
+        if t.attempts_of(&stage.name)
+            .any(|a| a.context == ctx && a.agent.is_some())
+        {
+            return Ok(CommitCount::Within(None));
+        }
+        let base = self.base_of(t, p, cwd, lane, now_ms)?;
+        let commits = match self
+            .git
+            .head(cwd)
+            .and_then(|head| self.git.commits(cwd, &base, &head))
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CommitCount::Refused(format!(
+                    "the commits since {base} could not be read: {e:#}"
+                )));
+            }
+        };
+        let listed = || {
+            commits
+                .iter()
+                .map(|c| format!("{} {}", crate::events::short(&c.sha), c.subject()))
+                .collect::<Vec<_>>()
+        };
+        if commits.len() > limit {
+            return Ok(CommitCount::Refused(format!(
+                "the branch holds {} commits since {}, and the pipeline allows {limit} at {}: {}; amend or fold them by hand in {} and answer rerun, which counts again",
+                commits.len(),
+                crate::events::short(&base),
+                stage.name,
+                listed().join("; "),
+                cwd.display()
+            )));
+        }
+        if limit == 1 || commits.len() < 2 {
+            return Ok(CommitCount::Within(None));
+        }
+        let kept: Vec<&str> = commits[..commits.len() - 1]
+            .iter()
+            .map(crate::history::Commit::subject)
+            .collect();
+        Ok(CommitCount::Within(Some(format!(
+            "\n\nThe branch carries {} commits by the pipeline's declaration: the earlier ones are kept as their own ({}). Name them in the body under a Commits line.",
+            commits.len(),
+            kept.join("; ")
+        ))))
     }
 
     /// The attempt's own directory under the ticket's, made.
@@ -10384,6 +10469,16 @@ pub(crate) fn note_transcript(t: &mut Ticket, record: &str, view: &wire::Session
             seen_ms: now_ms,
         }),
     }
+}
+
+/// What the branch's commits say about starting a stage that has a
+/// commit limit.
+enum CommitCount {
+    /// Within the limit; the note the prompt carries about the kept
+    /// commits, if any.
+    Within(Option<String>),
+    /// Over it, or unreadable: the reason the attempt fails.
+    Refused(String),
 }
 
 /// A fresh attempt record.

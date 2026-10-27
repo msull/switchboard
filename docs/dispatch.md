@@ -1815,7 +1815,11 @@ history once the checks pass at the head it completes at: `keep` (the
 default) leaves the commits as the implementer and the fixers made
 them; `fold` folds each fix round's commits into the commits they
 amend; `one` makes the whole branch one commit, with the message and
-author of the first commit no fix round made. A `fixup!` or `squash!`
+author of the last commit that no fix round made and that is not a
+`fixup!` or `squash!` commit (the first commit when every one is), and
+each `squash!` body appended. A fixer's commits are all fix-round or
+autosquash commits, so that is the implementation's last commit, not a
+spike's before it. A `fixup!` or `squash!`
 commit folds into its target the way git's autosquash finds it (the
 subject, then a sha prefix, then a subject prefix; a `squash!` keeps
 its body). Any other commit a fix round made, from that round's
@@ -1874,6 +1878,25 @@ locally, no fetch) holds a commit of `base..head`. The ref is the
 signal that matters: an agent's `git push` records nothing on the
 ticket. A ref holding only commits of the base or older does not
 count. A pull-request pipeline takes only `keep`.
+
+**The commit count after the review.** The agent stage right after a
+code review whose `commits` is `one`, or `fold` with a stage before it
+that says `keeps_commit = true`, counts the branch's commits before
+its agent starts: `git`'s commits from the lane's base to the head the
+stage starts at, after any refresh, so a commit added after the
+review by anyone is counted. The limit is one, plus one for each
+`keeps_commit` stage. Over it, the attempt fails before any session
+starts, with the count and each commit as `<short sha> <subject>` in
+the reason, and asks `rerun | park` (no `keep`); amend or fold the
+commits by hand in the lane and answer `rerun`, which counts again.
+Within a limit above one, the prompt says how many commits the branch
+carries by the pipeline's declaration, names the subjects of the
+earlier ones, and asks for them under a `Commits` line in the body.
+A review with `keep`, or `fold` with nothing kept, asked for its
+commits to stay as units, and nothing is counted. `keeps_commit` is
+refused on a code review stage, on a stage with no code review after
+it, and alongside a later code review with `commits = "one"`, which
+would fold the kept commit too.
 
 **Folded messages.** A fold keeps the message of the commit a fix
 folds into, so a review that renamed `old_name` to `new_name` can leave

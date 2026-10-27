@@ -167,7 +167,7 @@ context = "each"
 reviewers = ["correctness", "style"]
 implementer = "fixer"
 cap = 3
-commits = "fold"             # as the stage completes, each fix round folds into the commits it amends; the tree is unchanged, so the checks are not run again
+commits = "one"              # as the stage completes, every commit since the base (a spike's, the implementation's, each fix round's) folds into one with the implementation's message, so the pull request is one commit and pr refuses more; the tree is unchanged, so the checks are not run again
 gate = { kind = "command", like = "implement" }
 
 [[stages]]
