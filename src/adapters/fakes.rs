@@ -141,6 +141,8 @@ pub struct FakeHostState {
     /// Every raw `write` into a pane, oldest first: keys as well as
     /// the bytes of each line.
     pub keys: Vec<(HostId, Vec<u8>)>,
+    /// The next `snapshot` panics, once: a read that blows up.
+    pub panic_snapshot: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -175,6 +177,10 @@ impl ProcessHost for FakeHost {
             .ok_or_else(|| std::io::Error::other("no such session"))
     }
     fn snapshot(&self, id: &HostId, _lines: Option<usize>) -> std::io::Result<String> {
+        // Taken in its own statement so the guard is dropped before the
+        // panic, which would otherwise poison the fake for the test.
+        let boom = std::mem::take(&mut self.state().panic_snapshot);
+        assert!(!boom, "snapshot panicked on purpose");
         Ok(self.state().snapshots.get(id).cloned().unwrap_or_default())
     }
     fn write(&self, id: &HostId, bytes: &[u8]) -> std::io::Result<()> {

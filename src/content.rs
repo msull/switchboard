@@ -35,6 +35,7 @@ use crate::ports::secrets::SecretStore;
 use crate::ports::transcript::{
     ActivityKind, Conversation, TranscriptReader, TranscriptVersion, Turn,
 };
+use crate::sync::lock_recover;
 
 /// How often the worker reads every watched key.
 pub const WATCH_POLL: Duration = Duration::from_secs(2);
@@ -492,13 +493,13 @@ impl ContentWorker {
                 .name("switchboard-content".into())
                 .spawn(move || {
                     let mut cache = Cache::new(secrets);
-                    let every = || *poll.lock().expect("poll");
+                    let every = || *lock_recover(&poll, "content poll");
                     let mut next_poll = Instant::now() + every();
                     while !stop.load(Ordering::SeqCst) {
                         let wait = next_poll.saturating_duration_since(Instant::now());
                         match inbox.recv_timeout(wait) {
                             Ok(Work::Job(job)) => {
-                                let out = observe(&*host, &*transcripts, &mut cache, &job);
+                                let out = observe_caught(&*host, &*transcripts, &mut cache, &job);
                                 if observed.send(out).is_err() {
                                     return;
                                 }
@@ -507,10 +508,11 @@ impl ContentWorker {
                             Ok(Work::Nudge) => next_poll = Instant::now() + every(),
                             Err(mpsc::RecvTimeoutError::Disconnected) => return,
                             Err(mpsc::RecvTimeoutError::Timeout) => {
-                                let jobs = watch.lock().map(|w| w.clone()).unwrap_or_default();
+                                let jobs = lock_recover(&watch, "content watch").clone();
                                 cache.retain(&jobs);
                                 for job in jobs {
-                                    let out = observe(&*host, &*transcripts, &mut cache, &job);
+                                    let out =
+                                        observe_caught(&*host, &*transcripts, &mut cache, &job);
                                     if observed.send(out).is_err() {
                                         return;
                                     }
@@ -541,16 +543,12 @@ impl ContentWorker {
 
     /// Replace what the poll reads.
     pub fn set_watch(&self, jobs: Vec<ContentJob>) {
-        if let Ok(mut w) = self.watch.lock() {
-            *w = jobs;
-        }
+        *lock_recover(&self.watch, "content watch (set)") = jobs;
     }
 
     /// How often the poll runs, from now; tests shorten it.
     pub fn set_poll(&self, every: Duration) {
-        if let Ok(mut p) = self.poll.lock() {
-            *p = every;
-        }
+        *lock_recover(&self.poll, "content poll (set)") = every;
         let _ = self.jobs.try_send(Work::Nudge);
     }
 }
@@ -589,6 +587,14 @@ impl Cache {
             files: HashMap::new(),
             tickets: HashMap::new(),
         }
+    }
+
+    /// Drop every entry, keeping the secret store.
+    fn reset(&mut self) {
+        self.policies.clear();
+        self.transcripts.clear();
+        self.files.clear();
+        self.tickets.clear();
     }
 }
 
@@ -778,6 +784,34 @@ fn file_error(e: FileError) -> ContentError {
         FileError::TooLarge(size) => ContentError::TooLarge(size),
         other => ContentError::Failed(other.to_string()),
     }
+}
+
+/// [`observe`], with a panic in the read answered as `failed` so the
+/// worker lives on and a waiting reply is not left hanging. The cache
+/// may hold a half-updated entry after a panic, so it starts over.
+fn observe_caught(
+    host: &dyn ProcessHost,
+    transcripts: &dyn TranscriptReader,
+    cache: &mut Cache,
+    job: &ContentJob,
+) -> Observed {
+    // `AssertUnwindSafe` says the borrows are fine to use after a
+    // panic: the cache is reset below, and the rest is only read.
+    let read = std::panic::AssertUnwindSafe(|| observe(host, transcripts, cache, job));
+    std::panic::catch_unwind(read).unwrap_or_else(|_| {
+        log::warn!(
+            "content: the read of {} {} panicked",
+            job.key.kind(),
+            job.key.id()
+        );
+        cache.reset();
+        Observed {
+            key: job.key.clone(),
+            policy: 0,
+            result: Err(ContentError::Failed("the read panicked".to_owned())),
+            reply: job.reply.clone(),
+        }
+    })
 }
 
 /// One job on the worker: the source read whole, versioned by what
@@ -1573,5 +1607,85 @@ mod tests {
             serde_json::json!({ "a\"b\\c": ["x <KEY> y", 3, {"text": "<KEY>"}] }),
             "values masked, keys left"
         );
+    }
+
+    /// A worker over a fake host, with what it observes on `rx`.
+    fn worker(
+        host: &crate::adapters::fakes::FakeHost,
+    ) -> (ContentWorker, mpsc::Receiver<Observed>) {
+        let (tx, rx) = mpsc::channel();
+        let worker = ContentWorker::spawn(
+            Arc::new(host.clone()),
+            Arc::new(crate::adapters::fakes::FakeTranscripts::default()),
+            Arc::new(crate::adapters::fakes::FakeSecrets::default()),
+            tx,
+            Arc::new(|| {}),
+        );
+        (worker, rx)
+    }
+
+    fn screen_job(pane: &str) -> ContentJob {
+        ContentJob {
+            key: ContentKey::Screen(RecordId(uuid::Uuid::nil())),
+            source: Source::Pane(HostId(pane.into())),
+            view: ContentView::Screen { lines: 10 },
+            policies: vec![PolicySpec {
+                sets: Vec::new(),
+                record_sets: Vec::new(),
+                ..set_spec()
+            }],
+            reply: None,
+        }
+    }
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn a_read_that_panics_answers_failed_and_the_worker_reads_on() {
+        let host = crate::adapters::fakes::FakeHost::default();
+        host.state()
+            .snapshots
+            .insert(HostId("p".into()), "hello".into());
+        host.state().panic_snapshot = true;
+        let (worker, rx) = worker(&host);
+        assert!(worker.submit(screen_job("p")));
+        let out = rx
+            .recv_timeout(WAIT)
+            .expect("an answer for the panicked read");
+        assert_eq!(
+            out.result.unwrap_err(),
+            ContentError::Failed("the read panicked".into())
+        );
+        assert!(worker.submit(screen_job("p")));
+        let out = rx.recv_timeout(WAIT).expect("the worker lives on");
+        assert!(out.result.is_ok());
+    }
+
+    #[test]
+    fn a_poisoned_poll_lock_still_polls_and_takes_updates() {
+        let host = crate::adapters::fakes::FakeHost::default();
+        let (worker, rx) = worker(&host);
+        worker.set_watch(vec![screen_job("p")]);
+        let poll = Arc::clone(&worker.poll);
+        let _ = std::thread::spawn(move || {
+            let _held = poll.lock().unwrap();
+            panic!("poison the poll lock");
+        })
+        .join();
+        let watch = Arc::clone(&worker.watch);
+        let _ = std::thread::spawn(move || {
+            let _held = watch.lock().unwrap();
+            panic!("poison the watch lock");
+        })
+        .join();
+        assert!(worker.watch.is_poisoned());
+        // `set_poll` takes its update through the poisoned poll lock; no
+        // `set_watch` follows, so only the worker's own poll read can
+        // clear the watch poison and answer with the job's data.
+        worker.set_poll(Duration::from_millis(10));
+        assert_eq!(*worker.poll.lock().unwrap(), Duration::from_millis(10));
+        let out = rx.recv_timeout(WAIT).expect("the poll reads the watch");
+        assert_eq!(out.key, ContentKey::Screen(RecordId(uuid::Uuid::nil())));
+        assert!(!worker.watch.is_poisoned());
     }
 }
