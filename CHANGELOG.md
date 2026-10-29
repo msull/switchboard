@@ -10,6 +10,18 @@ publishes that section as the release notes. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-29
+
+### Added
+
+- The remote port serves any text file under a project's root, not only pinned ones, and each turn of a conversation names the files the agent wrote about, so a paired device can open them.
+- On the headset, a file the agent names in a conversation is a link, and a tap opens it in its own window at the line named.
+- Pin boards on the headset: a window of live tiles of sessions and files from any host, equal in size in a grid of two, three or four across, reordered by dragging a tile's bar, and saved, so a board opened again after a relaunch shows the same tiles in the same order; a pin button on every card and file window, and the boards listed in the main window in place of the hosts' working sets.
+
+### Changed
+
+- On the headset a new session card opens in portrait, 580 by 900 points, rather than wider than tall.
+
 ## [0.9.0] - 2026-10-27
 
 ### Added
