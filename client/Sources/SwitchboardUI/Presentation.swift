@@ -215,6 +215,39 @@ public enum LaunchLog {
 /// its own. Opening a request whose window is open brings that window
 /// forward, so a click on a listed session goes to its window when
 /// there is one, and a request with a fresh id is a second window.
+/// What a file window presents: one file on one host, with an id so a
+/// second window on the same file can be opened on purpose.
+public struct FileWindowRequest: Codable, Hashable, Sendable {
+    public let id: UUID
+    public let ref: FileRef
+
+    public init(id: UUID = UUID(), ref: FileRef) {
+        self.id = id
+        self.ref = ref
+    }
+
+    /// The request that reaches the window open on `ref` among the
+    /// ones on screen; the lowest id when there are several.
+    public static func open(on ref: FileRef, among windows: [UUID: FileRef]) -> FileWindowRequest? {
+        windows
+            .filter { $0.value == ref }
+            .keys
+            .min { $0.uuidString < $1.uuidString }
+            .map { FileWindowRequest(id: $0, ref: ref) }
+    }
+}
+
+/// A line a file window is asked to show; `n` moves on every ask.
+public struct LineRequest: Equatable, Sendable {
+    public let line: Int
+    public let n: Int
+
+    public init(line: Int, n: Int) {
+        self.line = line
+        self.n = n
+    }
+}
+
 public struct CardWindowRequest: Codable, Hashable, Sendable {
     public let id: UUID
     public let ref: SessionRef

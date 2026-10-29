@@ -28,6 +28,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::adapters::files::{self, FileError};
 use crate::adapters::remote::RemoteReply;
 use crate::adapters::scrollback;
+use crate::core::file_refs;
 use crate::core::model::{EnvSet, EnvVar, ProjectEnv};
 use crate::core::{ProjectId, RecordId, ResumeHandle, resolve_sets};
 use crate::ports::host::{HostId, ProcessHost};
@@ -334,7 +335,14 @@ fn mask_json(value: &mut serde_json::Value, policy: &Policy) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     Pane(HostId),
-    Transcript(ResumeHandle),
+    /// A Claude Code transcript, with the project root and the
+    /// session's working directory the paths in its prose are resolved
+    /// against for the links on the wire.
+    Transcript {
+        handle: ResumeHandle,
+        root: PathBuf,
+        cwd: PathBuf,
+    },
     Log(PathBuf),
     /// A pinned file: the project root and the path under it.
     File {
@@ -612,7 +620,61 @@ struct ParsedEntry {
     version: TranscriptVersion,
     policy: u64,
     conversation: Conversation,
+    links: Links,
     touched: Instant,
+}
+
+/// A file an agent named in its prose, as the wire carries it: the
+/// byte range of the token in the text as sent, the path under the
+/// project root, and the line the token named.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Link {
+    pub start: usize,
+    pub end: usize,
+    pub path: String,
+    pub line: Option<u32>,
+}
+
+/// The links of every piece of prose in a conversation, by
+/// [`file_refs::text_key`] of the text. Existence checks on disk are
+/// what the scan costs, so a text already scanned is not scanned
+/// again when the transcript grows.
+pub type Links = HashMap<u64, Vec<Link>>;
+
+/// The links of `conversation`'s prose, resolved as the app's own
+/// view resolves them (the project root, then the session's working
+/// directory), kept only for files under the root, since that is what
+/// the port serves; entries of `previous` are reused by text.
+#[must_use]
+pub fn link_map(
+    conversation: &Conversation,
+    root: &std::path::Path,
+    cwd: &std::path::Path,
+    previous: &Links,
+) -> Links {
+    let mut out = Links::new();
+    for text in file_refs::prose_texts(conversation) {
+        let key = file_refs::text_key(text);
+        if out.contains_key(&key) {
+            continue;
+        }
+        let links = previous.get(&key).cloned().unwrap_or_else(|| {
+            file_refs::resolve(text, |r| files::existing_file(&r.path, root, cwd))
+                .into_iter()
+                .filter_map(|(r, path)| {
+                    let relative = path.strip_prefix(root).ok()?;
+                    Some(Link {
+                        start: r.range.start,
+                        end: r.range.end,
+                        path: relative.to_string_lossy().into_owned(),
+                        line: r.line,
+                    })
+                })
+                .collect()
+        });
+        out.insert(key, links);
+    }
+    out
 }
 
 struct FileEntry {
@@ -695,8 +757,10 @@ impl Cache {
         transcripts: &dyn TranscriptReader,
         record: RecordId,
         handle: &ResumeHandle,
+        root: &std::path::Path,
+        cwd: &std::path::Path,
         policy: &Policy,
-    ) -> Result<(u64, &Conversation), ContentError> {
+    ) -> Result<(u64, &Conversation, &Links), ContentError> {
         let version = transcripts
             .version(handle)
             .ok_or_else(|| ContentError::Failed("no transcript file yet".to_owned()))?;
@@ -707,6 +771,8 @@ impl Cache {
             let conversation = transcripts
                 .read_masked(handle, &|s| policy.mask(s))
                 .map_err(ContentError::Failed)?;
+            let previous = self.transcripts.remove(&record).map(|e| e.links);
+            let links = link_map(&conversation, root, cwd, &previous.unwrap_or_default());
             self.transcripts.insert(
                 record,
                 ParsedEntry {
@@ -714,6 +780,7 @@ impl Cache {
                     version,
                     policy: policy.fingerprint,
                     conversation,
+                    links,
                     touched: Instant::now(),
                 },
             );
@@ -722,7 +789,7 @@ impl Cache {
         entry.touched = Instant::now();
         let mut h = DefaultHasher::new();
         (handle.provider_id(), version).hash(&mut h);
-        Ok((h.finish(), &entry.conversation))
+        Ok((h.finish(), &entry.conversation, &entry.links))
     }
 
     /// The masked file under `key`: the walk and the stat every time,
@@ -843,21 +910,23 @@ fn observe(
                 let redacted = policy.mask(&text);
                 (h.finish(), tail_body(&redacted, lines))
             }),
-        (Source::Transcript(handle), view) => cache
+        (Source::Transcript { handle, root, cwd }, view) => cache
             .conversation(
                 transcripts,
                 job.key.record().unwrap_or(RecordId(uuid::Uuid::nil())),
                 handle,
+                root,
+                cwd,
                 &policy,
             )
-            .map(|(source, conversation)| {
+            .map(|(source, conversation, links)| {
                 let resume_id = handle.provider_id();
                 let body = match view {
                     ContentView::Page { from, limit } => {
-                        conversation_page(conversation, &resume_id, from, limit)
+                        conversation_page(conversation, links, &resume_id, from, limit)
                     }
-                    ContentView::Turn { n } => turn_body(conversation, &resume_id, n),
-                    _ => last_response(conversation, &resume_id),
+                    ContentView::Turn { n } => turn_body(conversation, links, &resume_id, n),
+                    _ => last_response(conversation, links, &resume_id),
                 };
                 (source, body)
             }),
@@ -917,6 +986,7 @@ fn ms(t: Option<SystemTime>) -> Option<u64> {
 #[must_use]
 pub fn conversation_page(
     conversation: &Conversation,
+    links: &Links,
     resume_id: &str,
     from: PageFrom,
     limit: usize,
@@ -933,7 +1003,7 @@ pub fn conversation_page(
             let mut turns = Vec::new();
             let mut next = None;
             for turn in conversation.turns.iter().skip(first - 1) {
-                let (value, size) = turn_json(turn, false);
+                let (value, size) = turn_json(turn, links, false);
                 if !fits(turns.len(), bytes, size) {
                     next = Some(turn.n);
                     break;
@@ -950,7 +1020,7 @@ pub fn conversation_page(
             };
             let mut turns = Vec::new();
             for turn in conversation.turns[..end].iter().rev() {
-                let (value, size) = turn_json(turn, false);
+                let (value, size) = turn_json(turn, links, false);
                 if !fits(turns.len(), bytes, size) {
                     break;
                 }
@@ -990,11 +1060,16 @@ pub fn conversation_page(
 /// conversation, carrying its version. An empty conversation is turn
 /// zero with no text.
 #[must_use]
-pub fn last_response(conversation: &Conversation, resume_id: &str) -> serde_json::Value {
+pub fn last_response(
+    conversation: &Conversation,
+    links: &Links,
+    resume_id: &str,
+) -> serde_json::Value {
     let last = conversation.turns.last();
     let (text, truncated) = last.map_or((String::new(), false), |t| {
         cap_text(&t.final_text, TURN_BYTES_CAP)
     });
+    let links = last.map_or_else(Vec::new, |t| links_in(links, &t.final_text, &text));
     serde_json::json!({
         "resume_id": resume_id,
         "n": last.map_or(0, |t| t.n),
@@ -1003,7 +1078,27 @@ pub fn last_response(conversation: &Conversation, resume_id: &str) -> serde_json
         "total": conversation.turns.len(),
         "text": text,
         "truncated": truncated,
+        "links": links,
     })
+}
+
+/// The links of `original` that still point into `sent`, which is the
+/// original whole or its head: a text cut from its front keeps none,
+/// since every range would have moved.
+fn links_in(links: &Links, original: &str, sent: &str) -> Vec<Link> {
+    if !original.starts_with(sent) {
+        return Vec::new();
+    }
+    links
+        .get(&file_refs::text_key(original))
+        .map(|found| {
+            found
+                .iter()
+                .filter(|l| l.end <= sent.len())
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// One turn on the wire and its size. Over the turn cap the tool
@@ -1012,11 +1107,16 @@ pub fn last_response(conversation: &Conversation, resume_id: &str) -> serde_json
 /// One turn whole on the wire, for a client that opened a turn's
 /// activity on a page and wants the detail the page cut.
 #[must_use]
-pub fn turn_body(conversation: &Conversation, resume_id: &str, n: usize) -> serde_json::Value {
+pub fn turn_body(
+    conversation: &Conversation,
+    links: &Links,
+    resume_id: &str,
+    n: usize,
+) -> serde_json::Value {
     let turn = n
         .checked_sub(1)
         .and_then(|i| conversation.turns.get(i))
-        .map(|t| turn_json(t, true).0);
+        .map(|t| turn_json(t, links, true).0);
     serde_json::json!({
         "resume_id": resume_id,
         "total": conversation.turns.len(),
@@ -1028,13 +1128,13 @@ pub fn turn_body(conversation: &Conversation, resume_id: &str, n: usize) -> serd
 /// and notes go first, then its prompt is shortened, then its answer is
 /// cut from the front. `full` carries each activity's text whole; a
 /// page carries the head of each, marked `more`, to stay light.
-fn turn_json(turn: &Turn, full: bool) -> (serde_json::Value, usize) {
+fn turn_json(turn: &Turn, links: &Links, full: bool) -> (serde_json::Value, usize) {
     let mut lean = false;
     let mut user = turn.user.clone();
     let mut final_text = turn.final_text.clone();
     let mut truncated = false;
     loop {
-        let value = turn_value(turn, &user, &final_text, lean, truncated, full);
+        let value = turn_value(turn, links, &user, &final_text, lean, truncated, full);
         let size = value.to_string().len();
         if size <= TURN_BYTES_CAP {
             return (value, size);
@@ -1054,6 +1154,7 @@ fn turn_json(turn: &Turn, full: bool) -> (serde_json::Value, usize) {
 
 fn turn_value(
     turn: &Turn,
+    links: &Links,
     user: &str,
     final_text: &str,
     lean: bool,
@@ -1103,6 +1204,13 @@ fn turn_value(
                 if more {
                     v["more"] = serde_json::json!(true);
                 }
+                // The links are into the text the row draws: the
+                // message, or its one line when that is all there is.
+                if a.kind == ActivityKind::Text {
+                    let original = file_refs::message_text(a);
+                    let sent = v["text"].as_str().unwrap_or(&a.line).to_owned();
+                    v["links"] = serde_json::json!(links_in(links, original, &sent));
+                }
             }
             v
         })
@@ -1113,6 +1221,7 @@ fn turn_value(
         "end_ms": ms(turn.end),
         "user": user,
         "final_text": final_text,
+        "links": links_in(links, &turn.final_text, final_text),
         "activity": activity,
         "assistant_msgs": turn.assistant_msgs,
         "tools": turn.tools,
@@ -1332,6 +1441,7 @@ impl ConversationCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::transcript::Activity;
 
     fn turns(n: usize) -> Conversation {
         let mut c = Conversation::default();
@@ -1347,32 +1457,84 @@ mod tests {
     }
 
     #[test]
+    fn prose_paths_under_the_root_become_links_and_a_cut_text_keeps_only_those_it_still_holds() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("sub");
+        std::fs::create_dir_all(cwd.join("deep")).unwrap();
+        std::fs::write(root.path().join("plan.md"), "").unwrap();
+        std::fs::write(cwd.join("deep").join("a.rs"), "").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("notes.md"), "").unwrap();
+        let mut c = turns(1);
+        c.turns[0].final_text = format!(
+            "See plan.md and `deep/a.rs:12`, not {} or gone.md.",
+            outside.path().join("notes.md").display()
+        );
+        c.turns[0].activity.push(Activity {
+            kind: ActivityKind::Text,
+            line: "Edited plan.md".into(),
+            at: None,
+            error: false,
+            detail: None,
+            text: Some("Edited plan.md first".into()),
+        });
+        let links = link_map(&c, root.path(), &cwd, &Links::new());
+        let page = conversation_page(&c, &links, "r", PageFrom::Turn(1), 10);
+        let turn = &page["turns"][0];
+        assert_eq!(
+            turn["links"],
+            serde_json::json!([
+                {"start": 4, "end": 11, "path": "plan.md", "line": null},
+                {"start": 16, "end": 30, "path": "sub/deep/a.rs", "line": 12},
+            ]),
+            "{turn}"
+        );
+        assert_eq!(turn["activity"][0]["links"][0]["path"], "plan.md");
+        let last = last_response(&c, &links, "r");
+        assert_eq!(last["links"][1]["line"], 12);
+
+        // A message cut to its head keeps the links in the head.
+        c.turns[0].activity[0].text = Some(format!("Edited plan.md, {}", "x".repeat(2000)));
+        let links = link_map(&c, root.path(), &cwd, &links);
+        let page = conversation_page(&c, &links, "r", PageFrom::Turn(1), 10);
+        let row = &page["turns"][0]["activity"][0];
+        assert_eq!(row["more"], true);
+        assert_eq!(row["links"][0]["path"], "plan.md", "{row}");
+        // One cut from its front keeps none.
+        c.turns[0].final_text = format!("plan.md {}", "y".repeat(TURN_BYTES_CAP));
+        let links = link_map(&c, root.path(), &cwd, &links);
+        let page = conversation_page(&c, &links, "r", PageFrom::Turn(1), 10);
+        assert_eq!(page["turns"][0]["truncated"], true);
+        assert_eq!(page["turns"][0]["links"], serde_json::json!([]));
+    }
+
+    #[test]
     fn a_page_stops_at_its_limit_and_says_where_to_continue() {
         let c = turns(5);
-        let page = conversation_page(&c, "r", PageFrom::Turn(1), 2);
+        let page = conversation_page(&c, &Links::new(), "r", PageFrom::Turn(1), 2);
         assert_eq!(page["total"], 5);
         assert_eq!(page["from"], 1);
         assert_eq!(page["next"], 3);
         assert_eq!(page["turns"].as_array().unwrap().len(), 2);
-        let page = conversation_page(&c, "r", PageFrom::Turn(3), 10);
+        let page = conversation_page(&c, &Links::new(), "r", PageFrom::Turn(3), 10);
         assert_eq!(page["next"], serde_json::Value::Null);
         assert_eq!(page["turns"][0]["n"], 3);
         assert_eq!(page["turns"].as_array().unwrap().len(), 3);
-        let page = conversation_page(&c, "r", PageFrom::Last, 2);
+        let page = conversation_page(&c, &Links::new(), "r", PageFrom::Last, 2);
         assert_eq!(page["from"], 4, "the last two");
         assert_eq!(page["next"], serde_json::Value::Null);
         assert_eq!(page["turns"][1]["final_text"], "answer 5");
-        let page = conversation_page(&c, "r", PageFrom::Before(4), 2);
+        let page = conversation_page(&c, &Links::new(), "r", PageFrom::Before(4), 2);
         assert_eq!(page["from"], 2, "the two before turn 4");
         assert_eq!(page["next"], 4);
         assert_eq!(page["turns"][1]["n"], 3);
-        let page = conversation_page(&c, "r", PageFrom::Before(1), 2);
+        let page = conversation_page(&c, &Links::new(), "r", PageFrom::Before(1), 2);
         assert!(page["turns"].as_array().unwrap().is_empty());
         assert_eq!(page["from"], 1);
-        let page = conversation_page(&c, "r", PageFrom::Before(99), 2);
+        let page = conversation_page(&c, &Links::new(), "r", PageFrom::Before(99), 2);
         assert_eq!(page["from"], 4, "past the end: the tail");
         assert_eq!(page["next"], serde_json::Value::Null);
-        let page = conversation_page(&c, "r", PageFrom::Turn(9), 2);
+        let page = conversation_page(&c, &Links::new(), "r", PageFrom::Turn(9), 2);
         assert!(page["turns"].as_array().unwrap().is_empty(), "past the end");
         assert_eq!(page["next"], serde_json::Value::Null);
     }
@@ -1396,12 +1558,12 @@ mod tests {
                 text: None,
             });
         // On a page the detail is the head of itself, so the turn fits.
-        let page = conversation_page(&c, "r", PageFrom::Turn(1), 1);
+        let page = conversation_page(&c, &Links::new(), "r", PageFrom::Turn(1), 1);
         let turn = &page["turns"][0];
         assert_eq!(turn["truncated"], false);
         assert_eq!(turn["activity"][0]["more"], true);
         // Read whole, the detail is over the turn's cap and goes.
-        let whole = turn_body(&c, "r", 1);
+        let whole = turn_body(&c, &Links::new(), "r", 1);
         let turn = &whole["turn"];
         assert_eq!(turn["truncated"], true);
         assert_eq!(turn["final_text"], "answer 1");
@@ -1418,12 +1580,12 @@ mod tests {
         for t in &mut c.turns {
             t.final_text = "y".repeat(200 * 1024);
         }
-        let page = conversation_page(&c, "r", PageFrom::Turn(1), 10);
+        let page = conversation_page(&c, &Links::new(), "r", PageFrom::Turn(1), 10);
         assert_eq!(page["turns"].as_array().unwrap().len(), 3);
         assert_eq!(page["next"], 4);
         // A turn over its own cap is cut first, and the cut size counts.
         c.turns[0].final_text = "y".repeat(PAGE_BYTES_CAP);
-        let page = conversation_page(&c, "r", PageFrom::Turn(1), 10);
+        let page = conversation_page(&c, &Links::new(), "r", PageFrom::Turn(1), 10);
         assert_eq!(page["turns"][0]["truncated"], true);
         assert_eq!(page["turns"].as_array().unwrap().len(), 3);
         assert_eq!(page["next"], 4);
@@ -1435,7 +1597,7 @@ mod tests {
         for t in &mut c.turns {
             t.final_text = "y".repeat(200 * 1024);
         }
-        let page = conversation_page(&c, "r", PageFrom::Last, 20);
+        let page = conversation_page(&c, &Links::new(), "r", PageFrom::Last, 20);
         let ns: Vec<_> = page["turns"]
             .as_array()
             .unwrap()
@@ -1445,7 +1607,7 @@ mod tests {
         assert_eq!(ns, [6, 7, 8], "the last turns that fit, ending at the end");
         assert_eq!(page["from"], 6);
         assert_eq!(page["next"], serde_json::Value::Null);
-        let page = conversation_page(&c, "r", PageFrom::Before(6), 20);
+        let page = conversation_page(&c, &Links::new(), "r", PageFrom::Before(6), 20);
         assert_eq!(page["from"], 3);
         assert_eq!(page["next"], 6);
         assert_eq!(page["turns"].as_array().unwrap().len(), 3);
@@ -1469,7 +1631,7 @@ mod tests {
                 }),
                 text: None,
             });
-        let page = conversation_page(&c, "r", PageFrom::Turn(1), 10);
+        let page = conversation_page(&c, &Links::new(), "r", PageFrom::Turn(1), 10);
         let activity = &page["turns"][1]["activity"][0];
         assert_eq!(activity["more"], true);
         assert_eq!(
@@ -1482,7 +1644,7 @@ mod tests {
         );
         assert!(page["turns"][0]["activity"].as_array().unwrap().is_empty());
 
-        let whole = turn_body(&c, "r", 2);
+        let whole = turn_body(&c, &Links::new(), "r", 2);
         assert_eq!(whole["total"], 2);
         let activity = &whole["turn"]["activity"][0];
         assert!(activity.get("more").is_none());
@@ -1490,8 +1652,14 @@ mod tests {
             activity["detail"]["input"].as_str().unwrap().len(),
             ACTIVITY_BYTES_CAP + 1
         );
-        assert_eq!(turn_body(&c, "r", 3)["turn"], serde_json::Value::Null);
-        assert_eq!(turn_body(&c, "r", 0)["turn"], serde_json::Value::Null);
+        assert_eq!(
+            turn_body(&c, &Links::new(), "r", 3)["turn"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            turn_body(&c, &Links::new(), "r", 0)["turn"],
+            serde_json::Value::Null
+        );
         assert_eq!(
             head_text("héllo", 2).0,
             "h",
@@ -1501,8 +1669,11 @@ mod tests {
 
     #[test]
     fn the_last_response_is_the_last_turns_answer() {
-        assert_eq!(last_response(&Conversation::default(), "r")["n"], 0);
-        let last = last_response(&turns(3), "r");
+        assert_eq!(
+            last_response(&Conversation::default(), &Links::new(), "r")["n"],
+            0
+        );
+        let last = last_response(&turns(3), &Links::new(), "r");
         assert_eq!(last["n"], 3);
         assert_eq!(last["text"], "answer 3");
         assert_eq!(last["total"], 3);

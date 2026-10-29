@@ -35,6 +35,14 @@ public final class BrowserModel {
     public private(set) var lastResponses: [SessionRef: LastResponseBody] = [:]
     public private(set) var conversations: [SessionRef: ConversationState] = [:]
     private var conversationHolders: [SessionRef: Int] = [:]
+    /// The files open in file windows, as the host last served them.
+    public private(set) var files: [FileRef: FileBody] = [:]
+    private var fileHolders: [FileRef: Int] = [:]
+    /// The file windows on screen, by window id.
+    public private(set) var openFiles: [UUID: FileRef] = [:]
+    /// The line a file window was last asked to show, numbered so a
+    /// second ask for the same line scrolls again.
+    public private(set) var lineRequests: [FileRef: LineRequest] = [:]
     /// The runs read per session, and the output per run watched.
     public private(set) var runs: [SessionRef: [RunView]] = [:]
     public private(set) var runOutputs: [RunRef: RunOutputBody] = [:]
@@ -168,6 +176,11 @@ public final class BrowserModel {
         self.conversations = conversations
         self.runs = runs
         self.runOutputs = runOutputs
+        var files: [FileRef: FileBody] = [:]
+        for ref in fileHolders.keys {
+            files[ref] = await manager.file(for: ref)
+        }
+        self.files = files
         var drafts: [SessionRef: DraftView] = [:]
         for ref in draftHolders.keys {
             drafts[ref] = await manager.draft(for: ref)
@@ -532,6 +545,47 @@ public final class BrowserModel {
             presentation.focused = newValue
             save()
         }
+    }
+
+    /// A file window opened on `ref`: the first holder takes the watch,
+    /// which reads the file.
+    public func watchFile(_ ref: FileRef) async {
+        fileHolders[ref, default: 0] += 1
+        if fileHolders[ref] == 1 {
+            await manager.watch(file: ref)
+        }
+        await pull()
+    }
+
+    public func unwatchFile(_ ref: FileRef) async {
+        guard let n = fileHolders[ref] else { return }
+        if n > 1 {
+            fileHolders[ref] = n - 1
+            return
+        }
+        fileHolders[ref] = nil
+        files[ref] = nil
+        await manager.unwatch(file: ref)
+    }
+
+    /// A file window is on screen.
+    public func fileWindowAppeared(_ request: FileWindowRequest) {
+        openFiles[request.id] = request.ref
+    }
+
+    public func fileWindowClosed(_ request: FileWindowRequest) {
+        openFiles[request.id] = nil
+    }
+
+    /// The request a tap on a file link opens: the window on that file
+    /// when one is on screen, else a new one; and the line to show,
+    /// which the window reads from `lineRequests`.
+    public func fileWindowRequest(for ref: FileRef, line: Int?) -> FileWindowRequest {
+        if let line {
+            let n = (lineRequests[ref]?.n ?? 0) + 1
+            lineRequests[ref] = LineRequest(line: line, n: n)
+        }
+        return FileWindowRequest.open(on: ref, among: openFiles) ?? FileWindowRequest(ref: ref)
     }
 
     /// A card window is on screen.

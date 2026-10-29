@@ -8,7 +8,7 @@ targets visionOS 26.
 
 ```sh
 swift build                      # every target
-swift test                       # 92 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing, the keys
+swift test                       # 97 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing, the keys, file links
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -50,7 +50,7 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   the last, resent after a reconnect before the snapshot, with what is
   held on a key re-read on `changed` past its held revision: the
   screen, the last response and the conversation from its last turn,
-  a run's output, a pinned file (`watch(file:)`, `readFile`); `ConversationState`, the pages merged by turn;
+  a run's output, a project file (`watch(file:)`, `readFile`); `ConversationState`, the pages merged by turn;
   `command`, a send, resume or trust under the control scope with a
   UUID op per command, and on a timeout the op's status rather than a
   resend: done takes the logged reply, interrupted is reported as
@@ -161,7 +161,16 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   echo, dictation) keeps a caret that was at the end at the end; "Trust
   this folder" when the host says the question is up, and Resume for a
   session that is not running, behind "Resume spends a turn"; a read
-  device sees why the bar is off instead; the
+  device sees why the bar is off instead; the files the agent names
+  in its prose, as the host found them under the project root and
+  sent with each turn (`LinkView`), made links in the answer, the
+  messages and the last response (`FileLinks`, a `switchboard-file:`
+  URL per link, which the card's `openURL` handler takes), and a tap
+  opens the file in a file window (`FileWindowView`, one per
+  request, brought forward when the file is already open: Markdown as
+  the agent's prose, anything else by numbered line with the line the
+  link named scrolled to and marked, watched while open so an edit on
+  the Mac shows); the
   presentation model (`ViewMode`, `CardWindowRequest`, `CardStanding`,
   `BrowseMode`, `FocusCursor`) and `PresentationState` in a JSON file
   in the app's container: the layout (list, grid, or one session in

@@ -206,16 +206,26 @@ pub fn file_refs(markdown: &str) -> Vec<FileRef> {
     out
 }
 
-/// `text` with every token for which `find` gives a file made a link
-/// to it. A token right after `!` is left as it is: the link would read
-/// as Markdown image syntax and draw a broken image.
+/// The tokens of `text` for which `find` gives a file, with the file.
+/// A token right after `!` is left out: linked, it would read as
+/// Markdown image syntax and draw a broken image.
 #[must_use]
-pub fn link(text: &str, mut find: impl FnMut(&FileRef) -> Option<PathBuf>) -> Linked {
-    let found: Vec<(FileRef, PathBuf)> = file_refs(text)
+pub fn resolve(
+    text: &str,
+    mut find: impl FnMut(&FileRef) -> Option<PathBuf>,
+) -> Vec<(FileRef, PathBuf)> {
+    file_refs(text)
         .into_iter()
         .filter(|r| !text[..r.range.start].ends_with('!'))
         .filter_map(|r| find(&r).map(|p| (r, p)))
-        .collect();
+        .collect()
+}
+
+/// `text` with every token for which `find` gives a file made a link
+/// to it, through [`resolve`].
+#[must_use]
+pub fn link(text: &str, find: impl FnMut(&FileRef) -> Option<PathBuf>) -> Linked {
+    let found = resolve(text, find);
     let mut markdown = text.to_owned();
     // From the end back, so the ranges still ahead stay where they were.
     for (i, (r, _)) in found.iter().enumerate().rev() {
