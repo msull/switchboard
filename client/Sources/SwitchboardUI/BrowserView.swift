@@ -623,12 +623,12 @@ public final class BrowserModel {
         save()
     }
 
-    /// Put `item` on the board at the next free place; an item already
-    /// on it is left where it is.
+    /// Put `item` on the board, last; an item already on it is left
+    /// where it is.
     public func addTile(_ item: BoardItem, to board: UUID) {
         edit(board) { b in
             guard !b.tiles.contains(where: { $0.item == item }) else { return }
-            b.tiles.append(BoardTile(item: item, frame: BoardLayout.place(avoiding: b.tiles.map(\.frame))))
+            b.tiles.append(BoardTile(item: item))
         }
     }
 
@@ -636,18 +636,17 @@ public final class BrowserModel {
         edit(board) { $0.tiles.removeAll { $0.id == tile } }
     }
 
-    public func moveTile(_ tile: UUID, on board: UUID, by translation: CGSize, in size: CGSize) {
+    /// Move a tile to slot `index` of the order.
+    public func moveTile(_ tile: UUID, on board: UUID, to index: Int) {
         edit(board) { b in
-            guard let i = b.tiles.firstIndex(where: { $0.id == tile }) else { return }
-            b.tiles[i].frame = BoardLayout.moved(b.tiles[i].frame, by: translation, in: size)
+            guard let from = b.tiles.firstIndex(where: { $0.id == tile }) else { return }
+            b.tiles = BoardLayout.reordered(b.tiles, from: from, to: index)
         }
     }
 
-    public func resizeTile(_ tile: UUID, on board: UUID, by translation: CGSize, in size: CGSize) {
-        edit(board) { b in
-            guard let i = b.tiles.firstIndex(where: { $0.id == tile }) else { return }
-            b.tiles[i].frame = BoardLayout.resized(b.tiles[i].frame, by: translation, in: size)
-        }
+    public func setColumns(_ columns: Int, on board: UUID) {
+        guard Board.columnChoices.contains(columns) else { return }
+        edit(board) { $0.columns = columns }
     }
 
     private func edit(_ board: UUID, _ change: (inout Board) -> Void) {
