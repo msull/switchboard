@@ -61,10 +61,13 @@ public struct FileWindowView: View {
     let request: FileWindowRequest
     @State private var waited = false
     @State private var marked: Int?
+    /// In a board tile rather than a window of its own.
+    public let embedded: Bool
 
-    public init(model: BrowserModel, request: FileWindowRequest) {
+    public init(model: BrowserModel, request: FileWindowRequest, embedded: Bool = false) {
         self.model = model
         self.request = request
+        self.embedded = embedded
     }
 
     private var ref: FileRef { request.ref }
@@ -80,6 +83,9 @@ public struct FileWindowView: View {
                 Spacer()
                 if let file {
                     Text(detail(file)).font(.caption).foregroundStyle(.secondary)
+                }
+                if !embedded {
+                    PinToBoardMenu(model: model, item: .file(ref), name: name)
                 }
             }
             if let file {
@@ -99,9 +105,9 @@ public struct FileWindowView: View {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             waited = true
         }
-        .onAppear { model.fileWindowAppeared(request) }
+        .onAppear { if !embedded { model.fileWindowAppeared(request) } }
         .onDisappear {
-            model.fileWindowClosed(request)
+            if !embedded { model.fileWindowClosed(request) }
             Task { await model.unwatchFile(ref) }
         }
     }

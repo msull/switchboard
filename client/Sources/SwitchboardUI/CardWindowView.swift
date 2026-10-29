@@ -16,9 +16,15 @@ public struct CardWindowView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.scenePhase) private var scenePhase
 
-    public init(model: BrowserModel, request: CardWindowRequest) {
+    /// In a board tile rather than a window of its own: the window
+    /// registry and the launch log are left alone, and the header
+    /// drops the buttons the board carries.
+    public let embedded: Bool
+
+    public init(model: BrowserModel, request: CardWindowRequest, embedded: Bool = false) {
         self.model = model
         self.request = request
+        self.embedded = embedded
     }
 
     private var item: UnifiedSession? {
@@ -64,15 +70,19 @@ public struct CardWindowView: View {
             return .handled
         })
         .onAppear {
-            LaunchLog.note("card \(request.id) appeared")
             mode = model.mode(for: request.id)
+            guard !embedded else { return }
+            LaunchLog.note("card \(request.id) appeared")
             model.windowAppeared(request)
         }
         .onDisappear {
+            guard !embedded else { return }
             LaunchLog.note("card \(request.id) disappeared")
             model.windowClosed(request)
         }
-        .onChange(of: scenePhase) { _, phase in LaunchLog.note("card \(request.id) phase \(phase)") }
+        .onChange(of: scenePhase) { _, phase in
+            if !embedded { LaunchLog.note("card \(request.id) phase \(phase)") }
+        }
         .onChange(of: mode) { _, new in model.setMode(new, for: request.id) }
     }
 
@@ -90,6 +100,10 @@ public struct CardWindowView: View {
             if let item {
                 SourceLabel(name: item.serverName, stale: item.stale, size: .small)
             }
+            if embedded {
+                EmptyView()
+            } else {
+            PinToBoardMenu(model: model, item: .session(request.ref), name: item?.session.name ?? "Board")
             // Icon only, and small: a tall narrow card has no room for
             // a word here.
             Button {
@@ -126,6 +140,7 @@ public struct CardWindowView: View {
             .controlSize(.mini)
             .accessibilityLabel("Sessions")
             .help("The main window, with every session")
+            }
         }
     }
 
