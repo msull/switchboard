@@ -4,24 +4,43 @@ import SwitchboardProtocol
 
 // MARK: The model
 
-/// A pin board: one window holding small live tiles of sessions and
-/// files from any host, each at a place and size of its own, kept in
-/// the presentation state so a board closed and opened again, or an
-/// app relaunched, shows the same arrangement. Tiles are placed in
-/// fractions of the board, so a board resized keeps every tile's share
-/// of it.
+/// A pin board: one window holding live tiles of sessions and files
+/// from any host, all one size in a grid, in an order the user sets by
+/// dragging, kept in the presentation state so a board closed and
+/// opened again, or an app relaunched, shows the same tiles in the
+/// same order.
 public struct Board: Codable, Equatable, Sendable, Identifiable {
     public let id: UUID
     public var name: String
     public var tiles: [BoardTile]
     public var created: Date
+    /// Tiles across; the rows follow from the count.
+    public var columns: Int
 
-    public init(id: UUID = UUID(), name: String, tiles: [BoardTile] = [], created: Date = Date()) {
+    public init(id: UUID = UUID(), name: String, tiles: [BoardTile] = [], created: Date = Date(), columns: Int = 3) {
         self.id = id
         self.name = name
         self.tiles = tiles
         self.created = created
+        self.columns = columns
     }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, tiles, created, columns
+    }
+
+    /// A board saved before the grid had a `columns` field.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        tiles = try c.decodeIfPresent([BoardTile].self, forKey: .tiles) ?? []
+        created = try c.decodeIfPresent(Date.self, forKey: .created) ?? Date()
+        columns = try c.decodeIfPresent(Int.self, forKey: .columns) ?? 3
+    }
+
+    /// The column counts a board may have.
+    public static let columnChoices = [2, 3, 4]
 }
 
 /// What a tile shows.
@@ -33,104 +52,61 @@ public enum BoardItem: Codable, Equatable, Hashable, Sendable {
 public struct BoardTile: Codable, Equatable, Sendable, Identifiable {
     public let id: UUID
     public let item: BoardItem
-    public var frame: UnitRect
 
-    public init(id: UUID = UUID(), item: BoardItem, frame: UnitRect) {
+    public init(id: UUID = UUID(), item: BoardItem) {
         self.id = id
         self.item = item
-        self.frame = frame
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, item
     }
 }
 
-/// A rectangle in fractions of the board's width and height.
-public struct UnitRect: Codable, Equatable, Sendable {
-    public var x: Double
-    public var y: Double
-    public var w: Double
-    public var h: Double
-
-    public init(x: Double, y: Double, w: Double, h: Double) {
-        self.x = x
-        self.y = y
-        self.w = w
-        self.h = h
-    }
-
-    /// The least a tile can be, as a share of the board.
-    public static let minimum = 0.12
-
-    /// The rectangle kept within the board, at least the minimum size.
-    public func clamped() -> UnitRect {
-        var r = self
-        r.w = min(max(r.w, Self.minimum), 1)
-        r.h = min(max(r.h, Self.minimum), 1)
-        r.x = min(max(r.x, 0), 1 - r.w)
-        r.y = min(max(r.y, 0), 1 - r.h)
-        return r
-    }
-
-    /// The rectangle in points on a board of `size`.
-    public func rect(in size: CGSize) -> CGRect {
-        CGRect(x: x * size.width, y: y * size.height, width: w * size.width, height: h * size.height)
-    }
-}
-
-/// Where tiles go and how they move, pure so it is tested.
+/// The grid and the reorder, pure so it is tested.
 public enum BoardLayout {
-    static let columns = 3
-    static let rows = 2
-
-    /// Slot `n` of the six: a third of the board wide and half of it
-    /// tall, left to right then down.
-    static func slot(_ n: Int) -> UnitRect {
-        let n = n % (columns * rows)
-        let column = Double(n % columns)
-        let row = Double(n / columns)
-        return UnitRect(x: column / Double(columns), y: row / Double(rows), w: 1 / Double(columns), h: 1 / Double(rows))
+    /// Rows the tiles take at `columns` across.
+    public static func rows(count: Int, columns: Int) -> Int {
+        max(1, (count + max(columns, 1) - 1) / max(columns, 1))
     }
 
-    /// The place of the next tile: the first of the six slots that no
-    /// tile already covers by more than a quarter, so a tile taken off
-    /// the board leaves a gap the next one fills; when every slot is
-    /// covered, a step down and right from the slot after the last
-    /// tile's, so the new tile shows on top rather than hiding under
-    /// another at the same place.
-    public static func place(avoiding tiles: [UnitRect]) -> UnitRect {
-        for n in 0..<(columns * rows) {
-            let candidate = slot(n)
-            let area = candidate.w * candidate.h
-            let covered = tiles.contains { tile in
-                let w = max(0, min(candidate.x + candidate.w, tile.x + tile.w) - max(candidate.x, tile.x))
-                let h = max(0, min(candidate.y + candidate.h, tile.y + tile.h) - max(candidate.y, tile.y))
-                return w * h > area / 4
-            }
-            if !covered { return candidate }
-        }
-        var r = slot(tiles.count)
-        let step = 0.04 * Double(tiles.count / (columns * rows))
-        r.x += step
-        r.y += step
-        return r.clamped()
+    /// The size of every tile on a board of `size`: a column's share
+    /// of the width, and the height shared by the rows, at most two
+    /// in view, so a board with more rows scrolls.
+    public static func tileSize(count: Int, columns: Int, in size: CGSize, spacing: CGFloat) -> CGSize {
+        let columns = CGFloat(max(columns, 1))
+        let rows = CGFloat(min(Self.rows(count: count, columns: Int(columns)), 2))
+        return CGSize(
+            width: max(0, (size.width - spacing * (columns - 1)) / columns),
+            height: max(0, (size.height - spacing * (rows - 1)) / rows))
     }
 
-    /// `frame` moved by `translation` points on a board of `size`.
-    public static func moved(_ frame: UnitRect, by translation: CGSize, in size: CGSize) -> UnitRect {
-        guard size.width > 0, size.height > 0 else { return frame }
-        var r = frame
-        r.x += translation.width / size.width
-        r.y += translation.height / size.height
-        return r.clamped()
+    /// The top-left of slot `index` in the grid.
+    public static func origin(of index: Int, columns: Int, tile: CGSize, spacing: CGFloat) -> CGPoint {
+        let columns = max(columns, 1)
+        return CGPoint(
+            x: CGFloat(index % columns) * (tile.width + spacing),
+            y: CGFloat(index / columns) * (tile.height + spacing))
     }
 
-    /// `frame` with its far corner dragged by `translation` points.
-    public static func resized(_ frame: UnitRect, by translation: CGSize, in size: CGSize) -> UnitRect {
-        guard size.width > 0, size.height > 0 else { return frame }
-        var r = frame
-        r.w += translation.width / size.width
-        r.h += translation.height / size.height
-        r.w = min(r.w, 1 - r.x)
-        r.h = min(r.h, 1 - r.y)
-        return r.clamped()
+    /// The slot whose cell holds `point`, clamped to the tiles there
+    /// are: where a tile dragged to `point` would land.
+    public static func slot(at point: CGPoint, count: Int, columns: Int, tile: CGSize, spacing: CGFloat) -> Int {
+        guard count > 0, tile.width > 0, tile.height > 0 else { return 0 }
+        let columns = max(columns, 1)
+        let column = Int((point.x / (tile.width + spacing)).rounded(.down))
+        let row = Int((point.y / (tile.height + spacing)).rounded(.down))
+        let index = max(row, 0) * columns + min(max(column, 0), columns - 1)
+        return min(max(index, 0), count - 1)
+    }
+
+    /// `tiles` with the one at `from` moved to `to`.
+    public static func reordered<T>(_ tiles: [T], from: Int, to: Int) -> [T] {
+        guard tiles.indices.contains(from), tiles.indices.contains(to), from != to else { return tiles }
+        var out = tiles
+        let moved = out.remove(at: from)
+        out.insert(moved, at: to)
+        return out
     }
 }
 
@@ -145,15 +121,27 @@ public struct BoardWindowRequest: Codable, Hashable, Sendable {
 
 // MARK: The window
 
-/// A board's window: its tiles over a canvas, each dragged by its bar
-/// and resized by its corner, popped out to a window of its own by a
-/// tap, and taken off the board by its cross.
+/// A board's window: its tiles in a grid, each dragged by its bar to a
+/// new place in the order, popped out to a window of its own by a tap,
+/// and taken off the board by its cross.
 public struct BoardView: View {
     @Bindable var model: BrowserModel
     let request: BoardWindowRequest
     @Environment(\.openWindow) private var openWindow
     @State private var renaming = false
     @State private var newName = ""
+    /// The tile being dragged, where its bar was taken, and how far it
+    /// has moved; the others slide to show where it will land.
+    @State private var drag: Drag?
+
+    struct Drag: Equatable {
+        let tile: UUID
+        let from: Int
+        var translation: CGSize
+        var to: Int
+    }
+
+    static let spacing: CGFloat = 12
 
     public init(model: BrowserModel, request: BoardWindowRequest) {
         self.model = model
@@ -166,10 +154,32 @@ public struct BoardView: View {
         VStack(spacing: 8) {
             header
             GeometryReader { geometry in
-                ZStack(alignment: .topLeading) {
-                    Color.clear
-                    ForEach(board?.tiles ?? []) { tile in
-                        TileView(model: model, board: request.board, tile: tile, size: geometry.size)
+                let tiles = board?.tiles ?? []
+                let columns = board?.columns ?? 3
+                let tile = BoardLayout.tileSize(count: tiles.count, columns: columns, in: geometry.size, spacing: Self.spacing)
+                let rows = BoardLayout.rows(count: tiles.count, columns: columns)
+                let shown = order(tiles)
+                ScrollView(rows > 2 ? .vertical : []) {
+                    ZStack(alignment: .topLeading) {
+                        Color.clear.frame(
+                            width: geometry.size.width,
+                            height: CGFloat(rows) * tile.height + CGFloat(rows - 1) * Self.spacing)
+                        ForEach(tiles) { item in
+                            let index = shown.firstIndex { $0.id == item.id } ?? 0
+                            let origin = BoardLayout.origin(of: index, columns: columns, tile: tile, spacing: Self.spacing)
+                            let lifted = drag?.tile == item.id
+                            TileView(model: model, board: request.board, tile: item, lifted: lifted) { gesture in
+                                dragged(item, gesture, tiles: tiles, columns: columns, tile: tile)
+                            } ended: {
+                                dropped(tiles: tiles)
+                            }
+                            .frame(width: tile.width, height: tile.height)
+                            .offset(
+                                x: origin.x + (lifted ? drag?.translation.width ?? 0 : 0),
+                                y: origin.y + (lifted ? drag?.translation.height ?? 0 : 0))
+                            .zIndex(lifted ? 1 : 0)
+                            .animation(lifted ? nil : .snappy, value: index)
+                        }
                     }
                 }
             }
@@ -185,10 +195,49 @@ public struct BoardView: View {
         }
     }
 
+    /// The tiles in the order they are shown: the saved order, with the
+    /// dragged one moved to where it would land.
+    private func order(_ tiles: [BoardTile]) -> [BoardTile] {
+        guard let drag else { return tiles }
+        return BoardLayout.reordered(tiles, from: drag.from, to: drag.to)
+    }
+
+    private func dragged(_ item: BoardTile, _ gesture: DragGesture.Value, tiles: [BoardTile], columns: Int, tile: CGSize) {
+        guard let from = tiles.firstIndex(where: { $0.id == item.id }) else { return }
+        let origin = BoardLayout.origin(of: from, columns: columns, tile: tile, spacing: Self.spacing)
+        // Where the tile's centre is now says which slot it is over.
+        let centre = CGPoint(
+            x: origin.x + tile.width / 2 + gesture.translation.width,
+            y: origin.y + tile.height / 2 + gesture.translation.height)
+        let to = BoardLayout.slot(at: centre, count: tiles.count, columns: columns, tile: tile, spacing: Self.spacing)
+        if drag?.tile != item.id {
+            drag = Drag(tile: item.id, from: from, translation: gesture.translation, to: to)
+        } else {
+            drag?.translation = gesture.translation
+            if drag?.to != to { withAnimation(.snappy) { drag?.to = to } }
+        }
+    }
+
+    private func dropped(tiles: [BoardTile]) {
+        guard let drag else { return }
+        withAnimation(.snappy) {
+            model.moveTile(drag.tile, on: request.board, to: drag.to)
+            self.drag = nil
+        }
+    }
+
     private var header: some View {
         HStack {
             Text(board?.name ?? "Board").font(.title2.bold())
             Spacer()
+            Picker("Columns", selection: columns) {
+                ForEach(Board.columnChoices, id: \.self) { n in
+                    Text("\(n)").tag(n)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 150)
+            .help("Tiles across")
             AddSessionMenu(model: model, board: request.board).equatable()
             Button {
                 newName = board?.name ?? ""
@@ -206,26 +255,26 @@ public struct BoardView: View {
             .help("The main window, with every session and board")
         }
     }
+
+    private var columns: Binding<Int> {
+        Binding(
+            get: { board?.columns ?? 3 },
+            set: { model.setColumns($0, on: request.board) })
+    }
 }
 
 /// One tile: a bar to drag it by, with its name, a button to open it
-/// as a window, and a cross; the content below it, live; a handle at
-/// the far corner to resize it.
+/// as a window, and a cross; the content below it, live. Lifted, it
+/// grows a little, casts a shadow and takes a border, so the one in
+/// hand is unmistakable.
 struct TileView: View {
     @Bindable var model: BrowserModel
     let board: UUID
     let tile: BoardTile
-    let size: CGSize
+    let lifted: Bool
+    let changed: (DragGesture.Value) -> Void
+    let ended: () -> Void
     @Environment(\.openWindow) private var openWindow
-    @State private var dragging: CGSize = .zero
-    @State private var resizing: CGSize = .zero
-
-    private var frame: CGRect {
-        var unit = tile.frame
-        if dragging != .zero { unit = BoardLayout.moved(unit, by: dragging, in: size) }
-        if resizing != .zero { unit = BoardLayout.resized(unit, by: resizing, in: size) }
-        return unit.rect(in: size)
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -235,9 +284,13 @@ struct TileView: View {
                 .clipped()
         }
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(alignment: .bottomTrailing) { handle }
-        .frame(width: frame.width, height: frame.height)
-        .offset(x: frame.minX, y: frame.minY)
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(Color.accentColor, lineWidth: lifted ? 3 : 0)
+        }
+        .scaleEffect(lifted ? 1.04 : 1)
+        .shadow(color: .black.opacity(lifted ? 0.35 : 0), radius: lifted ? 24 : 0, y: lifted ? 12 : 0)
+        .animation(.snappy, value: lifted)
     }
 
     private var bar: some View {
@@ -264,32 +317,13 @@ struct TileView: View {
             .accessibilityLabel("Take off the board")
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.thinMaterial)
+        .padding(.vertical, 8)
+        .background(lifted ? AnyShapeStyle(Color.accentColor.opacity(0.25)) : AnyShapeStyle(.thinMaterial))
         .contentShape(Rectangle())
         .gesture(
-            DragGesture(minimumDistance: 4)
-                .onChanged { dragging = $0.translation }
-                .onEnded { value in
-                    dragging = .zero
-                    model.moveTile(tile.id, on: board, by: value.translation, in: size)
-                })
-    }
-
-    private var handle: some View {
-        Image(systemName: "arrow.up.left.and.arrow.down.right")
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .padding(6)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 4)
-                    .onChanged { resizing = $0.translation }
-                    .onEnded { value in
-                        resizing = .zero
-                        model.resizeTile(tile.id, on: board, by: value.translation, in: size)
-                    })
-            .accessibilityLabel("Resize")
+            DragGesture(minimumDistance: 6)
+                .onChanged { changed($0) }
+                .onEnded { _ in ended() })
     }
 
     private var title: String {
