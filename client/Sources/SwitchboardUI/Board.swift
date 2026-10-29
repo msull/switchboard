@@ -189,22 +189,7 @@ public struct BoardView: View {
         HStack {
             Text(board?.name ?? "Board").font(.title2.bold())
             Spacer()
-            Menu {
-                let sessions = Dictionary(grouping: model.store.sessions, by: \.serverName)
-                ForEach(sessions.keys.sorted(), id: \.self) { host in
-                    Section(host) {
-                        ForEach(sessions[host] ?? []) { item in
-                            Button(item.session.name) { model.addTile(.session(item.ref), to: request.board) }
-                        }
-                    }
-                }
-                if model.store.sessions.isEmpty {
-                    Text("No sessions from a connected host")
-                }
-            } label: {
-                Label("Add session", systemImage: "plus")
-            }
-            .help("Put a session on the board; a file goes on from its window")
+            AddSessionMenu(model: model, board: request.board).equatable()
             Button {
                 newName = board?.name ?? ""
                 renaming = true
@@ -324,6 +309,60 @@ struct TileView: View {
         case .file(let ref):
             FileWindowView(model: model, request: FileWindowRequest(id: tile.id, ref: ref), embedded: true)
         }
+    }
+}
+
+/// A session a board's add menu offers: what the menu shows and
+/// nothing a pull changes every two seconds.
+public struct SessionChoice: Equatable, Identifiable, Sendable {
+    public let ref: SessionRef
+    public let name: String
+    public var id: SessionRef { ref }
+}
+
+/// The choices of one host, in the list's order.
+public struct SessionChoiceGroup: Equatable, Identifiable, Sendable {
+    public let host: String
+    public let sessions: [SessionChoice]
+    public var id: String { host }
+
+    public static func groups(_ sessions: [UnifiedSession]) -> [SessionChoiceGroup] {
+        let byHost = Dictionary(grouping: sessions, by: \.serverName)
+        return byHost.keys.sorted().map { host in
+            SessionChoiceGroup(
+                host: host,
+                sessions: (byHost[host] ?? []).map { SessionChoice(ref: $0.ref, name: $0.session.name) })
+        }
+    }
+}
+
+/// The menu that puts a session on a board. It reads only the choices,
+/// never the store: a menu whose body is re-evaluated while open
+/// scrolls back to its top, and the store changes on every pull.
+struct AddSessionMenu: View, Equatable {
+    @Bindable var model: BrowserModel
+    let board: UUID
+
+    static func == (lhs: AddSessionMenu, rhs: AddSessionMenu) -> Bool {
+        lhs.board == rhs.board && lhs.model.sessionChoices == rhs.model.sessionChoices
+    }
+
+    var body: some View {
+        Menu {
+            ForEach(model.sessionChoices) { group in
+                Section(group.host) {
+                    ForEach(group.sessions) { choice in
+                        Button(choice.name) { model.addTile(.session(choice.ref), to: board) }
+                    }
+                }
+            }
+            if model.sessionChoices.isEmpty {
+                Text("No sessions from a connected host")
+            }
+        } label: {
+            Label("Add session", systemImage: "plus")
+        }
+        .help("Put a session on the board; a file goes on from its window")
     }
 }
 
