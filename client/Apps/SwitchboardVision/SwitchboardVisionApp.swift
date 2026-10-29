@@ -41,6 +41,15 @@ struct SwitchboardVisionApp: App {
         }
         .defaultSize(width: 760, height: 560)
         .restorationBehavior(.disabled)
+        // A file window per request: a file the agent named, opened
+        // from a card by a tap on its name.
+        WindowGroup(for: FileWindowRequest.self) { $request in
+            if let request {
+                FileWindowView(model: model, request: request)
+            }
+        }
+        .defaultSize(width: 720, height: 640)
+        .restorationBehavior(.disabled)
         // The prompt window, one per app like the main one: the whole
         // draft of the session whose input is active, placed once and
         // left where it is while the cards come and go.

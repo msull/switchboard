@@ -843,13 +843,14 @@ fn the_allowlist_refuses_everything_else_with_no_side_effect() {
             "{method} {path}: {reply}"
         );
     }
-    // A file no set pins is refused by name, with nothing read.
+    // A file the project does not hold is refused by name, with
+    // nothing read.
     let (status, reply) = get(
         &mut port,
-        &format!("/api/v1/projects/{project}/files/README.md"),
+        &format!("/api/v1/projects/{project}/files/no-such-file.md"),
         t,
     );
-    assert_eq!((status, code(&reply)), (404, "not_pinned"), "{reply}");
+    assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
     assert!(
         port.host.state().written.is_empty(),
         "nothing reached a pane"
@@ -1227,8 +1228,10 @@ fn a_pinned_file_is_read_masked_and_watched_and_only_when_pinned() {
     let t = Some(token.as_str());
     let path = format!("/api/v1/projects/{project}/files/docs/plan.md");
 
+    // Any file under the root is served, pinned or not; the pins
+    // below only make the set the test's other reads look through.
     let (status, reply) = get(&mut port, &path, t);
-    assert_eq!((status, code(&reply)), (404, "not_pinned"), "{reply}");
+    assert_eq!(status, 200, "{reply}");
     pin_files(
         &mut port,
         &space,

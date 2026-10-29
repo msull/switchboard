@@ -45,6 +45,23 @@ public enum ActivityKindView: String, Decodable, Sendable {
     case tool, text, system
 }
 
+/// A file the agent named in its prose, as the host found it on its
+/// disk under the project root: the UTF-8 byte range of the token in
+/// the text as sent, the path `file.read` takes, and the line named.
+public struct LinkView: Decodable, Sendable, Equatable, Hashable {
+    public let start: Int
+    public let end: Int
+    public let path: String
+    public let line: Int?
+
+    public init(start: Int, end: Int, path: String, line: Int? = nil) {
+        self.start = start
+        self.end = end
+        self.path = path
+        self.line = line
+    }
+}
+
 /// One line in a turn's activity: a tool call with its detail, text the
 /// agent wrote before its answer, or a system line.
 public struct ActivityView: Decodable, Sendable, Equatable, Identifiable {
@@ -57,19 +74,22 @@ public struct ActivityView: Decodable, Sendable, Equatable, Identifiable {
     /// The page carries only the head of the detail or text; the turn
     /// read on its own carries it whole.
     public let more: Bool
+    /// The files named in `text`, or in `line` when that is all there
+    /// is; none from a host that does not find them.
+    public let links: [LinkView]
     /// Position in the turn; activities are not identified on the wire.
     public var index: Int = 0
 
     public var id: Int { index }
 
     enum CodingKeys: String, CodingKey {
-        case kind, line, error, detail, text, more
+        case kind, line, error, detail, text, more, links
         case atMs = "at_ms"
     }
 
     public init(
         kind: ActivityKindView, line: String, atMs: UInt64? = nil, error: Bool = false,
-        detail: ToolDetailView? = nil, text: String? = nil, more: Bool = false
+        detail: ToolDetailView? = nil, text: String? = nil, more: Bool = false, links: [LinkView] = []
     ) {
         self.kind = kind
         self.line = line
@@ -78,6 +98,7 @@ public struct ActivityView: Decodable, Sendable, Equatable, Identifiable {
         self.detail = detail
         self.text = text
         self.more = more
+        self.links = links
     }
 
     public init(from decoder: Decoder) throws {
@@ -89,6 +110,7 @@ public struct ActivityView: Decodable, Sendable, Equatable, Identifiable {
         detail = try c.decodeIfPresent(ToolDetailView.self, forKey: .detail)
         text = try c.decodeIfPresent(String.self, forKey: .text)
         more = try c.decodeIfPresent(Bool.self, forKey: .more) ?? false
+        links = try c.decodeIfPresent([LinkView].self, forKey: .links) ?? []
     }
 }
 
@@ -126,11 +148,13 @@ public struct TurnView: Decodable, Sendable, Equatable, Identifiable {
     public let permissionMode: String?
     /// The host cut the turn to its cap.
     public let truncated: Bool
+    /// The files named in `finalText`.
+    public let links: [LinkView]
 
     public var id: Int { n }
 
     enum CodingKeys: String, CodingKey {
-        case n, user, activity, tools, thinking, errors, truncated
+        case n, user, activity, tools, thinking, errors, truncated, links
         case atMs = "at_ms"
         case endMs = "end_ms"
         case finalText = "final_text"
@@ -141,7 +165,7 @@ public struct TurnView: Decodable, Sendable, Equatable, Identifiable {
     public init(
         n: Int, user: String, finalText: String, activity: [ActivityView] = [], atMs: UInt64? = nil,
         endMs: UInt64? = nil, assistantMsgs: Int = 1, tools: Int = 0, thinking: Int = 0,
-        errors: Int = 0, permissionMode: String? = nil, truncated: Bool = false
+        errors: Int = 0, permissionMode: String? = nil, truncated: Bool = false, links: [LinkView] = []
     ) {
         self.n = n
         self.atMs = atMs
@@ -159,6 +183,7 @@ public struct TurnView: Decodable, Sendable, Equatable, Identifiable {
         self.errors = errors
         self.permissionMode = permissionMode
         self.truncated = truncated
+        self.links = links
     }
 
     public init(from decoder: Decoder) throws {
@@ -175,7 +200,8 @@ public struct TurnView: Decodable, Sendable, Equatable, Identifiable {
             thinking: try c.decodeIfPresent(Int.self, forKey: .thinking) ?? 0,
             errors: try c.decodeIfPresent(Int.self, forKey: .errors) ?? 0,
             permissionMode: try c.decodeIfPresent(String.self, forKey: .permissionMode),
-            truncated: try c.decodeIfPresent(Bool.self, forKey: .truncated) ?? false)
+            truncated: try c.decodeIfPresent(Bool.self, forKey: .truncated) ?? false,
+            links: try c.decodeIfPresent([LinkView].self, forKey: .links) ?? [])
     }
 }
 
@@ -254,9 +280,11 @@ public struct LastResponseBody: Decodable, Sendable, Equatable {
     public let total: Int
     public let text: String
     public let truncated: Bool
+    /// The files named in `text`.
+    public let links: [LinkView]
 
     enum CodingKeys: String, CodingKey {
-        case n, total, text, truncated
+        case n, total, text, truncated, links
         case resumeID = "resume_id"
         case atMs = "at_ms"
         case endMs = "end_ms"
@@ -264,7 +292,7 @@ public struct LastResponseBody: Decodable, Sendable, Equatable {
 
     public init(
         resumeID: String, n: Int, total: Int, text: String, atMs: UInt64? = nil,
-        endMs: UInt64? = nil, truncated: Bool = false
+        endMs: UInt64? = nil, truncated: Bool = false, links: [LinkView] = []
     ) {
         self.resumeID = resumeID
         self.n = n
@@ -273,6 +301,7 @@ public struct LastResponseBody: Decodable, Sendable, Equatable {
         self.total = total
         self.text = text
         self.truncated = truncated
+        self.links = links
     }
 
     public init(from decoder: Decoder) throws {
@@ -284,7 +313,8 @@ public struct LastResponseBody: Decodable, Sendable, Equatable {
             text: try c.decode(String.self, forKey: .text),
             atMs: try c.decodeIfPresent(UInt64.self, forKey: .atMs),
             endMs: try c.decodeIfPresent(UInt64.self, forKey: .endMs),
-            truncated: try c.decodeIfPresent(Bool.self, forKey: .truncated) ?? false)
+            truncated: try c.decodeIfPresent(Bool.self, forKey: .truncated) ?? false,
+            links: try c.decodeIfPresent([LinkView].self, forKey: .links) ?? [])
     }
 }
 

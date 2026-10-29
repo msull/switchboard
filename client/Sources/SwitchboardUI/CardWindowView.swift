@@ -53,6 +53,16 @@ public struct CardWindowView: View {
         }
         .padding()
         .navigationTitle(item?.session.name ?? "Session")
+        // A tap on a file the agent named opens it in a file window,
+        // at the line named; other links go to the system.
+        .environment(\.openURL, OpenURLAction { url in
+            guard let link = FileLinks.parse(url), let project = item?.session.project else {
+                return .systemAction
+            }
+            let ref = FileRef(serverID: request.ref.serverID, projectID: project, path: link.path)
+            openWindow(value: model.fileWindowRequest(for: ref, line: link.line))
+            return .handled
+        })
         .onAppear {
             LaunchLog.note("card \(request.id) appeared")
             mode = model.mode(for: request.id)
@@ -497,10 +507,12 @@ enum Scaled {
 /// shown plain where it does not, and its tables laid out as grids.
 struct AgentText: View {
     let text: String
+    /// The files the host found named in `text`, made links.
+    var links: [LinkView] = []
     @Environment(\.textScale) private var scale
 
     var body: some View {
-        let segments = MarkdownTable.split(text)
+        let segments = MarkdownTable.split(FileLinks.linked(text, links))
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
                 switch segment {
@@ -547,7 +559,7 @@ struct LastResponseView: View {
                                     if last.truncated { Text("· cut at the host's cap") }
                                 }
                                 .font(Scaled.caption(scale)).foregroundStyle(.secondary)
-                                AgentText(text: last.text)
+                                AgentText(text: last.text, links: last.links)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 Color.clear.frame(height: 1).id("end")
                             }
@@ -837,7 +849,7 @@ struct TurnRow: View {
                 Text(turn.endMs == nil ? "working…" : "(no answer)")
                     .font(Scaled.callout(scale)).foregroundStyle(.secondary)
             } else {
-                AgentText(text: turn.finalText)
+                AgentText(text: turn.finalText, links: turn.links)
             }
             if turn.truncated {
                 Text("Cut at the host's turn cap.").font(Scaled.caption2(scale)).foregroundStyle(.secondary)
@@ -889,7 +901,8 @@ struct ActivityRow: View {
     private var line: some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
             Image(systemName: symbol).font(Scaled.caption2(scale))
-            Text(activity.text ?? activity.line).font(Scaled.callout(scale))
+            Text(AgentText.inline(FileLinks.linked(activity.text ?? activity.line, activity.links)))
+                .font(Scaled.callout(scale))
                 .foregroundStyle(activity.error ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
                 .textSelection(.enabled)
         }

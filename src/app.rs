@@ -29,7 +29,6 @@ use crate::content::{
     Policy, PolicySpec, RUN_LINES_CAP, SCREEN_LINES_CAP, SCREEN_SLACK_LINES, Source,
     TURN_BYTES_CAP, TicketPart, WATCH_CAP, WATCH_IDLE, Watch, redact,
 };
-use crate::core::model::PinTarget;
 use crate::core::revision::Fingerprints;
 use crate::core::{
     Activity, AgentKind, AppAction, AppCore, Clock, Composer, ControlAction, ControlOutcome,
@@ -1974,14 +1973,6 @@ impl SwitchboardApp {
             let Some(workspace) = self.core.workspace(*project) else {
                 return Err((404, "not_found", "no such project".into()));
             };
-            let pinned = self.core.working_sets().iter().any(|set| {
-                set.items
-                    .iter()
-                    .any(|item| item.target == PinTarget::File(*project, path.clone()))
-            });
-            if !pinned {
-                return Err((404, "not_pinned", "no working set pins this file".into()));
-            }
             return Ok(ContentJob {
                 key: key.clone(),
                 source: Source::File {
@@ -2015,9 +2006,15 @@ impl SwitchboardApp {
                     ));
                 }
                 match &record.resume {
-                    Some(handle @ ResumeHandle::ClaudeCode { .. }) => {
-                        Source::Transcript(handle.clone())
-                    }
+                    Some(handle @ ResumeHandle::ClaudeCode { .. }) => Source::Transcript {
+                        handle: handle.clone(),
+                        root: self
+                            .core
+                            .workspace(record.project)
+                            .map(|w| w.project.root.clone())
+                            .unwrap_or_default(),
+                        cwd: record.cwd.clone(),
+                    },
                     _ => {
                         return Err((
                             400,
