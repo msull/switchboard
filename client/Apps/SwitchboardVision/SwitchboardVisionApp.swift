@@ -33,13 +33,16 @@ struct SwitchboardVisionApp: App {
         }
         .defaultLaunchBehavior(.presented)
         // A card window per request: the system places it, and brings
-        // it forward when the same request is opened again (§7.2).
+        // it forward when the same request is opened again (§7.2). It
+        // opens in portrait, a page rather than a screen: a
+        // conversation is read down, and a narrow card leaves room
+        // for the next one beside it.
         WindowGroup(for: CardWindowRequest.self) { $request in
             if let request {
                 CardWindowView(model: model, request: request)
             }
         }
-        .defaultSize(width: 760, height: 560)
+        .defaultSize(width: 580, height: 900)
         .restorationBehavior(.disabled)
         // A file window per request: a file the agent named, opened
         // from a card by a tap on its name.
