@@ -14,6 +14,8 @@ public struct PresentationState: Codable, Equatable, Sendable {
     public var ticketFilters = TicketFilters()
     /// The session focus mode is on, kept by ref so a reorder keeps it.
     public var focused: SessionRef?
+    /// The pin boards, the client's own, in the order they were made.
+    public var boards: [Board] = []
 
     public struct ModeEntry: Codable, Equatable, Sendable {
         public var mode: ViewMode
@@ -42,6 +44,7 @@ public struct PresentationState: Codable, Equatable, Sendable {
         filters = try c.decodeIfPresent(Filters.self, forKey: .filters) ?? Filters()
         ticketFilters = try c.decodeIfPresent(TicketFilters.self, forKey: .ticketFilters) ?? TicketFilters()
         focused = try c.decodeIfPresent(SessionRef.self, forKey: .focused)
+        boards = try c.decodeIfPresent([Board].self, forKey: .boards) ?? []
     }
 
     public mutating func setMode(_ mode: ViewMode, for window: UUID, at: Date = Date()) {

@@ -588,6 +588,67 @@ public final class BrowserModel {
         return FileWindowRequest.open(on: ref, among: openFiles) ?? FileWindowRequest(ref: ref)
     }
 
+    // MARK: Boards
+
+    public var boards: [Board] { presentation.boards }
+    /// The boards whose windows are on screen.
+    public private(set) var openBoards: Set<UUID> = []
+
+    public func boardAppeared(_ id: UUID) { openBoards.insert(id) }
+    public func boardClosed(_ id: UUID) { openBoards.remove(id) }
+
+    @discardableResult
+    public func addBoard(named name: String) -> Board {
+        let board = Board(name: name.isEmpty ? "Board \(presentation.boards.count + 1)" : name)
+        presentation.boards.append(board)
+        save()
+        return board
+    }
+
+    public func renameBoard(_ id: UUID, to name: String) {
+        let name = name.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        edit(id) { $0.name = name }
+    }
+
+    public func removeBoard(_ id: UUID) {
+        presentation.boards.removeAll { $0.id == id }
+        save()
+    }
+
+    /// Put `item` on the board at the next free place; an item already
+    /// on it is left where it is.
+    public func addTile(_ item: BoardItem, to board: UUID) {
+        edit(board) { b in
+            guard !b.tiles.contains(where: { $0.item == item }) else { return }
+            b.tiles.append(BoardTile(item: item, frame: BoardLayout.place(count: b.tiles.count)))
+        }
+    }
+
+    public func removeTile(_ tile: UUID, from board: UUID) {
+        edit(board) { $0.tiles.removeAll { $0.id == tile } }
+    }
+
+    public func moveTile(_ tile: UUID, on board: UUID, by translation: CGSize, in size: CGSize) {
+        edit(board) { b in
+            guard let i = b.tiles.firstIndex(where: { $0.id == tile }) else { return }
+            b.tiles[i].frame = BoardLayout.moved(b.tiles[i].frame, by: translation, in: size)
+        }
+    }
+
+    public func resizeTile(_ tile: UUID, on board: UUID, by translation: CGSize, in size: CGSize) {
+        edit(board) { b in
+            guard let i = b.tiles.firstIndex(where: { $0.id == tile }) else { return }
+            b.tiles[i].frame = BoardLayout.resized(b.tiles[i].frame, by: translation, in: size)
+        }
+    }
+
+    private func edit(_ board: UUID, _ change: (inout Board) -> Void) {
+        guard let i = presentation.boards.firstIndex(where: { $0.id == board }) else { return }
+        change(&presentation.boards[i])
+        save()
+    }
+
     /// A card window is on screen.
     public func windowAppeared(_ request: CardWindowRequest) {
         open[request.id] = request.ref
@@ -701,7 +762,7 @@ public struct BrowserView: View {
                         .contextMenu { menu(for: item) }
                 }
             }
-            setsSections
+            boardsSection
         }
     }
 
@@ -721,7 +782,7 @@ public struct BrowserView: View {
                 }
             }
             .padding()
-            List { setsSections }.frame(minHeight: 200)
+            List { boardsSection }.frame(minHeight: 200)
         }
     }
 
@@ -755,18 +816,34 @@ public struct BrowserView: View {
 
     /// The working sets, one section per source.
     @ViewBuilder
-    private var setsSections: some View {
-        let sources = Dictionary(grouping: model.store.sets, by: \.serverName)
-        ForEach(sources.keys.sorted(), id: \.self) { source in
-            Section("Working sets · \(source)") {
-                ForEach(sources[source] ?? []) { item in
+    /// The pin boards, the client's own: a tap opens one, and a new one
+    /// is made here or from any card's pin menu. The hosts' working
+    /// sets are not listed: a board is the headset's working set.
+    private var boardsSection: some View {
+        Section("Boards") {
+            ForEach(model.boards) { board in
+                Button {
+                    openWindow(value: BoardWindowRequest(board: board.id))
+                } label: {
                     HStack {
-                        Text(item.set.name)
+                        Image(systemName: "pin")
+                        Text(board.name)
                         Spacer()
-                        Text("\(item.set.items.count) pins").font(.caption).foregroundStyle(.secondary)
-                        SourceLabel(name: item.serverName, stale: item.stale)
+                        Text("\(board.tiles.count) pinned").font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    Button("Remove board", role: .destructive) {
+                        model.removeBoard(board.id)
+                    }
+                }
+            }
+            Button {
+                let board = model.addBoard(named: "")
+                openWindow(value: BoardWindowRequest(board: board.id))
+            } label: {
+                Label("New board", systemImage: "plus")
             }
         }
     }

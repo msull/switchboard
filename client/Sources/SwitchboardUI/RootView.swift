@@ -48,6 +48,9 @@ public struct RootView: View {
         for (id, ref) in model.openFiles {
             dismissWindow(value: FileWindowRequest(id: id, ref: ref))
         }
+        for id in model.openBoards {
+            dismissWindow(value: BoardWindowRequest(board: id))
+        }
         dismissWindow(id: MainWindow.id)
     }
 

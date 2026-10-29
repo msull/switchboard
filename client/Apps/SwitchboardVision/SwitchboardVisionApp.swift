@@ -53,6 +53,15 @@ struct SwitchboardVisionApp: App {
         }
         .defaultSize(width: 720, height: 640)
         .restorationBehavior(.disabled)
+        // A board window per board: the tiles of sessions and files
+        // the user pinned, in their saved arrangement.
+        WindowGroup("Board", for: BoardWindowRequest.self) { $request in
+            if let request {
+                BoardView(model: model, request: request)
+            }
+        }
+        .defaultSize(width: 1500, height: 900)
+        .restorationBehavior(.disabled)
         // The prompt window, one per app like the main one: the whole
         // draft of the session whose input is active, placed once and
         // left where it is while the cards come and go.

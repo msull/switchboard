@@ -8,7 +8,7 @@ targets visionOS 26.
 
 ```sh
 swift build                      # every target
-swift test                       # 97 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing, the keys, file links
+swift test                       # 101 tests: fixtures, commands, pinning, the connection core, events, watches, conversations, the draft, presentation, browsing, the keys, file links, boards
 swift run switchboard-remote     # the command-line browser (usage below)
 scripts/sim.sh run               # the visionOS app on the simulator (below)
 ```
@@ -170,7 +170,18 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   request, brought forward when the file is already open: Markdown as
   the agent's prose, anything else by numbered line with the line the
   link named scrolled to and marked, watched while open so an edit on
-  the Mac shows); the
+  the Mac shows); the pin boards (`Board.swift`: `Board`, `BoardTile`
+  with a `UnitRect` in fractions of the board, `BoardLayout` for where
+  a tile goes and how a drag moves or resizes it, `BoardView` one
+  window per board, `TileView` a card or file window embedded live
+  with a bar to drag it by, a corner to resize it, a button to open it
+  as a window and a cross; `PinToBoardMenu` on every card and file
+  window), the headset's own working sets: a board holds sessions and
+  files from any host, is listed in the main window in place of the
+  hosts' working sets, and is kept in the presentation state, so a
+  board closed and opened again, or the app relaunched, shows the same
+  tiles in the same arrangement, each keeping its share of a board
+  resized as a whole; the
   presentation model (`ViewMode`, `CardWindowRequest`, `CardStanding`,
   `BrowseMode`, `FocusCursor`) and `PresentationState` in a JSON file
   in the app's container: the layout (list, grid, or one session in
