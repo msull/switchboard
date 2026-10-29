@@ -142,6 +142,8 @@ public struct BoardView: View {
     }
 
     static let spacing: CGFloat = 12
+    /// The grid's coordinate space, which a drag reports its place in.
+    static let space = "board"
 
     public init(model: BrowserModel, request: BoardWindowRequest) {
         self.model = model
@@ -159,28 +161,35 @@ public struct BoardView: View {
                 let tile = BoardLayout.tileSize(count: tiles.count, columns: columns, in: geometry.size, spacing: Self.spacing)
                 let rows = BoardLayout.rows(count: tiles.count, columns: columns)
                 let shown = order(tiles)
-                ScrollView(rows > 2 ? .vertical : []) {
-                    ZStack(alignment: .topLeading) {
-                        Color.clear.frame(
-                            width: geometry.size.width,
-                            height: CGFloat(rows) * tile.height + CGFloat(rows - 1) * Self.spacing)
-                        ForEach(tiles) { item in
-                            let index = shown.firstIndex { $0.id == item.id } ?? 0
-                            let origin = BoardLayout.origin(of: index, columns: columns, tile: tile, spacing: Self.spacing)
-                            let lifted = drag?.tile == item.id
-                            TileView(model: model, board: request.board, tile: item, lifted: lifted) { gesture in
-                                dragged(item, gesture, tiles: tiles, columns: columns, tile: tile)
-                            } ended: {
-                                dropped(tiles: tiles)
-                            }
-                            .frame(width: tile.width, height: tile.height)
-                            .offset(
-                                x: origin.x + (lifted ? drag?.translation.width ?? 0 : 0),
-                                y: origin.y + (lifted ? drag?.translation.height ?? 0 : 0))
-                            .zIndex(lifted ? 1 : 0)
-                            .animation(lifted ? nil : .snappy, value: index)
+                let grid = ZStack(alignment: .topLeading) {
+                    Color.clear.frame(
+                        width: geometry.size.width,
+                        height: CGFloat(rows) * tile.height + CGFloat(rows - 1) * Self.spacing)
+                    ForEach(tiles) { item in
+                        let index = shown.firstIndex { $0.id == item.id } ?? 0
+                        let origin = BoardLayout.origin(of: index, columns: columns, tile: tile, spacing: Self.spacing)
+                        let lifted = drag?.tile == item.id
+                        TileView(model: model, board: request.board, tile: item, lifted: lifted) { gesture in
+                            dragged(item, gesture, tiles: tiles, columns: columns, tile: tile)
+                        } ended: {
+                            dropped(tiles: tiles)
                         }
+                        .frame(width: tile.width, height: tile.height)
+                        .offset(
+                            x: origin.x + (lifted ? drag?.translation.width ?? 0 : 0),
+                            y: origin.y + (lifted ? drag?.translation.height ?? 0 : 0))
+                        .zIndex(lifted ? 1 : 0)
+                        .animation(lifted ? nil : .snappy, value: index)
                     }
+                }
+                .coordinateSpace(name: Self.space)
+                // A scroll view clips what leaves its content, which is
+                // where a dragged tile goes, so the grid scrolls only
+                // when it must.
+                if rows > 2 {
+                    ScrollView { grid }
+                } else {
+                    grid
                 }
             }
         }
@@ -204,12 +213,9 @@ public struct BoardView: View {
 
     private func dragged(_ item: BoardTile, _ gesture: DragGesture.Value, tiles: [BoardTile], columns: Int, tile: CGSize) {
         guard let from = tiles.firstIndex(where: { $0.id == item.id }) else { return }
-        let origin = BoardLayout.origin(of: from, columns: columns, tile: tile, spacing: Self.spacing)
-        // Where the tile's centre is now says which slot it is over.
-        let centre = CGPoint(
-            x: origin.x + tile.width / 2 + gesture.translation.width,
-            y: origin.y + tile.height / 2 + gesture.translation.height)
-        let to = BoardLayout.slot(at: centre, count: tiles.count, columns: columns, tile: tile, spacing: Self.spacing)
+        // The slot under the finger is where the tile lands.
+        let to = BoardLayout.slot(
+            at: gesture.location, count: tiles.count, columns: columns, tile: tile, spacing: Self.spacing)
         if drag?.tile != item.id {
             drag = Drag(tile: item.id, from: from, translation: gesture.translation, to: to)
         } else {
@@ -321,7 +327,7 @@ struct TileView: View {
         .background(lifted ? AnyShapeStyle(Color.accentColor.opacity(0.25)) : AnyShapeStyle(.thinMaterial))
         .contentShape(Rectangle())
         .gesture(
-            DragGesture(minimumDistance: 6)
+            DragGesture(minimumDistance: 6, coordinateSpace: .named(BoardView.space))
                 .onChanged { changed($0) }
                 .onEnded { _ in ended() })
     }
