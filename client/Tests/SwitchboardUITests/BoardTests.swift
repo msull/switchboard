@@ -1,4 +1,5 @@
 import Foundation
+import SwitchboardClientCore
 import SwitchboardProtocol
 import XCTest
 
@@ -63,6 +64,23 @@ final class BoardTests: XCTestCase {
         XCTAssertEqual(back.boards, state.boards)
         let old = try JSONDecoder().decode(PresentationState.self, from: Data(#"{"browse":"list"}"#.utf8))
         XCTAssertEqual(old.boards, [])
+    }
+
+    func testTheAddMenusChoicesIgnoreWhatAPullChangesOnACard() {
+        let one = UnifiedSession(
+            ref: SessionRef(serverID: a, recordID: "r1"),
+            session: SessionView(id: "r1", project: "p", name: "one", kind: .claude, card: "working"),
+            serverName: "Mac", stale: false)
+        let same = UnifiedSession(
+            ref: one.ref,
+            session: SessionView(id: "r1", project: "p", name: "one", kind: .claude, card: "waiting on you"),
+            serverName: "Mac", stale: true)
+        XCTAssertEqual(SessionChoiceGroup.groups([one]), SessionChoiceGroup.groups([same]))
+        let renamed = UnifiedSession(
+            ref: one.ref, session: SessionView(id: "r1", project: "p", name: "two", kind: .claude),
+            serverName: "Mac", stale: false)
+        XCTAssertNotEqual(SessionChoiceGroup.groups([one]), SessionChoiceGroup.groups([renamed]))
+        XCTAssertEqual(SessionChoiceGroup.groups([one]).map(\.host), ["Mac"])
     }
 
     func testAFileWindowRequestReachesTheOpenWindowOnItsFile() {

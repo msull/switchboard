@@ -14,6 +14,11 @@ public final class BrowserModel {
     /// The filter menu's choices, replaced only when they differ, so
     /// the menu's body is not re-evaluated by the two-second pull.
     public private(set) var filterChoices = FilterChoices()
+    /// The sessions a board's add menu offers, by host: replaced only
+    /// when a name, a host or the set of sessions changes, never on a
+    /// pull that moved only a card's text, so an open menu keeps its
+    /// place.
+    public private(set) var sessionChoices: [SessionChoiceGroup] = []
     public private(set) var ticketFilterChoices = TicketFilterChoices()
     /// The hosts that serve a ticket's files, events and close.
     public private(set) var evidenceHosts: Set<ServerID> = []
@@ -144,6 +149,8 @@ public final class BrowserModel {
         store = await manager.store
         let choices = FilterChoices(store: store)
         if choices != filterChoices { filterChoices = choices }
+        let sessions = SessionChoiceGroup.groups(store.sessions)
+        if sessions != sessionChoices { sessionChoices = sessions }
         let ticketChoices = TicketFilterChoices(store: store)
         if ticketChoices != ticketFilterChoices { ticketFilterChoices = ticketChoices }
         let evidence = await manager.evidenceHosts
