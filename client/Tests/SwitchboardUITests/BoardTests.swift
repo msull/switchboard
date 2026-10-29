@@ -9,11 +9,25 @@ import XCTest
 final class BoardTests: XCTestCase {
     let a = ServerID("11111111-1111-1111-1111-111111111111")
 
-    func testTilesAreLaidThreeAcrossAndTwoDownThenFromTheTopAgain() {
-        XCTAssertEqual(BoardLayout.place(count: 0), UnitRect(x: 0, y: 0, w: 1 / 3, h: 0.5))
-        XCTAssertEqual(BoardLayout.place(count: 2), UnitRect(x: 2 / 3, y: 0, w: 1 / 3, h: 0.5))
-        XCTAssertEqual(BoardLayout.place(count: 4), UnitRect(x: 1 / 3, y: 0.5, w: 1 / 3, h: 0.5))
-        XCTAssertEqual(BoardLayout.place(count: 6), BoardLayout.place(count: 0))
+    func testANewTileTakesTheFirstFreeSlotAndStepsAsideWhenTheBoardIsFull() {
+        let first = UnitRect(x: 0, y: 0, w: 1 / 3, h: 0.5)
+        XCTAssertEqual(BoardLayout.place(avoiding: []), first)
+        var tiles = [first]
+        XCTAssertEqual(BoardLayout.place(avoiding: tiles), UnitRect(x: 1 / 3, y: 0, w: 1 / 3, h: 0.5))
+        // Three across, then the gap left by a tile taken off is filled.
+        tiles = [first, UnitRect(x: 2 / 3, y: 0, w: 1 / 3, h: 0.5)]
+        XCTAssertEqual(BoardLayout.place(avoiding: tiles), UnitRect(x: 1 / 3, y: 0, w: 1 / 3, h: 0.5))
+        // A tile nudged a little still counts as covering its slot; one
+        // moved mostly out of it does not.
+        tiles = [UnitRect(x: 0.05, y: 0.05, w: 1 / 3, h: 0.5)]
+        XCTAssertEqual(BoardLayout.place(avoiding: tiles), UnitRect(x: 1 / 3, y: 0, w: 1 / 3, h: 0.5))
+        tiles = [UnitRect(x: 0.3, y: 0.4, w: 1 / 3, h: 0.5)]
+        XCTAssertEqual(BoardLayout.place(avoiding: tiles), first)
+        // A full board: the next goes down and right of a slot, on top.
+        tiles = (0..<6).map { BoardLayout.slot($0) }
+        let seventh = BoardLayout.place(avoiding: tiles)
+        XCTAssertEqual(seventh.x, 0.04, accuracy: 1e-9)
+        XCTAssertEqual(seventh.y, 0.04, accuracy: 1e-9)
     }
 
     func testAMoveAndAResizeAreFractionsOfTheBoardAndStayOnIt() {
@@ -41,8 +55,8 @@ final class BoardTests: XCTestCase {
         let ref = SessionRef(serverID: a, recordID: "r1")
         let file = FileRef(serverID: a, projectID: "p", path: "docs/plan.md")
         state.boards = [Board(name: "Client work", tiles: [
-            BoardTile(item: .session(ref), frame: BoardLayout.place(count: 0)),
-            BoardTile(item: .file(file), frame: BoardLayout.place(count: 1)),
+            BoardTile(item: .session(ref), frame: BoardLayout.slot(0)),
+            BoardTile(item: .file(file), frame: BoardLayout.slot(1)),
         ])]
         let data = try JSONEncoder().encode(state)
         let back = try JSONDecoder().decode(PresentationState.self, from: data)

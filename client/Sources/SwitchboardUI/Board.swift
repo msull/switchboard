@@ -77,16 +77,40 @@ public struct UnitRect: Codable, Equatable, Sendable {
 
 /// Where tiles go and how they move, pure so it is tested.
 public enum BoardLayout {
-    /// The place of the next tile: a third of the board wide and half
-    /// of it tall, laid left to right then down, and from the top
-    /// again when the board is full, so a tile is never off the board.
-    public static func place(count: Int) -> UnitRect {
-        let columns = 3
-        let rows = 2
-        let slot = count % (columns * rows)
-        let column = Double(slot % columns)
-        let row = Double(slot / columns)
+    static let columns = 3
+    static let rows = 2
+
+    /// Slot `n` of the six: a third of the board wide and half of it
+    /// tall, left to right then down.
+    static func slot(_ n: Int) -> UnitRect {
+        let n = n % (columns * rows)
+        let column = Double(n % columns)
+        let row = Double(n / columns)
         return UnitRect(x: column / Double(columns), y: row / Double(rows), w: 1 / Double(columns), h: 1 / Double(rows))
+    }
+
+    /// The place of the next tile: the first of the six slots that no
+    /// tile already covers by more than a quarter, so a tile taken off
+    /// the board leaves a gap the next one fills; when every slot is
+    /// covered, a step down and right from the slot after the last
+    /// tile's, so the new tile shows on top rather than hiding under
+    /// another at the same place.
+    public static func place(avoiding tiles: [UnitRect]) -> UnitRect {
+        for n in 0..<(columns * rows) {
+            let candidate = slot(n)
+            let area = candidate.w * candidate.h
+            let covered = tiles.contains { tile in
+                let w = max(0, min(candidate.x + candidate.w, tile.x + tile.w) - max(candidate.x, tile.x))
+                let h = max(0, min(candidate.y + candidate.h, tile.y + tile.h) - max(candidate.y, tile.y))
+                return w * h > area / 4
+            }
+            if !covered { return candidate }
+        }
+        var r = slot(tiles.count)
+        let step = 0.04 * Double(tiles.count / (columns * rows))
+        r.x += step
+        r.y += step
+        return r.clamped()
     }
 
     /// `frame` moved by `translation` points on a board of `size`.

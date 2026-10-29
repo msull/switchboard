@@ -621,7 +621,7 @@ public final class BrowserModel {
     public func addTile(_ item: BoardItem, to board: UUID) {
         edit(board) { b in
             guard !b.tiles.contains(where: { $0.item == item }) else { return }
-            b.tiles.append(BoardTile(item: item, frame: BoardLayout.place(count: b.tiles.count)))
+            b.tiles.append(BoardTile(item: item, frame: BoardLayout.place(avoiding: b.tiles.map(\.frame))))
         }
     }
 
