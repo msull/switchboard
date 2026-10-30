@@ -10,6 +10,12 @@ publishes that section as the release notes. The format follows
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-30
+
+### Added
+
+- A pipeline's agent stage can carry a human gate that holds its session open while you work in it; answering proceed checks the running note and a clean tree, records the head and sends the branch on to review, and relaunch starts a fresh session on the same note.
+
 ## [0.10.0] - 2026-10-29
 
 ### Added
