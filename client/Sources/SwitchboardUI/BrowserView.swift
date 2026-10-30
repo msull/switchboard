@@ -788,7 +788,21 @@ public struct BrowserView: View {
                 }
             }
             .padding()
-            List { boardsSection }.frame(minHeight: 200)
+            // Plain rows, not a list: a list inside a scroll view has
+            // no height of its own and would show two rows and a
+            // scrollbar under any amount of room.
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Boards").font(.headline).foregroundStyle(.secondary)
+                ForEach(model.boards) { board in
+                    boardRow(board)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                }
+                newBoardRow
+                    .padding(12)
+            }
+            .padding([.horizontal, .bottom])
         }
     }
 
@@ -828,29 +842,39 @@ public struct BrowserView: View {
     private var boardsSection: some View {
         Section("Boards") {
             ForEach(model.boards) { board in
-                Button {
-                    openWindow(value: BoardWindowRequest(board: board.id))
-                } label: {
-                    HStack {
-                        Image(systemName: "pin")
-                        Text(board.name)
-                        Spacer()
-                        Text("\(board.tiles.count) pinned").font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                .buttonStyle(.plain)
-                .contextMenu {
-                    Button("Remove board", role: .destructive) {
-                        model.removeBoard(board.id)
-                    }
-                }
+                boardRow(board)
             }
-            Button {
-                let board = model.addBoard(named: "")
-                openWindow(value: BoardWindowRequest(board: board.id))
-            } label: {
-                Label("New board", systemImage: "plus")
+            newBoardRow
+        }
+    }
+
+    /// One board: a tap opens its window; its menu removes it.
+    private func boardRow(_ board: Board) -> some View {
+        Button {
+            openWindow(value: BoardWindowRequest(board: board.id))
+        } label: {
+            HStack {
+                Image(systemName: "pin")
+                Text(board.name)
+                Spacer()
+                Text("\(board.tiles.count) pinned").font(.caption).foregroundStyle(.secondary)
             }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Remove board", role: .destructive) {
+                model.removeBoard(board.id)
+            }
+        }
+    }
+
+    private var newBoardRow: some View {
+        Button {
+            let board = model.addBoard(named: "")
+            openWindow(value: BoardWindowRequest(board: board.id))
+        } label: {
+            Label("New board", systemImage: "plus")
         }
     }
 }
