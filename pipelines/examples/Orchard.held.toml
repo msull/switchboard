@@ -1,0 +1,129 @@
+# A held build: the owner builds the backend change interactively in an
+# agent session on a deployed stack, and the branch then goes through
+# code review and a pull request to the usual standard. A trimmed
+# companion of Orchard.toml (docs/dispatch-pipeline-guide.md, "Held by
+# the owner"), with none of its guidance text; copy what you need from
+# there.
+#
+# `build` is an agent stage with a human gate, so its session stays open
+# across any number of turns while the owner works in it. It is asked
+# `built` at the session's first stop; `proceed` checks that the running
+# note (the first of its `writes`) exists and that the tree is clean,
+# records the head, closes the session and moves on; `relaunch` starts a
+# fresh session on the same note; `rerun` with a note starts the stage
+# again; `park` stops the ticket. Dispatch commits nothing for the
+# session, so a dirty tree refuses `proceed` until the session commits.
+#
+# deploy and build both need my-dev, so the stack is held from the deploy
+# through the whole build and released when review-code starts; the
+# served frontend lives as long as that hold. A held build therefore
+# keeps its slot, my-dev and a waiting_on_me seat for as long as the
+# owner works.
+version = 1
+
+[project]
+name = "Orchard"
+repo = "git@github.com:example-org/orchard-workspace.git"
+space = "Dispatch · Orchard"
+
+[source]
+kind = "github"
+repo = "example-org/orchard-workspace"
+label = "dispatch-held"
+
+[[lanes]]
+name = "backend"
+path = "orchard-backend"
+repo = "git@bitbucket.org:example-co/orchard-backend.git"
+base = "main"
+setup = ["sh", "-c", "uv sync --frozen --all-groups && uv run --frozen --all-groups inv link-env --env-name my-dev"]
+
+[[lanes]]
+name = "frontend"             # served at build against my-dev; nothing is committed on it
+path = "orchard-frontend"
+repo = "git@bitbucket.org:example-co/orchard-frontend.git"
+base = "dev"
+setup = ["npm", "ci", "--legacy-peer-deps"]
+serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
+
+[[resources]]
+name = "my-dev"
+count = 1
+
+[operators.investigator]
+kind = "claude"
+
+[operators.builder]
+kind = "claude"
+
+[operators.correctness]
+kind = "claude"
+
+[operators.style]
+kind = "claude"
+
+[operators.fixer]
+kind = "claude"
+
+[operators.implementer]
+kind = "claude"
+
+[[stages]]
+name = "investigate"
+operator = "investigator"
+context = "root"
+writes = ["notes"]
+prompt = "Issue #{issue.number}: {issue.title}\n\n{issue.body}\n\nInvestigate and write findings, including the lanes needed, to {notes}."
+
+[[stages]]
+name = "lanes"
+gate = { kind = "human", decision = "lanes" }   # backend, and frontend when the build needs it served
+
+[[stages]]
+name = "deploy"
+context = "lane:backend"
+needs = ["my-dev"]
+gate = { kind = "command", in = "lane:backend", argv = ["sh", "-c", "uv run --frozen --all-groups inv link-env --env-name my-dev && uv run inv deploy -f"] }
+
+[[stages]]
+name = "build"                # held open for the owner until they answer built
+operator = "builder"
+context = "lane:backend"
+needs = ["my-dev"]
+services = ["frontend"]
+writes = ["notes"]            # the running note: every session of the build keeps it current
+prompt = "my-dev runs this ticket's backend branch {branch} as deployed at {inputs.deploy.commit}; the frontend is served at {services.frontend}. The investigation is at {inputs.investigate.notes}. Build the change with the owner in {worktree}, committing as you go."
+gate = { kind = "human", decision = "built", question = "Is the build done? The running note says what was built and what is left." }
+
+[[stages]]
+name = "review-code"
+context = "lane:backend"
+reviewers = ["correctness", "style"]
+implementer = "fixer"
+commits = "one"
+gate = { kind = "command", in = "lane", argv = ["sh", "-c", "uv run --frozen --all-groups inv lint && uv run --frozen --all-groups inv pytest"] }   # its own argv: the held build has no command gate for `like` to name
+
+[[stages]]
+name = "pr"
+operator = "implementer"
+context = "lane:backend"
+writes = ["notes"]
+prompt = "The branch {branch} was built and reviewed. Push it and open the pull request to the lane's integration branch; write its id to {notes}."
+gate = { kind = "command", in = "lane", argv = ["sh", "-c", "test -z \"$(git status --porcelain)\" && git fetch -q origin && test \"$(git rev-parse HEAD)\" = \"$(git rev-parse \"origin/$DISPATCH_BRANCH\")\""] }
+
+[[stages]]
+name = "ready"
+context = "lane:backend"
+gate = { kind = "external", check = "pr-checks", provider = "bitbucket" }
+
+[[stages]]
+name = "merge"
+context = "lane:backend"
+gate = { kind = "external", check = "pr-merged", provider = "bitbucket", decision = "merge" }
+
+[policy]
+slots = 2
+waiting_on_me = 4
+trust_folders = true
+ports = [3100, 3199]
+decisions = { lanes = "ask" }

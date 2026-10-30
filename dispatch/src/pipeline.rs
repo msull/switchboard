@@ -735,6 +735,21 @@ impl Stage {
         }
     }
 
+    /// An agent stage with a human gate: its session stays open for the
+    /// owner to work in until they answer the gate, across any number of
+    /// Stops.
+    #[must_use]
+    pub fn held(&self) -> bool {
+        self.kind() == StageKind::Agent && matches!(self.gate, Some(Gate::Human { .. }))
+    }
+
+    /// The running note of a held stage: its first file artifact, kept
+    /// current by every session the stage runs.
+    #[must_use]
+    pub fn running_note(&self) -> Option<&str> {
+        self.write_names().next()
+    }
+
     /// The stage runs in more than one lane context, so it writes one file
     /// per lane under each name.
     #[must_use]
@@ -1163,6 +1178,46 @@ impl Pipeline {
         Ok(())
     }
 
+    /// A human gate on a stage that runs something: on an agent stage it
+    /// holds the session open for the owner, which needs a Claude Code
+    /// operator (Codex reports no Stop to ask at), a running note, and a
+    /// plain `proceed`; a workflow stage has no session to hold. A
+    /// gate-only stage's human gate is the ordinary look.
+    fn validate_held(&self, stage: &Stage) -> Result<()> {
+        let Some(Gate::Human { confirm, .. }) = &stage.gate else {
+            return Ok(());
+        };
+        let name = &stage.name;
+        match stage.kind() {
+            StageKind::Workflow => {
+                bail!("stage {name:?}: a workflow stage cannot carry a human gate");
+            }
+            StageKind::Agent => {}
+            StageKind::GateOnly | StageKind::Review => return Ok(()),
+        }
+        if *confirm {
+            bail!(
+                "stage {name:?}: an agent stage's human gate is answered proceed; remove confirm"
+            );
+        }
+        let codex = stage
+            .operator
+            .as_ref()
+            .and_then(|o| self.operators.get(o))
+            .is_some_and(|o| o.kind == OperatorKind::Codex);
+        if codex {
+            bail!(
+                "stage {name:?}: a held stage needs a Claude Code operator; codex reports no stop to ask at"
+            );
+        }
+        if stage.running_note().is_none() {
+            bail!(
+                "stage {name:?}: a held stage writes its running note; add one to writes, such as writes = [\"notes\"]"
+            );
+        }
+        Ok(())
+    }
+
     /// A stage's own `on_dirty` goes only where an agent stops and its
     /// tree is judged: an agent stage with a command gate, or a code
     /// review stage's implementer.
@@ -1187,6 +1242,7 @@ impl Pipeline {
             bail!("stage {:?} names both an operator and a review", stage.name);
         }
         Self::validate_gate(stage)?;
+        self.validate_held(stage)?;
         Self::validate_on_dirty(stage)?;
         if stage.kind() == StageKind::Review {
             self.validate_review_stage(stage)?;
@@ -3591,6 +3647,41 @@ ports = [3100, 3199]
         );
     }
 
+    /// The held-build companion: an agent stage held open for the owner
+    /// on the deployed stack, then code review and a pull request.
+    #[test]
+    fn the_orchard_held_example_is_a_pipeline_the_parser_knows() {
+        let text = include_str!("../../pipelines/examples/Orchard.held.toml");
+        let source: toml::Table = toml::from_str(text).unwrap();
+        let p = Pipeline::parse(text)
+            .unwrap_or_else(|e| panic!("pipelines/examples/Orchard.held.toml: {e:#}"));
+        p.validate_for_take()
+            .unwrap_or_else(|e| panic!("pipelines/examples/Orchard.held.toml: {e:#}"));
+        let parsed = toml::Table::try_from(&p).unwrap();
+        keys_survive(&source, &parsed, "", 0);
+        let names: Vec<&str> = p.stages.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "investigate",
+                "lanes",
+                "deploy",
+                "build",
+                "review-code",
+                "pr",
+                "ready",
+                "merge"
+            ]
+        );
+        let held: Vec<&str> = p
+            .stages
+            .iter()
+            .filter(|s| s.held())
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(held, ["build"]);
+    }
+
     fn back_half_refused(from: &str, to: &str, expected: &str) {
         let text = DEPLOYING_BACK_HALF.replace(from, to);
         assert_ne!(text, DEPLOYING_BACK_HALF, "{from}");
@@ -4127,6 +4218,91 @@ without_lane = "base"
             &p.stages.last().unwrap().gate,
             Some(Gate::Human { question: None, .. })
         ));
+    }
+
+    /// An agent stage `build` run by `operator`, writing `writes`, with
+    /// the human gate `gate` (the inside of its table).
+    fn held_stage(operator: &str, writes: &str, gate: &str) -> String {
+        format!(
+            "[[stages]]\nname = \"build\"\noperator = \"{operator}\"\ncontext = \"each\"\nwrites = {writes}\nprompt = \"Build on {{branch}}; keep {{notes}}.\"\ngate = {{ kind = \"human\", decision = \"built\"{gate} }}\n"
+        )
+    }
+
+    #[test]
+    fn an_agent_stage_with_a_human_gate_is_held_and_takes_a_question() {
+        let p = with(&held_stage(
+            "implementer",
+            "[\"notes\"]",
+            ", question = \"Built?\"",
+        ))
+        .unwrap();
+        let build = p.stages.last().unwrap();
+        assert_eq!(build.kind(), StageKind::Agent);
+        assert!(build.held());
+        assert_eq!(build.running_note(), Some("notes"));
+        assert!(matches!(
+            &build.gate,
+            Some(Gate::Human { question: Some(q), .. }) if q == "Built?"
+        ));
+        // The running note is the first file, never an evidence directory.
+        let p = with(&held_stage(
+            "implementer",
+            "[{ name = \"shots\", dir = true }, \"notes\"]",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(p.stages.last().unwrap().running_note(), Some("notes"));
+    }
+
+    #[test]
+    fn a_gate_only_human_gate_is_the_ordinary_look_not_a_hold() {
+        let p = with(PLAIN_GATE).unwrap();
+        let again = p.stages.last().unwrap();
+        assert_eq!(again.kind(), StageKind::GateOnly);
+        assert!(!again.held());
+        assert!(!p.stages.iter().any(Stage::held));
+    }
+
+    #[test]
+    fn a_held_stage_with_confirm_is_refused() {
+        refused(
+            &held_stage("implementer", "[\"notes\"]", ", confirm = true"),
+            &["stage \"build\"", "remove confirm"],
+        );
+    }
+
+    #[test]
+    fn a_human_gate_on_a_workflow_stage_is_refused() {
+        refused(
+            "[[stages]]\nname = \"look\"\nreview = \"reviewer\"\ncontext = \"each\"\nsubject = \"plan\"\ngate = { kind = \"human\", decision = \"look\" }\n",
+            &["stage \"look\"", "workflow stage cannot carry a human gate"],
+        );
+    }
+
+    #[test]
+    fn a_held_stage_run_by_codex_is_refused() {
+        let file = SWITCHBOARD.replace(
+            "[operators.implementer]\n",
+            "[operators.coder]\nkind = \"codex\"\n\n[operators.implementer]\n",
+        );
+        let stage = held_stage("coder", "[\"notes\"]", "");
+        let err = Pipeline::parse(&format!("{file}\n{stage}"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("stage \"build\""), "{err}");
+        assert!(err.contains("needs a Claude Code operator"), "{err}");
+    }
+
+    #[test]
+    fn a_held_stage_with_no_running_note_is_refused() {
+        refused(
+            &held_stage("implementer", "[]", ""),
+            &["stage \"build\"", "running note"],
+        );
+        refused(
+            &held_stage("implementer", "[{ name = \"shots\", dir = true }]", ""),
+            &["stage \"build\"", "running note"],
+        );
     }
 
     /// The Switchboard pipeline with its dials set to `decisions` and a

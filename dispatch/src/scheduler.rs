@@ -33,10 +33,11 @@ use crate::store::{
 use crate::template::Vars;
 use crate::ticket::{
     Attempt, AttemptKind, AttemptState, CheckGroup, CloseProgress, Decision, DecisionKind,
-    DecisionState, Evidence, EvidenceFile, Forgotten, GateRun, Held, LaneRecord, MergeWait,
-    Operation, OrphanKill, ProjectState, PullRequestRecord, PullRequestSource, RefreshConflict,
-    Refreshed, Released, RunSession, SETTLE_POLLS, STOP_IDLE_POLLS, STUCK, ServiceState, Settle,
-    SourceSnapshot, Ticket, TicketState, TranscriptRef, WaitUntil,
+    DecisionState, Evidence, EvidenceFile, Forgotten, GateRun, HELD_IDLE_POLLS, Held, LaneRecord,
+    MergeWait, Operation, OrphanKill, ProjectState, PullRequestRecord, PullRequestSource, RELAUNCH,
+    RefreshConflict, Refreshed, Released, RunSession, SETTLE_POLLS, STOP_IDLE_POLLS, STUCK,
+    ServiceState, Settle, SourceSnapshot, Ticket, TicketState, TranscriptRef, WaitUntil,
+    held_polls_after,
 };
 
 /// A day in ms: how often the evidence sweep runs, and the unit of
@@ -456,6 +457,7 @@ pub const DECISIONS: &[&str] = &[
     "lost-send",
     STUCK,
     SERVICE,
+    RELAUNCH,
 ];
 
 /// The decision a `pr-merged` gate asks when it names none.
@@ -3297,13 +3299,7 @@ impl Runner {
                 a.is_open() && !matches!(a.kind, AttemptKind::GateOnly | AttemptKind::Review)
             })
             .filter(|a| a.session.is_none() && a.run.is_none())
-            .filter(|a| {
-                !t.ledger.iter().any(|o| {
-                    o.reply.is_none()
-                        && matches!(o.intent.as_str(), "session" | "run")
-                        && o.attempt.as_ref() == Some(&(a.stage.clone(), a.n))
-                })
-            })
+            .filter(|a| !launch_unreplied(t, &(a.stage.clone(), a.n)))
             .map(|a| (a.stage.clone(), a.n))
             .collect();
         for (stage, n) in stranded {
@@ -3546,18 +3542,14 @@ impl Runner {
             })
             .collect();
         for (i, name, answer, attempt) in answered {
+            let held = held_attempt(t, p, attempt.as_ref());
             // The acted mark is set in memory here and reaches disk with
             // the action's own first write (the parking state, the ledger
             // entry, the lane record), never before it: an answer is
-            // either still unacted or its intent is durable. Two
-            // exceptions: a `rerun` answer to a `rerun` decision, marked
-            // only once the replaced attempt is confirmed gone, below,
-            // since `may_rerun` launches on that mark; and a `reuse` or
-            // `fresh` answer to `branch`, marked by the cut that uses it.
-            if !matches!(
-                (name.as_str(), answer.as_str()),
-                ("rerun", "rerun") | ("branch", "reuse" | "fresh")
-            ) && let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state
+            // either still unacted or its intent is durable. The
+            // exceptions are `marked_by_its_action`.
+            if !marked_by_its_action(&name, &answer, held)
+                && let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state
             {
                 *acted = true;
             }
@@ -3602,6 +3594,9 @@ impl Runner {
                 ("message", "accept" | "rewrite") => {
                     self.message_answer(t, ps, &answer, attempt.as_ref(), now_ms)?;
                 }
+                (_, "proceed") if held => {
+                    self.proceed_held(t, ps, p, attempt.as_ref(), now_ms)?;
+                }
                 (_, "proceed" | "done") => {
                     self.pass_human_gate(t, ps, p, attempt.as_ref(), now_ms)?;
                 }
@@ -3610,8 +3605,15 @@ impl Runner {
                         DecisionState::Answered { note, .. } => note.clone(),
                         _ => None,
                     };
-                    self.send_back(t, ps, p, name, attempt.as_ref(), note, now_ms)?;
+                    if held {
+                        self.rerun_held(t, ps, i, name, attempt.as_ref(), note, now_ms)?;
+                    } else {
+                        self.send_back(t, ps, p, name, attempt.as_ref(), note, now_ms)?;
+                    }
                 }
+                // The held stage's poll relaunches, where the tree is
+                // known, and marks the answer acted with the launch.
+                (_, RELAUNCH) if held => continue,
                 ("rerun", "rerun") => {
                     let note = rerun_note(t, p, i);
                     if !self.retire_replaced(t, ps, i, attempt.as_ref(), note, now_ms)? {
@@ -4846,20 +4848,8 @@ impl Runner {
             if pending_decision(t, &stage.name, decision, Some(&key)) {
                 continue;
             }
-            let mut question = self.human_question(t, p, stage, &attempt, &cwd, lane.as_deref());
-            if let Some(q) = own_question {
-                // A question naming a decision this runner did not set
-                // is left out rather than asked with the field as
-                // written; there is no attempt to fail before the
-                // decision exists.
-                match vars_for(t, p, lane.as_deref()).render_checked(q) {
-                    Ok(q) => {
-                        question.push_str("\n\n");
-                        question.push_str(&q);
-                    }
-                    Err(e) => log::error!("{} {}: question: {e:#}", t.id, stage.name),
-                }
-            }
+            let question =
+                self.gate_question(t, p, stage, &attempt, &cwd, lane.as_deref(), own_question);
             let (kind, options): (DecisionKind, &[&str]) = if confirm {
                 (
                     DecisionKind::Confirmation,
@@ -5023,6 +5013,34 @@ impl Runner {
         }
         q.push_str(&deployed_and_served(t, p));
         q
+    }
+
+    /// A human gate's question: what `human_question` shows, then the
+    /// gate's own question rendered. One naming a decision this runner
+    /// did not set is left out rather than asked with the field as
+    /// written; there is no attempt to fail before the decision exists.
+    #[allow(clippy::too_many_arguments)]
+    fn gate_question(
+        &self,
+        t: &Ticket,
+        p: &Pipeline,
+        stage: &Stage,
+        a: &Attempt,
+        cwd: &Path,
+        lane: Option<&str>,
+        own_question: Option<&str>,
+    ) -> String {
+        let mut question = self.human_question(t, p, stage, a, cwd, lane);
+        if let Some(q) = own_question {
+            match vars_for(t, p, lane).render_checked(q) {
+                Ok(q) => {
+                    question.push_str("\n\n");
+                    question.push_str(&q);
+                }
+                Err(e) => log::error!("{} {}: question: {e:#}", t.id, stage.name),
+            }
+        }
+        question
     }
 
     /// The gate's attempt completes, bound to the tree's head.
@@ -6269,29 +6287,16 @@ impl Runner {
         stage: &Stage,
         now_ms: u64,
     ) -> Result<()> {
-        // A command gate runs after the agent, in its context; an agent
-        // stage with any other gate parks.
-        match &stage.gate {
-            None | Some(Gate::Command { .. }) => {}
-            Some(Gate::External { check, .. }) => {
-                return self.park(
-                    t,
-                    ps,
-                    &format!("stage {} ({check}) is not built in this slice", stage.name),
-                    now_ms,
-                );
-            }
-            Some(Gate::Human { decision, .. }) => {
-                return self.park(
-                    t,
-                    ps,
-                    &format!(
-                        "stage {} ({decision}) is not built in this slice",
-                        stage.name
-                    ),
-                    now_ms,
-                );
-            }
+        // A command gate runs after the agent, in its context; a human
+        // gate holds the agent's session open for the owner until they
+        // answer it; an external gate parks.
+        if let Some(Gate::External { check, .. }) = &stage.gate {
+            return self.park(
+                t,
+                ps,
+                &format!("stage {} ({check}) is not built in this slice", stage.name),
+                now_ms,
+            );
         }
         let Some(contexts) = self.contexts_or_park(t, ps, p, stage, now_ms)? else {
             return Ok(());
@@ -6310,7 +6315,17 @@ impl Runner {
                 Some(a) if a.is_open() => {
                     all_complete = false;
                     let trust = p.policy.trust_folders;
-                    self.poll_agent(t, ps, p, &a, stage, &cwd, lane.as_deref(), trust, now_ms)?;
+                    if stage.held() {
+                        let held = HeldCtx {
+                            p,
+                            stage,
+                            cwd: Some(&cwd),
+                            lane: lane.as_deref(),
+                        };
+                        self.poll_held(t, ps, &a, &held, trust, now_ms)?;
+                    } else {
+                        self.poll_agent(t, ps, p, &a, stage, &cwd, lane.as_deref(), trust, now_ms)?;
+                    }
                 }
                 Some(a) => {
                     // Failed: a rerun waits on its decision, asked again
@@ -6395,32 +6410,14 @@ impl Runner {
         let dir = self.attempt_dir(t, &stage.name, n, ctx)?;
         let artifacts = artifact_paths(stage, &dir);
         let evidence = make_evidence(stage, &dir)?;
-        let mut vars = vars_for(t, p, lane);
-        for (name, path) in &artifacts {
-            vars.set(name.clone(), path.display().to_string());
-        }
-        if let Some(ev) = &evidence {
-            vars.set(ev.name.clone(), ev.dir.display().to_string());
-        }
-        let guidance = &p.operators[&operator].guidance;
-        let template = stage.prompt.as_deref().unwrap_or_default();
-        let mut env = input_env(&vars, &format!("{guidance}\n{template}"));
-        // Kept on the session record, so a resumed session still has it.
-        if let Some(ev) = &evidence {
-            env.insert(
-                format!("DISPATCH_WRITES_{}", env_key(&ev.name)),
-                ev.dir.display().to_string(),
-            );
-        }
         // A prompt naming a decision this runner did not set fails the
         // attempt, with a rerun offered, rather than reach the agent with
         // the field as written.
-        let rendered = guidance_prelude(guidance, &vars)
-            .and_then(|prelude| Ok(prelude + &vars.render_checked(template)?));
-        let mut prompt = match rendered {
-            Ok(prompt) => prompt,
-            Err(e) => return self.fail_unrendered(t, ps, (&stage.name, ctx), n, &e, now_ms),
-        };
+        let (mut prompt, env) =
+            match stage_prompt(t, p, stage, &operator, lane, &artifacts, evidence.as_ref()) {
+                Ok(rendered) => rendered,
+                Err(e) => return self.fail_unrendered(t, ps, (&stage.name, ctx), n, &e, now_ms),
+            };
         if let Some(moved) = lane
             .and_then(|l| t.lanes.iter().find(|x| x.name == l))
             .and_then(|l| l.refreshed.as_ref())
@@ -6433,6 +6430,9 @@ impl Runner {
         }
         if let Some(note) = commit_note {
             prompt.push_str(&note);
+        }
+        if let Some(note) = held_note(stage, &artifacts) {
+            prompt.push_str(&held_paragraph(note));
         }
         // The note is taken off only with the attempt that carries it:
         // a launch that stops short (a setup still running) keeps it.
@@ -6595,12 +6595,7 @@ impl Runner {
         if let Some(key) = &spec.rework {
             t.rework.remove(key);
         }
-        let notes = format!(
-            "Dispatch ticket {} · #{} {} · stage {stage} attempt {n}",
-            t.id,
-            t.source.number.unwrap_or(0),
-            t.source.title,
-        );
+        let notes = session_notes(t, stage, n, "");
         let body = if let Some(source) = spec.clone_of {
             Body::SessionClone {
                 source,
@@ -6610,29 +6605,14 @@ impl Runner {
                 env_sets: spec.env_sets,
             }
         } else {
-            // The artifacts live outside the agent's cwd, in Dispatch's
-            // own directory; Claude Code writes there unasked only under
-            // an allow rule for the path (an added directory still asks
-            // before creating a file).
-            let mut args = operator.args.clone();
-            args.extend(operator.kind.write_flags(&dir));
-            let launch = if args.is_empty() {
-                wire::Launch::Shell
-            } else {
-                wire::Launch::Argv(args)
-            };
-            Body::SessionNew {
-                project,
+            let text = SessionText {
                 name: spec.operator,
-                session_kind: session_kind(operator.kind),
-                cwd: cwd.to_path_buf(),
-                launch,
-                prompt: Some(prompt),
+                prompt,
                 notes,
                 env: spec.env,
                 env_sets: spec.env_sets,
-                replaces: None,
-            }
+            };
+            fresh_session(operator, project, cwd, &dir, text)
         };
         let reply = self.send(t, ps, Some((stage.to_owned(), n)), "session", body, now_ms)?;
         if let Reply::Failed { reason } = reply {
@@ -6984,6 +6964,466 @@ impl Runner {
             self.start_gate(t, ps, p, a, stage, cwd, lane, now_ms)?;
         }
         Ok(())
+    }
+
+    /// A held stage's open attempt: its session is the owner's to work
+    /// in, so no Stop, idle grace or missing note ends it. Its gate is
+    /// asked once the session has stopped, or has sat idle past
+    /// `HELD_IDLE_POLLS` after a turn it was seen to start; a session
+    /// gone is a `relaunch` question, never a failure; an owner's
+    /// `relaunch` answer is acted on here, where the tree is known.
+    fn poll_held(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        ctx: &HeldCtx,
+        trust: bool,
+        now_ms: u64,
+    ) -> Result<()> {
+        let key = (a.stage.clone(), a.n);
+        // Sent but no reply adopted yet: recovery's to resolve.
+        let Some(session) = a.session.clone() else {
+            return Ok(());
+        };
+        if launch_unreplied(t, &key) {
+            return Ok(());
+        }
+        if unacted_for(t, &key).any(|answer| answer == RELAUNCH) {
+            return self.relaunch_held(t, ps, a, ctx, now_ms);
+        }
+        // A question waiting stands whatever the session does, gone
+        // included: the gate offers `relaunch` itself, so a second
+        // question on the attempt would only go stale. So does an answer
+        // given but not yet acted on (a `rerun` whose session is not yet
+        // confirmed stopped).
+        if has_pending_for(t, &key) || unacted_for(t, &key).next().is_some() {
+            return self.save_ticket(t, now_ms);
+        }
+        let view = match self.session_view(&session)? {
+            Ok(view) => {
+                note_transcript(t, &session, &view, now_ms);
+                Some(view)
+            }
+            Err(reason) if reason == NO_SUCH_SESSION => None,
+            Err(reason) => {
+                log::warn!(
+                    "ticket {} {}/{}: session query failed: {reason}; asking again",
+                    t.id,
+                    a.stage,
+                    a.context
+                );
+                return self.save_ticket(t, now_ms);
+            }
+        };
+        if let Some(view) = &view
+            && view.trust_question
+            && trust
+        {
+            return self.answer_trust(t, ps, a, session, now_ms);
+        }
+        let attempt = record_of(t, &a.stage, a.n);
+        if attempt.state == AttemptState::Starting {
+            attempt.state = AttemptState::Running;
+        }
+        if let Some(stop) = view.as_ref().and_then(|v| v.last_stop_at_ms) {
+            attempt.stop_at_ms = Some(stop);
+        }
+        let Some(view) = view.filter(|v| v.liveness == wire::Liveness::Running) else {
+            let question = format!(
+                "{} ({}): its session is gone (pane closed, exited, or the machine restarted). relaunch starts a fresh session on the same branch and note; nothing is relaunched until you say. park stops the ticket.",
+                ctx.stage.name, a.context
+            );
+            return self.ask_relaunch(t, ps, ctx.stage, key, question, now_ms);
+        };
+        let attempt = record_of(t, &a.stage, a.n);
+        // The same grace as an agent's stop, kept in one place so it is
+        // told once.
+        if attempt.stop_at_ms.is_some() || attempt.polls_since_stop > HELD_IDLE_POLLS {
+            let attempt = attempt.clone();
+            return self.ask_held(t, ps, &attempt, ctx, None, now_ms);
+        }
+        // Idle polls count only once the session was seen at work, so a
+        // fresh pane's starting or idle card before its first turn asks
+        // nothing.
+        let at_work = view.card == wire::CARD_WORKING || view.trust_question;
+        attempt.polls_since_stop = held_polls_after(
+            attempt.polls_since_stop,
+            at_work,
+            view.card == wire::CARD_IDLE,
+        );
+        self.save_ticket(t, now_ms)
+    }
+
+    /// The `relaunch` question on a held attempt: save, then ask. The
+    /// options are `relaunch` and `park`.
+    fn ask_relaunch(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        stage: &Stage,
+        key: (String, u32),
+        question: String,
+        now_ms: u64,
+    ) -> Result<()> {
+        self.save_ticket(t, now_ms)?;
+        self.ensure_decision(
+            t,
+            ps,
+            Ask {
+                stage: &stage.name,
+                name: RELAUNCH,
+                kind: DecisionKind::Permission,
+                question,
+                options: &[RELAUNCH, "park"],
+                recommendation: None,
+                attempt: Some(key),
+            },
+            now_ms,
+        )
+    }
+
+    /// A held stage's gate asked: the default look at the branch (when
+    /// its tree is known) and the gate's own question, the running note
+    /// named, and what each answer does. `refusal` is why an earlier
+    /// `proceed` was refused, put first.
+    fn ask_held(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        ctx: &HeldCtx,
+        refusal: Option<&str>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let stage = ctx.stage;
+        let Some(Gate::Human {
+            decision, question, ..
+        }) = &stage.gate
+        else {
+            return Ok(());
+        };
+        let mut q = String::new();
+        if let Some(why) = refusal {
+            let _ = write!(q, "proceed was refused: {why}\n\n");
+        }
+        if let Some(cwd) = ctx.cwd {
+            q.push_str(&self.gate_question(t, ctx.p, stage, a, cwd, ctx.lane, question.as_deref()));
+        }
+        if let Some(note) = held_note(stage, &a.artifacts) {
+            let _ = write!(q, "\n\nRunning note: {}", note.display());
+        }
+        q.push_str("\n\nproceed checks that the running note exists and the tree is clean, records the head, closes the session and moves on; relaunch replaces the session with a fresh one on the same note; rerun with a note starts the stage again; park stops the ticket.");
+        self.ensure_decision(
+            t,
+            ps,
+            Ask {
+                stage: &stage.name,
+                name: decision,
+                kind: DecisionKind::Permission,
+                question: q,
+                options: &["proceed", RELAUNCH, "rerun", "park"],
+                recommendation: None,
+                attempt: Some((a.stage.clone(), a.n)),
+            },
+            now_ms,
+        )
+    }
+
+    /// The owner's `proceed` on a held stage: refused, and asked again
+    /// with the reason, while the running note is missing or the tree is
+    /// not clean; otherwise the attempt completes at the tree's head,
+    /// every other question on it is withdrawn and its session, if still
+    /// there, is closed. A session gone does not stop it: the note and
+    /// the tree are on disk. Nothing is typed into the session.
+    fn proceed_held(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        attempt: Option<&(String, u32)>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some(a) = attempt
+            .and_then(|(s, n)| find_attempt(t, s, *n))
+            .filter(|a| a.is_open())
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let Some(stage) = p.stages.iter().find(|s| s.name == a.stage) else {
+            return Ok(());
+        };
+        let context = Self::contexts(t, p, stage, &self.base_tree(ps, p))
+            .into_iter()
+            .find(|(ctx, ..)| *ctx == a.context);
+        let Some((_, cwd, lane)) = context else {
+            let why = format!("there is no tree for {}", a.context);
+            log::warn!("ticket {} {}: proceed refused: {why}", t.id, a.stage);
+            let ctx = HeldCtx {
+                p,
+                stage,
+                cwd: None,
+                lane: None,
+            };
+            return self.ask_held(t, ps, &a, &ctx, Some(&why), now_ms);
+        };
+        let missing = missing_artifacts(&a);
+        let why = if missing.is_empty() {
+            (!self.git.is_clean(&cwd)?).then(|| format!(
+                "the tree {} is not clean; have the session commit its work or revert what is not part of it, then answer proceed again. Dispatch commits nothing for you.",
+                cwd.display()
+            ))
+        } else {
+            let paths: Vec<String> = missing
+                .iter()
+                .filter_map(|n| a.artifacts.get(n))
+                .map(|p| p.display().to_string())
+                .collect();
+            Some(format!(
+                "the running note {} does not exist; ask the session to write it",
+                paths.join(", ")
+            ))
+        };
+        if let Some(why) = why {
+            log::info!(
+                "ticket {} {}/{} proceed refused: {why}",
+                t.id,
+                a.stage,
+                a.context
+            );
+            let ctx = HeldCtx {
+                p,
+                stage,
+                cwd: Some(&cwd),
+                lane: lane.as_deref(),
+            };
+            return self.ask_held(t, ps, &a, &ctx, Some(&why), now_ms);
+        }
+        let head = self.git.head(&cwd)?;
+        let key = (a.stage.clone(), a.n);
+        cancel_pending_for(t, &key);
+        let record = record_of(t, &a.stage, a.n);
+        record.head = Some(head.clone());
+        record.state = AttemptState::Complete;
+        record.ended_ms = Some(now_ms);
+        list_attempt_evidence(record, p);
+        log::info!(
+            "ticket {} {}/{} proceeded by hand at {}",
+            t.id,
+            a.stage,
+            a.context,
+            short_head(&head)
+        );
+        // The completed record goes to disk in the same write as the
+        // kill request, so no record says finished about a pane nothing
+        // will close.
+        if let Some(session) = a.session.clone()
+            && !self.kill_if_running(t, ps, key, session, now_ms)?
+        {
+            log::warn!(
+                "ticket {} {}/{}: the session was not closed",
+                t.id,
+                a.stage,
+                a.context
+            );
+        }
+        self.save_ticket(t, now_ms)?;
+        self.unmark(t, ps, now_ms)
+    }
+
+    /// `session` closed when the app still has it running, under the
+    /// attempt `key`'s ledger. False when the app refused the kill.
+    fn kill_if_running(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        key: (String, u32),
+        session: String,
+        now_ms: u64,
+    ) -> Result<bool> {
+        let running = matches!(
+            self.session_view(&session)?,
+            Ok(view) if view.liveness == wire::Liveness::Running
+        );
+        if !running {
+            return Ok(true);
+        }
+        let reply = self.send(
+            t,
+            ps,
+            Some(key),
+            "kill",
+            Body::SessionKill { session },
+            now_ms,
+        )?;
+        Ok(!matches!(reply, Reply::Failed { .. }))
+    }
+
+    /// The owner's `rerun` on a held stage: the stage itself runs again,
+    /// a new attempt with a new note and the owner's note in its prompt.
+    /// The session is stopped first; until that is confirmed the answer
+    /// stays unacted, for the next pass.
+    #[allow(clippy::too_many_arguments)]
+    fn rerun_held(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        i: usize,
+        from: &str,
+        attempt: Option<&(String, u32)>,
+        note: Option<String>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let Some(a) = attempt.and_then(|(s, n)| find_attempt(t, s, *n)).cloned() else {
+            return Ok(());
+        };
+        let mut note = note.unwrap_or_else(|| format!("sent back at {from} without a note"));
+        let reason = format!("{SENT_BACK_FROM}{from}: {note}");
+        if a.is_open() && !self.cancel_attempt(t, ps, &a, &reason, now_ms)? {
+            return Ok(());
+        }
+        cancel_pending_for(t, &(a.stage.clone(), a.n));
+        if let Some(previous) = previous_notes(t, &a) {
+            note.push_str(&previous);
+        }
+        t.rework.insert(rework_key(&a.stage, &a.context), note);
+        if let DecisionState::Answered { acted, .. } = &mut t.decisions[i].state {
+            *acted = true;
+        }
+        log::info!(
+            "ticket {} {}/{} sent back to itself from {from}",
+            t.id,
+            a.stage,
+            a.context
+        );
+        self.save_ticket(t, now_ms)?;
+        self.unmark(t, ps, now_ms)
+    }
+
+    /// The owner's `relaunch` on a held stage: the launch built first,
+    /// then the session, if still there, closed, every other question on
+    /// the attempt withdrawn, and a fresh session started on the same
+    /// attempt, told to read the running note first. The answer is marked
+    /// acted in the same write as the launch request, so a restart before
+    /// it relaunches once and one after it relaunches nothing. A pane that
+    /// will not close leaves the answer for the next pass; a launch that
+    /// cannot be built, or that Switchboard refuses, leaves the old
+    /// session on the attempt and asks `relaunch` again.
+    fn relaunch_held(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        ctx: &HeldCtx,
+        now_ms: u64,
+    ) -> Result<()> {
+        let key = (a.stage.clone(), a.n);
+        let body = match self.relaunch_body(t, ps, a, ctx, now_ms)? {
+            Ok(body) => body,
+            Err(reason) => {
+                log::error!(
+                    "ticket {} {}/{}: relaunch: {reason}",
+                    t.id,
+                    a.stage,
+                    a.context
+                );
+                mark_acted(t, &key, RELAUNCH);
+                cancel_pending_for(t, &key);
+                let question = format!(
+                    "{} ({}): relaunch could not start a session: {reason}. Answer relaunch to try again, or park.",
+                    ctx.stage.name, a.context
+                );
+                return self.ask_relaunch(t, ps, ctx.stage, key, question, now_ms);
+            }
+        };
+        if let Some(session) = a.session.clone()
+            && !self.kill_if_running(t, ps, key.clone(), session, now_ms)?
+        {
+            log::warn!(
+                "ticket {} {}/{}: relaunch waits: the old session did not close",
+                t.id,
+                a.stage,
+                a.context
+            );
+            return Ok(());
+        }
+        cancel_pending_for(t, &key);
+        self.unmark(t, ps, now_ms)?;
+        let record = record_of(t, &a.stage, a.n);
+        record.stop_at_ms = None;
+        record.polls_since_stop = 0;
+        mark_acted(t, &key, RELAUNCH);
+        if let Reply::Failed { reason } = self.send(t, ps, Some(key), "session", body, now_ms)? {
+            log::warn!(
+                "ticket {} {}/{}: relaunch refused: {reason}",
+                t.id,
+                a.stage,
+                a.context
+            );
+        }
+        Ok(())
+    }
+
+    /// The `session.new` a held stage's relaunch sends: the stage prompt
+    /// rendered for the attempt's own artifacts, so the note is the same
+    /// file, and told to read the note first. `Err` with why when it
+    /// cannot be built.
+    fn relaunch_body(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        a: &Attempt,
+        ctx: &HeldCtx,
+        now_ms: u64,
+    ) -> Result<std::result::Result<Body, String>> {
+        let (stage, p) = (ctx.stage, ctx.p);
+        let Some(cwd) = ctx.cwd else {
+            return Ok(Err(format!("there is no tree for {}", a.context)));
+        };
+        let operator_name = stage.operator.clone().unwrap_or_default();
+        let Some(operator) = p.operators.get(&operator_name) else {
+            return Ok(Err(format!("stage {} names no operator", stage.name)));
+        };
+        let (mut prompt, env) = match stage_prompt(
+            t,
+            p,
+            stage,
+            &operator_name,
+            ctx.lane,
+            &a.artifacts,
+            a.evidence.as_ref(),
+        ) {
+            Ok(rendered) => rendered,
+            Err(e) => return Ok(Err(format!("{e:#}"))),
+        };
+        if let Some(note) = held_note(stage, &a.artifacts) {
+            prompt.push_str(&held_paragraph(note));
+            let _ = write!(
+                prompt,
+                "\n\nThis is a fresh session continuing an earlier one on this stage, which was closed. Read {} first, then carry on and keep it current.",
+                note.display()
+            );
+        }
+        let env_sets = env_sets(Some(operator), Some(stage));
+        if let Err(reason) = self.with_env_sentence(&mut prompt, &env_sets) {
+            return Ok(Err(reason));
+        }
+        let project = match self.ensure_project(t, ps, p, now_ms) {
+            Ok(id) => id,
+            Err(e) if e.is::<SocketDown>() => return Err(e),
+            Err(e) => return Ok(Err(format!("{e:#}"))),
+        };
+        let dir = self.attempt_dir(t, &a.stage, a.n, &a.context)?;
+        log::info!("ticket {} {}/{} relaunched", t.id, a.stage, a.context);
+        let text = SessionText {
+            name: operator_name,
+            prompt,
+            notes: session_notes(t, &a.stage, a.n, ", relaunched"),
+            env,
+            env_sets,
+        };
+        Ok(Ok(fresh_session(operator, project, cwd, &dir, text)))
     }
 
     /// A gated agent stopped (or never answered its nudge) with its
@@ -9682,6 +10122,47 @@ fn resolution_stage(p: &Pipeline) -> Option<Stage> {
     Some(shape)
 }
 
+/// Whether an answer is marked acted by the action that carries it out
+/// rather than up front: a `rerun` answer to a `rerun` decision, once
+/// the replaced attempt is confirmed gone, since `may_rerun` launches on
+/// that mark; a `reuse` or `fresh` answer to `branch`, by the cut that
+/// uses it; and a held stage's `relaunch` and `rerun`, by the launch and
+/// the confirmed stop, which may wait a pass.
+fn marked_by_its_action(name: &str, answer: &str, held: bool) -> bool {
+    matches!(
+        (name, answer),
+        ("rerun", "rerun") | ("branch", "reuse" | "fresh")
+    ) || (held && matches!(answer, RELAUNCH | "rerun"))
+}
+
+/// Whether a launch request for the attempt is on the ledger with no
+/// reply yet: recovery's to resolve before the attempt is judged.
+fn launch_unreplied(t: &Ticket, key: &(String, u32)) -> bool {
+    t.ledger.iter().any(|o| {
+        o.reply.is_none()
+            && matches!(o.intent.as_str(), "session" | "run")
+            && o.attempt.as_ref() == Some(key)
+    })
+}
+
+/// The answers on the attempt's decisions not yet acted on.
+fn unacted_for<'t>(t: &'t Ticket, key: &'t (String, u32)) -> impl Iterator<Item = &'t str> {
+    t.decisions
+        .iter()
+        .filter(move |d| d.attempt.as_ref() == Some(key))
+        .filter_map(Decision::unacted_answer)
+}
+
+/// Whether a decision about `attempt` is a held stage's: the attempt is
+/// an agent attempt of a stage `held()` in the ticket's pipeline.
+fn held_attempt(t: &Ticket, p: &Pipeline, attempt: Option<&(String, u32)>) -> bool {
+    attempt
+        .and_then(|(s, n)| find_attempt(t, s, *n))
+        .is_some_and(|a| {
+            a.kind == AttemptKind::Agent && p.stages.iter().any(|s| s.name == a.stage && s.held())
+        })
+}
+
 /// Cancel the attempt's pending decisions called `name` in memory; the
 /// caller's next save writes it. True if there was one.
 fn cancel_pending(t: &mut Ticket, a: &Attempt, name: &str) -> bool {
@@ -10461,6 +10942,157 @@ fn secret_holds(t: &Ticket, p: &Pipeline) -> Vec<String> {
         .filter_map(|a| p.stages.iter().find(|s| s.name == a.stage))
         .flat_map(|s| s.needs.iter().filter(|n| p.resource(n).is_some()).cloned())
         .collect()
+}
+
+/// A stage's prompt for an agent of `operator` writing `artifacts` and
+/// `evidence`, rendered with the guidance before it, and the environment
+/// its inputs give the session. `Err` when either names a decision this
+/// runner did not set.
+fn stage_prompt(
+    t: &Ticket,
+    p: &Pipeline,
+    stage: &Stage,
+    operator: &str,
+    lane: Option<&str>,
+    artifacts: &BTreeMap<String, PathBuf>,
+    evidence: Option<&Evidence>,
+) -> Result<(String, BTreeMap<String, String>)> {
+    let mut vars = vars_for(t, p, lane);
+    for (name, path) in artifacts {
+        vars.set(name.clone(), path.display().to_string());
+    }
+    if let Some(ev) = evidence {
+        vars.set(ev.name.clone(), ev.dir.display().to_string());
+    }
+    let guidance = &p.operators[operator].guidance;
+    let template = stage.prompt.as_deref().unwrap_or_default();
+    let mut env = input_env(&vars, &format!("{guidance}\n{template}"));
+    // Kept on the session record, so a resumed session still has it.
+    if let Some(ev) = evidence {
+        env.insert(
+            format!("DISPATCH_WRITES_{}", env_key(&ev.name)),
+            ev.dir.display().to_string(),
+        );
+    }
+    let prompt = guidance_prelude(guidance, &vars)? + &vars.render_checked(template)?;
+    Ok((prompt, env))
+}
+
+/// The running note of `stage`'s attempt when the stage is held, else
+/// `None`: the one place that pairs the note's name with the stage being
+/// held, so a stage that is not held never reads as having one.
+fn held_note<'a>(stage: &Stage, artifacts: &'a BTreeMap<String, PathBuf>) -> Option<&'a Path> {
+    if !stage.held() {
+        return None;
+    }
+    stage
+        .running_note()
+        .and_then(|n| artifacts.get(n))
+        .map(PathBuf::as_path)
+}
+
+/// What a held stage's attempt is launched with, in one place so a
+/// launch and a relaunch cannot drift apart.
+struct HeldCtx<'a> {
+    p: &'a Pipeline,
+    stage: &'a Stage,
+    /// `None` only for a proceed refused because the context has no tree.
+    cwd: Option<&'a Path>,
+    lane: Option<&'a str>,
+}
+
+/// The parts of a fresh agent session that differ between one launch and
+/// the next; `fresh_session` adds the rest.
+struct SessionText {
+    name: String,
+    prompt: String,
+    notes: String,
+    env: BTreeMap<String, String>,
+    env_sets: Vec<String>,
+}
+
+/// The `session.new` for an agent started fresh in `cwd`: the artifacts
+/// live outside the agent's cwd, in Dispatch's own directory `dir`;
+/// Claude Code writes there unasked only under an allow rule for the
+/// path (an added directory still asks before creating a file).
+fn fresh_session(
+    operator: &crate::pipeline::Operator,
+    project: String,
+    cwd: &Path,
+    dir: &Path,
+    text: SessionText,
+) -> Body {
+    let mut args = operator.args.clone();
+    args.extend(operator.kind.write_flags(dir));
+    let launch = if args.is_empty() {
+        wire::Launch::Shell
+    } else {
+        wire::Launch::Argv(args)
+    };
+    Body::SessionNew {
+        project,
+        name: text.name,
+        session_kind: session_kind(operator.kind),
+        cwd: cwd.to_path_buf(),
+        launch,
+        prompt: Some(text.prompt),
+        notes: text.notes,
+        env: text.env,
+        env_sets: text.env_sets,
+        replaces: None,
+    }
+}
+
+/// The notes line on a session an attempt starts, `suffix` after it.
+fn session_notes(t: &Ticket, stage: &str, n: u32, suffix: &str) -> String {
+    format!(
+        "Dispatch ticket {} · #{} {} · stage {stage} attempt {n}{suffix}",
+        t.id,
+        t.source.number.unwrap_or(0),
+        t.source.title,
+    )
+}
+
+/// Whether the attempt has a decision waiting.
+fn has_pending_for(t: &Ticket, key: &(String, u32)) -> bool {
+    t.decisions
+        .iter()
+        .any(|d| d.pending() && d.attempt.as_ref() == Some(key))
+}
+
+/// Every pending decision on the attempt withdrawn in memory; the
+/// caller's next save writes it.
+fn cancel_pending_for(t: &mut Ticket, key: &(String, u32)) {
+    for d in t
+        .decisions
+        .iter_mut()
+        .filter(|d| d.pending() && d.attempt.as_ref() == Some(key))
+    {
+        d.state = DecisionState::Cancelled;
+    }
+}
+
+/// The attempt's unacted answer called `answer` marked acted in memory.
+fn mark_acted(t: &mut Ticket, key: &(String, u32), answer: &str) {
+    for d in t
+        .decisions
+        .iter_mut()
+        .filter(|d| d.attempt.as_ref() == Some(key) && d.unacted_answer() == Some(answer))
+    {
+        if let DecisionState::Answered { acted, .. } = &mut d.state {
+            *acted = true;
+        }
+    }
+}
+
+/// What a held stage's agent is told after its stage prompt: the owner
+/// talks to it over many turns, the note at `note` is what a later
+/// session and stage read, and nothing is committed for it.
+fn held_paragraph(note: &Path) -> String {
+    format!(
+        "\n\nThis stage is held open for the owner: they will talk to you in this session across many turns. Keep {} current through the whole build: what is being built, what is decided, what is left. Commit your work before the owner proceeds: Dispatch never commits for you, and a tree that is not clean refuses proceed.",
+        note.display()
+    )
 }
 
 /// Where each artifact a stage writes goes in its attempt directory.
@@ -11997,6 +12629,7 @@ mod tests {
             ("RESOLUTION", RESOLUTION),
             ("SERVICE", SERVICE),
             ("STUCK", STUCK),
+            ("RELAUNCH", RELAUNCH),
         ];
         let mut seen = BTreeSet::new();
         for (file, text) in [

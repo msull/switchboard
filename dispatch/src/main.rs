@@ -19,7 +19,9 @@ use dispatch::serve::{ticket_paths, ticket_view};
 use dispatch::store::{DataDir, read_ticket};
 use dispatch::subscribe;
 use dispatch::supervisor::{self, Actor};
-use dispatch::ticket::{DecisionState, REFUSALS_KEPT, Refusal, ServiceState, Ticket, TicketState};
+use dispatch::ticket::{
+    DecisionState, REFUSALS_KEPT, RELAUNCH, Refusal, ServiceState, Ticket, TicketState,
+};
 use dispatch::{USAGE, UsageError};
 use dispatch_control::UsageSource;
 use std::io::Write as _;
@@ -742,6 +744,40 @@ fn held_line(context: &str, h: &dispatch_control::HeldView) -> String {
     )
 }
 
+/// Where an open attempt of a held stage stands, for `show`: the
+/// session the owner works in before its gate is asked, the gate's
+/// decision waiting, or a gone session's `relaunch`. `None` for an
+/// attempt of any other stage. It reads `Stage::held()` and the pending
+/// decisions itself because `TicketView` is the wire shape the control
+/// port serves and carries neither; the wording is the CLI's alone.
+fn held_by_you_line(
+    view: &dispatch_control::TicketView,
+    pipeline: &dispatch::pipeline::Pipeline,
+    a: &dispatch_control::AttemptView,
+) -> Option<String> {
+    let stage = pipeline
+        .stages
+        .iter()
+        .find(|s| s.name == a.stage)
+        .filter(|s| s.held() && a.kind == "agent")?;
+    let Some(dispatch::pipeline::Gate::Human { decision, .. }) = &stage.gate else {
+        return None;
+    };
+    let pending = |name: &str| {
+        view.decisions
+            .iter()
+            .find(|d| d.state == "pending" && d.stage == a.stage && d.name == name)
+    };
+    let what = if let Some(d) = pending(RELAUNCH) {
+        format!("its session is gone; relaunch or park ({})", d.id)
+    } else if let Some(d) = pending(decision) {
+        format!("waiting for proceed ({})", d.id)
+    } else {
+        "the session is yours to work in; asked at its first stop".to_owned()
+    };
+    Some(format!("  {} held by you: {what}", a.stage))
+}
+
 /// `YYYY-MM-DD hh:mm` of `ms` since the epoch, in the local zone, as
 /// `clock` reads it; for a moment that may be days back.
 fn local_time(ms: u64) -> String {
@@ -993,6 +1029,12 @@ fn show(args: &[&str]) -> Result<()> {
         }
         for h in &a.held {
             say!("{}", held_line(&a.context, h));
+        }
+        if let Some(line) = pipeline
+            .as_ref()
+            .and_then(|p| held_by_you_line(&view, p, a))
+        {
+            say!("{line}");
         }
     }
     print_attempts(&view)?;
@@ -2039,6 +2081,47 @@ mod tests {
             at_ms: 4,
             acted: false,
         }
+    }
+
+    #[test]
+    fn a_held_stages_open_attempt_says_where_the_hold_stands() {
+        let p = dispatch::pipeline::Pipeline::parse(include_str!(
+            "../../pipelines/examples/Orchard.held.toml"
+        ))
+        .unwrap();
+        let attempt = |stage: &str| dispatch_control::AttemptView {
+            stage: stage.into(),
+            n: 3,
+            context: "backend".into(),
+            kind: "agent".into(),
+            state: "running".into(),
+            ..Default::default()
+        };
+        let decision = |id: &str, name: &str| dispatch_control::DecisionView {
+            id: id.into(),
+            stage: "build".into(),
+            name: name.into(),
+            state: "pending".into(),
+            ..Default::default()
+        };
+        let mut view = dispatch_control::TicketView::default();
+        let build = attempt("build");
+        assert_eq!(
+            held_by_you_line(&view, &p, &build).as_deref(),
+            Some("  build held by you: the session is yours to work in; asked at its first stop")
+        );
+        view.decisions.push(decision("d7", "built"));
+        assert_eq!(
+            held_by_you_line(&view, &p, &build).as_deref(),
+            Some("  build held by you: waiting for proceed (d7)")
+        );
+        view.decisions.push(decision("d8", RELAUNCH));
+        assert_eq!(
+            held_by_you_line(&view, &p, &build).as_deref(),
+            Some("  build held by you: its session is gone; relaunch or park (d8)")
+        );
+        // Any other stage's attempt has no such line.
+        assert_eq!(held_by_you_line(&view, &p, &attempt("investigate")), None);
     }
 
     #[test]

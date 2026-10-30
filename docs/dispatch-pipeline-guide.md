@@ -18,11 +18,11 @@ may keep the file to install from, as this one does at
 Mac that runs the project (a pipeline that names a client stays in a
 private place). A project that also
 reviews other people's pull requests has a second file,
-`pipelines/<project>.pr.toml` (step 6). When a ticket is taken, it
+`pipelines/<project>.pr.toml` (step 7). When a ticket is taken, it
 keeps a frozen copy of the file and runs from that copy on every pass.
 An edit to the live file therefore reaches tickets taken afterwards,
 and a running ticket only after `dispatch restart <ticket>`, which
-swaps a fresh copy in. Step 7 lists the few keys that are read live.
+swaps a fresh copy in. Step 8 lists the few keys that are read live.
 
 **Checking a file.** Nothing runs a file until a `take`. A file that
 does not parse or validate is refused at the next `take` with the
@@ -180,7 +180,7 @@ kind, the templates for each turn, and a `cap` on rounds. The stage's
 `subject` is the artifact under review, and some earlier stage must
 write it. The `review-finalized` gate passes when the review run is
 finalized, which is the `finalize` decision unless its dial says
-`auto` (step 7). See
+`auto` (step 8). See
 [Stage semantics](dispatch.md#stage-semantics) for why a review works
 on a copy.
 
@@ -304,7 +304,7 @@ guidance = "Address one round of review points on the branch. For each point, fi
   on unasked until only wording is left, and then they stop.
 
 **`budget_usd`** on an operator is meant as a budget per ticket across
-that operator's attempts, priced by `[policy] rates` (step 7).
+that operator's attempts, priced by `[policy] rates` (step 8).
 Budgets are not built yet: `budget_usd` parses and nothing reads it,
 so it stops or asks nothing today; set it only as a record of intent.
 `rates` already prices `dispatch report`'s estimate.
@@ -894,7 +894,51 @@ the target is never inherited from another checkout. The backend's
 lets two tickets run while only one holds `my-dev`; the other works
 through its plan and review and waits at `implement`.
 
-## 5. Trying it
+## 5. Held by the owner
+
+Some changes are best built by hand with an agent, on a deployed
+stack: the owner works in the session for an afternoon, then wants the
+branch reviewed and opened as a pull request to the usual standard. A
+human gate on an agent stage does that. The stage's session stays open
+across any number of turns, and the pipeline moves on only when the
+owner answers its gate. `pipelines/examples/Orchard.held.toml` is the
+whole file; its shape is `investigate`, `lanes`, `deploy` (the command
+gate, `needs = ["my-dev"]`), then the held stage, then `review-code`,
+`pr`, `ready` and `merge`:
+
+- `build` names an operator, `needs = ["my-dev"]` so the stack stays
+  held from the deploy through the build, `services = ["frontend"]`
+  for a served frontend against it, `writes = ["notes"]`, and
+  `gate = { kind = "human", decision = "built" }`, with a `question`
+  if the default one is not enough.
+- The first of `writes` is the running note. The launch prompt tells
+  the agent to keep it current (what is being built, what is decided,
+  what is left) and to commit its work, since Dispatch commits nothing
+  for it. Later stages read it as `{inputs.build.notes}`.
+- `built` is asked at the session's first Stop, or after about thirty
+  seconds idle following a turn with no Stop. Its answers: `proceed`
+  checks that the note exists and the tree is clean, records the head,
+  closes the session and moves on, and is refused with the reason
+  otherwise; `relaunch` replaces the session with a fresh one on the
+  same note; `rerun` with a note starts the stage again from a new
+  attempt; `park` stops the ticket. A session that is gone asks
+  `relaunch` or `park` and fails nothing.
+- `review-code` gives its gate an `argv` of its own. A held stage has
+  no command gate, so there is nothing for `like` to name; the review
+  runs the lane's checks.
+
+What it buys: the build is interactive, against what is deployed, and
+the branch still goes through the same review, checks and pull
+request as an agent's. What it costs: the ticket keeps its slot,
+`my-dev` and, from the first Stop, a `waiting_on_me` seat for as long
+as the owner works, so no other ticket deploys meanwhile. There is one
+note to keep, and no nudge: a dirty tree is the owner's to fix, by
+asking the session to commit or by `relaunch`. A held stage refuses
+`confirm`, a Codex operator (Codex reports no Stop to ask at), and an
+empty `writes`; a human gate on a workflow stage is refused too. See
+[Stage semantics](dispatch.md#stage-semantics).
+
+## 6. Trying it
 
 `inspect` asks you to look, but the frontends are not running anywhere.
 A tester agent with the frontends served against `my-dev` can try the
@@ -1164,7 +1208,7 @@ Two traps read as plain test failures:
   `rerun` and `check` cannot help. Fix the pipeline, then restart the
   tickets taken under the broken one.
 
-## 6. Pull requests
+## 7. Pull requests
 
 **`provider`** on an external gate says which host the pull request is
 on. Without it, the provider is guessed from the lane's remote:
@@ -1174,7 +1218,7 @@ outright. On a repository that runs no CI, `checks = "none"` on the
 `pr-checks` gate passes on a pull request at the head alone. Without
 it, every reading of "no checks" is a question.
 
-This step's changes to the main file are fragments, merged in step 7's
+This step's changes to the main file are fragments, merged in step 8's
 whole file.
 
 ```toml fragment
@@ -1191,7 +1235,7 @@ gate = { kind = "external", check = "pr-merged", provider = "bitbucket" }
 
 A `pr-merged` gate with no `decision` asks `merge`, which is what the
 earlier steps named. That name is what a supervisor's `decides` lists
-(step 8).
+(step 9).
 
 **A conflict or red checks.** The base moves while a pull request
 waits. A `rebaser` is an operator that rebases a conflicting branch,
@@ -1302,10 +1346,10 @@ gate = { kind = "external", check = "pr-merged", provider = "bitbucket" }
 decisions = { merge = "ask" }
 ```
 
-## 7. Policy
+## 8. Policy
 
 `[policy]` holds the project-wide knobs. This is the main Orchard file
-with step 6 merged in and every policy key below set.
+with step 7 merged in and every policy key below set.
 
 - **`slots`** (default 1) is the number of tickets with a running
   attempt or a held resource. A ticket waiting at a human gate with
@@ -1333,7 +1377,7 @@ with step 6 merged in and every policy key below set.
   for nothing and costs the run.
 - **`evidence_file_mb`** (default 25), **`evidence_attempt_mb`**
   (default 200) and **`evidence_keep_days`** (default 30) govern
-  evidence directories (section 5). A file over the first, or the files
+  evidence directories (section 6). A file over the first, or the files
   past the second, stay on disk but are not listed. The runner removes a
   closed ticket's evidence after the third, once a day, and logs
   `evidence-swept`; `dispatch close <ticket> --drop-evidence` removes it
@@ -1364,9 +1408,9 @@ with step 6 merged in and every policy key below set.
   this key, read live from the project's file, replaces the default
   row for each model it names, matched exactly by id. A model with no
   row is named in the report as unpriced.
-- **`ports`** is the range services are allocated from (step 5).
+- **`ports`** is the range services are allocated from (step 6).
 - **`rebaser`**, **`max_rebases`**, **`fixer`**, **`max_fixes`** and
-  **`resolution_reviewer`** are step 6's.
+  **`resolution_reviewer`** are step 7's.
 
 ```toml
 version = 1
@@ -1590,7 +1634,7 @@ run `dispatch restart <ticket>`, then answer its `rerun` question
 `check` to run the new checks on the same work. Answering `check`
 without the restart runs the old copy.
 
-## 8. The supervisor block
+## 9. The supervisor block
 
 A project may have one supervisor: a long-lived Claude Code session
 that watches the project's tickets and answers the decisions the owner
@@ -1627,7 +1671,7 @@ may = ["restart"]
   is always yours. A gate's name is a human or external gate's
   `decision`, such as `tried`, or `merge` for a `pr-merged` gate that
   names none. A gate's decision is valid only while the file has that
-  gate, so this fragment needs step 7's `merge` and `tried` stages. `decides` never takes an answer:
+  gate, so this fragment needs step 8's `merge` and `tried` stages. `decides` never takes an answer:
   `keep` or `check` in place of `rerun`, `recheck` in place of `pr`,
   `refresh` or `merge`, and `proceed` in place of a human gate's
   decision are refused, naming the decision to use.
@@ -1640,7 +1684,7 @@ may = ["restart"]
   `dispatch restart <ticket> [<stage>]` on its own project's tickets.
   Omit the key rather than write it empty.
 
-## 9. A research project
+## 10. A research project
 
 Not every ticket ends in code. A research question ("find every place
 the code does X and say which are guarded") wants a document whose
@@ -1782,7 +1826,7 @@ decisions = { lanes = "auto", review-code = "auto" }
   branch and each round's points; `dispatch tail <ticket>` shows the
   agents; the pull request is the document.
 
-## 10. Review checklist
+## 11. Review checklist
 
 Each row is a key from the steps above, and what goes wrong without it.
 

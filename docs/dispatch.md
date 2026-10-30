@@ -638,6 +638,44 @@ interrupted attempt.
   decision, which says how many nudges came before it. A gate is never
   run on a polling tick, and never before the agent has stopped, so it
   cannot pass on the untouched base.
+- **A held stage is the owner's to work in.** An agent stage with a
+  human gate (`gate = { kind = "human", decision = "built" }`) launches
+  its session as any agent stage does and then holds it open: no Stop,
+  idle grace or missing artifact completes or fails it. The first of
+  its `writes` is the running note, kept in the attempt's directory
+  under Dispatch's data directory and never in the repository; the
+  launch prompt tells the agent that the owner will talk to it over
+  many turns, to keep the note current (what is being built, what is
+  decided, what is left), and to commit its work, since Dispatch
+  commits nothing for it. The gate's decision is asked at the
+  session's first Stop, with the mark, as any decision is. A turn that
+  ends with no Stop (an interrupt, or hooks off) asks once the card
+  has sat idle for `HELD_IDLE_POLLS` polls in a row (about thirty
+  seconds, the same grace as `STOP_IDLE_POLLS`) after the session was
+  seen at work; an idle card before any turn was seen counts nothing,
+  so a fresh pane never asks at launch, and a turn short enough to
+  fall between two polls arms nothing without its Stop. The count is
+  on the record, so a runner restart keeps it. Its options are
+  `proceed`, `relaunch`, `rerun` and `park`. `proceed` is the owner's
+  word, so it needs no Stop: it is refused, and asked again with the
+  reason first, while the running note does not exist or the tree is
+  not clean; otherwise the head is recorded on the attempt, it
+  completes, every other question on it is withdrawn, the mark comes
+  off and the session is closed, and the next stage starts. Nothing is
+  typed into the session on any of these paths. `rerun` with a note
+  runs the held stage itself again, not the stage before it: the
+  attempt is cancelled once its session is confirmed stopped, and the
+  next attempt is new, with a new note and the owner's note (and the
+  old note's path) in its prompt. `relaunch` closes the session if it
+  is still there and starts a fresh one on the same attempt, branch and
+  note, told to read the note first; it is asked again at the new
+  session's first Stop. A session that is gone (the pane closed or
+  exited, or the machine restarted) fails nothing: it raises a
+  `relaunch` decision with `relaunch` and `park`, and nothing is
+  relaunched until the owner says. A `proceed` given before or after
+  the session went still completes, since the note and the tree are on
+  disk. A Codex operator is refused for a held stage, since Codex
+  reports no Stop to ask at.
 - **Evidence carries the heads it depends on.** A per-lane result (a
   lane's checks, its `pr-checks`) records that lane's head only; a
   joined result (a deploy, the tester's report, a `tried` answer)
@@ -865,6 +903,18 @@ A file that sets a dial other than `ask` for a human gate's decision is
 refused at take and at restart, naming the stage, so the owner does not
 believe the gate automated.
 
+A human gate on an agent stage holds that stage's session open for the
+owner ("A held stage" under "Stage semantics"). Its decision is the
+same permission decision with one more option, `relaunch`, and its
+question is the gate's (the default lines and the gate's own
+`question`) followed by the running note's path and what each answer
+does; a refused `proceed` is asked again as a new decision whose first
+line is why. A held stage whose session is gone asks the `relaunch`
+decision, answered `relaunch` or `park`. The `relaunch` and `rerun`
+answers are marked acted by the action that carries them out (the
+launch request, the confirmed stop), so a restart in between acts on
+them once.
+
 ## The pipeline file
 
 One file per project, TOML, in Dispatch's data directory (a repository
@@ -961,6 +1011,7 @@ gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" 
      | { kind = "external", check = "pr-merged", decision = "merge" }   # the pending decision while it waits; absent, `merge`
      | { kind = "human", decision = "...", confirm = true }
      | { kind = "human", decision = "...", question = "..." }   # asked in place of the default question; a template, rendered when the gate asks
+     # on an agent stage, a human gate holds its session open for the owner until proceed (see "A held stage"): refused with confirm, on a workflow stage, with a codex operator, or with no file in writes (the first is the running note)
 on_dirty = { nudge = 1 } | "ask"   # an agent stage with a command gate, or a code review stage's implementer: overrides the policy's
 without_lane = "base"         # a gate-only command stage in lane:<name>: when the ticket did not choose the lane, run it on the lane's base from the project's base tree
 services = ["frontend"]       # lanes with a serve, started for this stage if the ticket cut them; needs a [[resources]] entry in needs and [policy] ports
@@ -2119,6 +2170,14 @@ ticket's slot as any open attempt does).
 - Holds cover Dispatch tickets only. Dispatch cannot see a manual
   deploy to `my-dev`; `dispatch status` shows the holds so you can
   look before doing one by hand.
+- A held stage (an agent stage with a human gate) keeps its slot and
+  its resource for the whole hold: deploy and build both naming
+  `my-dev` hold the stack from the deploy until the owner answers
+  `proceed`, and its services stay up as long. From its first Stop its
+  question also takes a `waiting_on_me` seat. After a park, `dispatch
+  resume` retakes the hold and sends the ticket back to the start of
+  its `needs` run with a `rerun` question, so the build starts a fresh
+  attempt and a fresh note; the branch keeps its commits.
 - `slots` counts tickets that have a running attempt or hold a
   resource. A ticket sitting at a human gate with no holds costs no
   slot, and neither does a gate-only stage (`lanes`, `ready`) or a
