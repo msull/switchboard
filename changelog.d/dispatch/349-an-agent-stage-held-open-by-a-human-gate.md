@@ -1,0 +1,1 @@
+Added: A pipeline's agent stage can carry a human gate that holds its session open while you work in it; answering proceed checks the running note and a clean tree, records the head and sends the branch on to review, and relaunch starts a fresh session on the same note.

@@ -261,6 +261,32 @@ pub const DIRTY_WAIT_MS: u64 = 300_000;
 /// for the background work or wakeup it listed (`held_until_ms`).
 pub const STOP_IDLE_POLLS: u32 = 30;
 
+/// Polls a held stage's session may sit idle at its prompt, after a
+/// turn it was seen to start, before its gate is asked with no Stop
+/// seen: the same grace as `STOP_IDLE_POLLS`. A Stop asks at once; this
+/// covers a turn that ends without one (an interrupt, or hooks off).
+pub const HELD_IDLE_POLLS: u32 = STOP_IDLE_POLLS;
+
+/// A held attempt's next `polls_since_stop` after one poll, given the
+/// last value `prev`, whether the session was `at_work` (working, or
+/// asking to trust the folder) and whether its card was `idle`. `0`
+/// until the session has been seen at work, which keeps a fresh pane's
+/// idle prompt from counting; then `1` plus the idle polls since it
+/// last was at anything but idle. Any other card (still starting, a
+/// question) starts the count again.
+#[must_use]
+pub fn held_polls_after(prev: u32, at_work: bool, idle: bool) -> u32 {
+    if at_work {
+        1
+    } else if prev == 0 {
+        0
+    } else if idle {
+        prev + 1
+    } else {
+        1
+    }
+}
+
 /// One run of one stage in one context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attempt {
@@ -283,6 +309,10 @@ pub struct Attempt {
     /// Polls in a row the stopped agent has sat idle at its prompt with an
     /// artifact still missing; any other card starts the count again. At
     /// `STOP_IDLE_POLLS` the attempt failed.
+    ///
+    /// A held stage's attempt counts differently, by `held_polls_after`:
+    /// past `HELD_IDLE_POLLS` its gate is asked, and a relaunch sets it
+    /// to `0`.
     #[serde(default)]
     pub polls_since_stop: u32,
     /// The head commit of the context's tree when the attempt completed.
@@ -988,6 +1018,11 @@ impl Decision {
 /// the stop limit: answered `wait` or `released`, and asked even while
 /// the ticket parks or closes.
 pub const STUCK: &str = "stuck";
+
+/// The decision asked when a held stage's session is gone: answered
+/// `relaunch`, which starts a fresh session on the same attempt and
+/// running note, or `park`.
+pub const RELAUNCH: &str = "relaunch";
 
 /// One request to Switchboard: written before it is sent, its reply
 /// written after. `reply: None` after a restart is what recovery

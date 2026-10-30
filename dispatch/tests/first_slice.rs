@@ -22,9 +22,9 @@ use dispatch::scheduler::{
 };
 use dispatch::store::DataDir;
 use dispatch::ticket::{
-    Attempt, AttemptKind, AttemptState, DIRTY_WAIT_MS, Decision, DecisionState, LaneRecord,
-    PushedHead, ReviewerResult, Rewrite, RoundState, SETTLE_POLLS, STOP_IDLE_POLLS, ServiceState,
-    SourceSnapshot, Ticket, TicketState,
+    Attempt, AttemptKind, AttemptState, DIRTY_WAIT_MS, Decision, DecisionState, HELD_IDLE_POLLS,
+    LaneRecord, PushedHead, ReviewerResult, Rewrite, RoundState, SETTLE_POLLS, STOP_IDLE_POLLS,
+    ServiceState, SourceSnapshot, Ticket, TicketState,
 };
 use support::{FakeSwitchboard, SharedPort, events_of};
 use switchboard_control::{Body, Liveness, RunState, SessionKind};
@@ -5765,6 +5765,538 @@ fn a_stop_while_still_working_holds_the_attempt_until_the_notes_land() {
         t.attempts_of("investigate").next().unwrap().state == AttemptState::Complete
     });
     assert!(env.sb().killed.contains(&investigator));
+}
+
+/// A pipeline whose `build` stage is held open for the owner by a
+/// human gate, between an investigation and a gate-only look.
+fn held_pipeline(worktrees: &std::path::Path) -> String {
+    format!(
+        r#"
+version = 1
+
+[project]
+name = "Switchboard"
+repo = "git@github.com:msull/switchboard.git"
+worktrees = "{worktrees}"
+space = "Dispatch · Switchboard"
+
+[source]
+kind = "github"
+repo = "msull/switchboard"
+label = "dispatch"
+
+[[lanes]]
+name = "repo"
+path = "."
+setup = ["cargo", "fetch", "--locked"]
+
+[operators.investigator]
+kind = "claude"
+
+[operators.builder]
+kind = "claude"
+
+[[stages]]
+name = "investigate"
+operator = "investigator"
+context = "root"
+writes = ["notes"]
+prompt = "Write to {{notes}}."
+
+[[stages]]
+name = "build"
+operator = "builder"
+context = "each"
+writes = ["notes"]
+prompt = "Build with the owner on {{branch}}."
+gate = {{ kind = "human", decision = "built", question = "Built as the issue asks?" }}
+
+[[stages]]
+name = "inspect"
+context = "each"
+gate = {{ kind = "human", decision = "inspect" }}
+
+[policy]
+slots = 2
+waiting_on_me = 3
+"#,
+        worktrees = worktrees.display()
+    )
+}
+
+/// A held ticket with its investigation done and its build session
+/// launched, not yet polled: the ticket, the session and the running
+/// note's path.
+fn at_build(env: &mut Env) -> (String, String, PathBuf) {
+    std::fs::write(env.data.pipeline(PROJECT), held_pipeline(&env.worktrees)).unwrap();
+    let id = env.take(31).id;
+    env.step();
+    let t = env.ticket(&id);
+    env.finish(
+        &session_of(&t, "investigate"),
+        &artifact_of(&t, "investigate", "notes"),
+        "# notes",
+    );
+    env.steps_until(&id, "the build session", |t, _| {
+        t.attempts_of("build").any(|a| a.session.is_some())
+    });
+    let t = env.ticket(&id);
+    (
+        id,
+        session_of(&t, "build"),
+        artifact_of(&t, "build", "notes"),
+    )
+}
+
+fn build_attempt(env: &Env, id: &str) -> Attempt {
+    env.ticket(id).attempts_of("build").last().unwrap().clone()
+}
+
+/// The pending decision called `name`, which must exist.
+fn asked(env: &Env, id: &str, name: &str) -> Decision {
+    pending_named(env, id, name)
+        .unwrap_or_else(|| panic!("no pending {name}: {:#?}", env.ticket(id)))
+}
+
+/// The build's tree, where its checks of a clean tree look.
+fn build_tree(env: &Env, id: &str) -> PathBuf {
+    env.ticket(id).lanes[0].worktree.clone()
+}
+
+/// The prompts of every `session.new` sent for `name`, in order.
+fn prompts_for(env: &Env, name: &str) -> Vec<String> {
+    env.sb()
+        .calls
+        .iter()
+        .filter_map(|r| match &r.body {
+            Body::SessionNew {
+                name: n, prompt, ..
+            } if n == name => prompt.clone(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A held build runs: no question before its first stop, then one,
+/// with the mark; after that no stop, idle grace or note completes or
+/// fails it.
+#[test]
+fn a_held_build_asks_at_its_first_stop_and_never_ends_on_its_own() {
+    let mut env = Env::new();
+    let (id, session, note) = at_build(&mut env);
+    let prompt = &prompts_for(&env, "builder")[0];
+    assert!(prompt.contains("held open for the owner"), "{prompt}");
+    assert!(prompt.contains(&note.display().to_string()), "{prompt}");
+    for _ in 0..5 {
+        env.step();
+    }
+    assert!(env.pending(&id).is_empty(), "nothing asked before a stop");
+    let now = env.now;
+    env.sb().stop(&session, now);
+    env.step();
+    let d = asked(&env, &id, "built");
+    assert_eq!(d.options, ["proceed", "relaunch", "rerun", "park"]);
+    assert_eq!(d.attempt, Some(("build".into(), 1)));
+    assert!(
+        d.question.contains("Built as the issue asks?"),
+        "{}",
+        d.question
+    );
+    assert!(d.question.contains(&note.display().to_string()));
+    assert!(env.sb().waiting[&session].0, "the session is marked");
+    // The owner works on: more stops, the note written, the card idle.
+    std::fs::write(&note, "# building").unwrap();
+    for _ in 0..100 {
+        let now = env.now;
+        env.sb().stop(&session, now);
+        env.step();
+    }
+    let a = build_attempt(&env, &id);
+    assert!(a.is_open(), "{a:?}");
+    assert_eq!(env.pending(&id).len(), 1, "asked once");
+    assert!(!env.sb().killed.contains(&session));
+}
+
+/// With no stop, an idle card asks once the session has been seen at
+/// work and has sat idle past the grace; a turn starts the count again,
+/// and a restart keeps it.
+#[test]
+fn a_held_build_with_no_stop_asks_after_the_idle_grace_once_seen_working() {
+    let mut env = Env::new();
+    let (id, session, _) = at_build(&mut env);
+    env.step(); // working: armed
+    env.sb().session_mut(&session).card = "idle".into();
+    for _ in 0..HELD_IDLE_POLLS - 5 {
+        env.step();
+    }
+    env.sb().session_mut(&session).card = "working".into();
+    env.step();
+    env.sb().session_mut(&session).card = "idle".into();
+    for _ in 0..HELD_IDLE_POLLS / 2 {
+        env.step();
+    }
+    env.restart();
+    for _ in HELD_IDLE_POLLS / 2..HELD_IDLE_POLLS {
+        env.step();
+    }
+    assert!(env.pending(&id).is_empty(), "{:#?}", env.ticket(&id));
+    env.step();
+    assert_eq!(asked(&env, &id, "built").attempt, Some(("build".into(), 1)));
+    assert!(build_attempt(&env, &id).is_open());
+}
+
+/// A pane idle from its launch and never seen at work asks nothing
+/// without a stop, however long it sits.
+#[test]
+fn a_held_build_idle_from_launch_asks_nothing_without_a_stop() {
+    let mut env = Env::new();
+    let (id, session, _) = at_build(&mut env);
+    env.sb().session_mut(&session).card = "idle".into();
+    for _ in 0..100 {
+        env.step();
+    }
+    assert!(env.pending(&id).is_empty());
+    assert!(build_attempt(&env, &id).is_open());
+    assert_eq!(build_attempt(&env, &id).polls_since_stop, 0);
+}
+
+/// A pane still `starting` and then idle before its first turn is not
+/// seen at work: its idle polls count nothing and ask nothing.
+#[test]
+fn a_held_build_starting_then_idle_asks_nothing_without_a_stop() {
+    let mut env = Env::new();
+    let (id, session, _) = at_build(&mut env);
+    env.sb().session_mut(&session).card = "starting".into();
+    env.step();
+    env.sb().session_mut(&session).card = "idle".into();
+    for _ in 0..HELD_IDLE_POLLS + 20 {
+        env.step();
+    }
+    assert!(env.pending(&id).is_empty(), "{:#?}", env.ticket(&id));
+    assert_eq!(build_attempt(&env, &id).polls_since_stop, 0);
+}
+
+/// The held build asked, with its note written.
+fn asked_with_note(env: &mut Env) -> (String, String, PathBuf, Decision) {
+    let (id, session, note) = at_build(env);
+    std::fs::write(&note, "# built\nwhat is left: nothing").unwrap();
+    let now = env.now;
+    env.sb().stop(&session, now);
+    env.step();
+    let d = asked(env, &id, "built");
+    (id, session, note, d)
+}
+
+/// `proceed` on a clean tree with the note written: the attempt
+/// completes at the tree's head, the mark comes off, the session is
+/// closed and the next stage asks. Nothing is typed into the session.
+#[test]
+fn proceed_on_a_clean_tree_with_the_note_completes_at_the_head_and_moves_on() {
+    let mut env = Env::new();
+    let (id, session, _, d) = asked_with_note(&mut env);
+    let tree = build_tree(&env, &id);
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(tree.clone(), "built0001".into());
+    let sent = env.sb().sent.len();
+    let launches = env.sb().kinds_called("session.new");
+    answer(&mut env, &id, &d, "proceed");
+    env.step();
+    let a = build_attempt(&env, &id);
+    assert_eq!(a.state, AttemptState::Complete, "{a:?}");
+    assert_eq!(a.head.as_deref(), Some("built0001"));
+    assert!(env.sb().killed.contains(&session));
+    assert!(!env.sb().waiting[&session].0, "the mark is off");
+    assert_eq!(env.sb().sent.len(), sent, "nothing typed");
+    assert_eq!(env.sb().kinds_called("session.new"), launches);
+    env.steps_until(&id, "the inspect question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "inspect")
+    });
+}
+
+/// `proceed` with the note missing or the tree not clean is refused and
+/// asked again with why; the attempt stays open and the session too.
+/// Once both are right, the next `proceed` completes.
+#[test]
+fn proceed_is_refused_and_asked_again_until_the_note_and_the_tree_are_right() {
+    let mut env = Env::new();
+    let (id, session, note) = at_build(&mut env);
+    let now = env.now;
+    env.sb().stop(&session, now);
+    env.step();
+    let d = asked(&env, &id, "built");
+    answer(&mut env, &id, &d, "proceed");
+    env.step();
+    let again = asked(&env, &id, "built");
+    assert_ne!(again.id, d.id);
+    assert!(
+        again.question.starts_with("proceed was refused"),
+        "{}",
+        again.question
+    );
+    assert!(
+        again.question.contains("does not exist"),
+        "{}",
+        again.question
+    );
+    assert!(again.question.contains(&note.display().to_string()));
+    assert!(build_attempt(&env, &id).is_open());
+    std::fs::write(&note, "# built").unwrap();
+    let tree = build_tree(&env, &id);
+    env.repo.lock().unwrap().dirty.push(tree.clone());
+    answer(&mut env, &id, &again, "proceed");
+    env.step();
+    let third = asked(&env, &id, "built");
+    assert!(
+        third.question.contains("is not clean"),
+        "{}",
+        third.question
+    );
+    assert!(third.question.contains(&tree.display().to_string()));
+    assert!(build_attempt(&env, &id).is_open());
+    assert!(!env.sb().killed.contains(&session));
+    env.repo.lock().unwrap().dirty.clear();
+    answer(&mut env, &id, &third, "proceed");
+    env.step();
+    assert_eq!(build_attempt(&env, &id).state, AttemptState::Complete);
+}
+
+/// The session gone with `proceed` given: the note and the tree are on
+/// disk, so it completes and sends no kill, with nothing left pending.
+#[test]
+fn proceed_with_the_session_gone_completes_without_a_kill() {
+    let mut env = Env::new();
+    let (id, session, _, d) = asked_with_note(&mut env);
+    env.sb().vanish(&session);
+    env.step();
+    assert!(
+        build_attempt(&env, &id).is_open(),
+        "a gone pane fails nothing"
+    );
+    answer(&mut env, &id, &d, "proceed");
+    env.step();
+    let t = env.ticket(&id);
+    let a = t.attempts_of("build").last().unwrap();
+    assert_eq!(a.state, AttemptState::Complete);
+    assert!(a.head.is_some());
+    assert!(!env.sb().killed.contains(&session));
+    assert!(
+        env.pending(&id)
+            .iter()
+            .all(|x| x.attempt.as_ref() != Some(&("build".into(), 1)))
+    );
+}
+
+/// `rerun` with a note runs the held stage itself again: its attempt is
+/// cancelled with the note, the next is a new attempt with the note in
+/// its prompt, and the investigation is not sent back. Until the
+/// session is confirmed stopped, the answer waits.
+#[test]
+fn rerun_on_a_held_build_runs_the_build_again_with_the_note() {
+    let mut env = Env::new();
+    let (id, session, _, d) = asked_with_note(&mut env);
+    env.sb().fail_next = Some("session.kill".into());
+    let now = env.tick();
+    env.runner
+        .decide(&id, &d.id, "rerun", Some("use the other endpoint"), now)
+        .unwrap();
+    env.step();
+    let t = env.ticket(&id);
+    assert!(t.attempts_of("build").last().unwrap().is_open());
+    assert_eq!(
+        t.decisions
+            .iter()
+            .find(|x| x.id == d.id)
+            .unwrap()
+            .unacted_answer(),
+        Some("rerun")
+    );
+    env.steps_until(&id, "the second build", |t, _| {
+        t.attempts_of("build")
+            .any(|a| a.n > 1 && a.session.is_some())
+    });
+    let t = env.ticket(&id);
+    let first = t.attempts_of("build").next().unwrap();
+    assert!(
+        matches!(&first.state, AttemptState::Cancelled { reason } if reason.contains("use the other endpoint")),
+        "{first:?}"
+    );
+    assert!(env.sb().killed.contains(&session));
+    let prompt = prompts_for(&env, "builder").pop().unwrap();
+    assert!(prompt.contains("use the other endpoint"), "{prompt}");
+    assert!(
+        t.attempts_of("investigate")
+            .all(|a| a.state == AttemptState::Complete),
+        "the investigation is not sent back"
+    );
+    let second = t.attempts_of("build").last().unwrap();
+    assert_ne!(
+        second.artifacts["notes"], first.artifacts["notes"],
+        "a new note"
+    );
+}
+
+/// `park` closes the held session.
+#[test]
+fn park_on_a_held_build_closes_its_session() {
+    let mut env = Env::new();
+    let (id, session, _, d) = asked_with_note(&mut env);
+    answer(&mut env, &id, &d, "park");
+    env.steps_until(&id, "parked", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    assert!(env.sb().killed.contains(&session));
+    assert!(env.ticket(&id).holds.is_empty());
+}
+
+/// `relaunch` on a live session: the old pane is closed first, a fresh
+/// session starts on the same attempt and note, told to read it, and
+/// nothing is asked until its own first stop. A card the old session
+/// showed at work does not arm the new one.
+#[test]
+fn relaunch_replaces_the_session_on_the_same_attempt_and_note() {
+    let mut env = Env::new();
+    let (id, session, note, d) = asked_with_note(&mut env);
+    answer(&mut env, &id, &d, "relaunch");
+    env.step();
+    let a = build_attempt(&env, &id);
+    assert_eq!(a.n, 1);
+    assert!(a.is_open(), "{a:?}");
+    let fresh = a.session.clone().unwrap();
+    assert_ne!(fresh, session);
+    assert!(env.sb().killed.contains(&session));
+    assert_eq!(a.stop_at_ms, None);
+    assert_eq!(a.polls_since_stop, 0);
+    assert!(env.pending(&id).is_empty());
+    let prompt = prompts_for(&env, "builder").pop().unwrap();
+    assert!(prompt.contains("fresh session"), "{prompt}");
+    assert!(
+        prompt.contains(&format!("Read {} first", note.display())),
+        "{prompt}"
+    );
+    env.sb().session_mut(&fresh).card = "idle".into();
+    for _ in 0..100 {
+        env.step();
+    }
+    assert!(env.pending(&id).is_empty(), "not armed by the old session");
+    let now = env.now;
+    env.sb().stop(&fresh, now);
+    env.step();
+    assert_eq!(asked(&env, &id, "built").attempt, Some(("build".into(), 1)));
+    assert!(env.sb().waiting[&fresh].0);
+}
+
+/// A session gone is a `relaunch` question, not a failure; answering
+/// it launches. A launch Switchboard refuses leaves the attempt open
+/// and asks again.
+#[test]
+fn a_gone_held_session_asks_relaunch_and_a_refused_launch_asks_again() {
+    let mut env = Env::new();
+    let (id, session, _) = at_build(&mut env);
+    env.step();
+    env.sb().vanish(&session);
+    env.step();
+    let d = asked(&env, &id, "relaunch");
+    assert!(d.question.contains("its session is gone"), "{}", d.question);
+    assert!(build_attempt(&env, &id).is_open());
+    env.sb().fail_next = Some("session.new".into());
+    answer(&mut env, &id, &d, "relaunch");
+    env.step();
+    let a = build_attempt(&env, &id);
+    assert!(a.is_open(), "{a:?}");
+    assert_eq!(a.session.as_deref(), Some(session.as_str()));
+    env.step();
+    let again = asked(&env, &id, "relaunch");
+    assert_ne!(again.id, d.id);
+    answer(&mut env, &id, &again, "relaunch");
+    env.step();
+    let a = build_attempt(&env, &id);
+    assert_ne!(a.session.as_deref(), Some(session.as_str()));
+    assert!(a.is_open());
+}
+
+/// A pane that dies while the gate's question is open adds no second
+/// question: the gate's own `relaunch` answers it, and `park` leaves
+/// nothing pending.
+#[test]
+fn a_session_gone_under_an_open_gate_asks_no_second_question() {
+    let mut env = Env::new();
+    let (id, session, _, d) = asked_with_note(&mut env);
+    env.sb().vanish(&session);
+    for _ in 0..3 {
+        env.step();
+    }
+    let pending = env.pending(&id);
+    assert_eq!(pending.len(), 1, "{pending:#?}");
+    assert_eq!(pending[0].id, d.id);
+    answer(&mut env, &id, &d, "park");
+    env.steps_until(&id, "parked", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    assert!(env.pending(&id).is_empty());
+}
+
+/// A pane that will not close leaves the owner's `relaunch` unacted: it
+/// is tried again, not lost, and nothing is launched over the old pane.
+#[test]
+fn a_relaunch_whose_pane_will_not_close_stays_unacted() {
+    let mut env = Env::new();
+    let (id, session, _, d) = asked_with_note(&mut env);
+    env.sb().fail_next = Some("session.kill".into());
+    let launches = env.sb().kinds_called("session.new");
+    answer(&mut env, &id, &d, "relaunch");
+    env.step();
+    let t = env.ticket(&id);
+    let answered = t.decisions.iter().find(|x| x.id == d.id).unwrap();
+    assert_eq!(answered.unacted_answer(), Some("relaunch"));
+    assert_eq!(env.sb().kinds_called("session.new"), launches);
+    env.step();
+    assert_ne!(
+        build_attempt(&env, &id).session.as_deref(),
+        Some(session.as_str())
+    );
+}
+
+/// A restart after the old pane was closed but before the launch went
+/// out launches once; a restart after the launch was sent adopts it and
+/// asks nothing.
+#[test]
+fn a_restart_around_a_relaunch_launches_once() {
+    let mut env = Env::new();
+    let (id, session, _, d) = asked_with_note(&mut env);
+    answer(&mut env, &id, &d, "relaunch");
+    // What a runner killed between the kill and the launch leaves: the
+    // pane closed and the answer still unacted.
+    env.sb().session_mut(&session).liveness = Liveness::Exited { code: None };
+    let launches = env.sb().kinds_called("session.new");
+    env.restart();
+    env.step();
+    env.step();
+    assert_eq!(env.sb().kinds_called("session.new"), launches + 1);
+    assert!(env.pending(&id).is_empty(), "{:#?}", env.ticket(&id));
+    let fresh = build_attempt(&env, &id).session.unwrap();
+    assert_ne!(fresh, session);
+
+    // Again, with the reply to the launch lost.
+    let now = env.now;
+    env.sb().stop(&fresh, now);
+    env.step();
+    let d = asked(&env, &id, "built");
+    env.sb().drop_reply_for = Some("session.new".into());
+    answer(&mut env, &id, &d, "relaunch");
+    env.step();
+    let launches = env.sb().kinds_called("session.new");
+    env.restart();
+    for _ in 0..5 {
+        env.step();
+    }
+    assert_eq!(env.sb().kinds_called("session.new"), launches);
+    assert!(env.pending(&id).is_empty(), "{:#?}", env.ticket(&id));
+    let a = build_attempt(&env, &id);
+    assert!(a.is_open());
+    assert_ne!(a.session.as_deref(), Some(fresh.as_str()));
 }
 
 /// A stopped agent with no notes is given up on only after
