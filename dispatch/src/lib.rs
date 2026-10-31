@@ -6,6 +6,8 @@
 //!
 //! Layering:
 //! - `pipeline`: the TOML file, parsed and validated; pure.
+//! - `check`: `dispatch check`, one pipeline file checked as a take
+//!   would check it, with every problem listed.
 //! - `ticket`: the records (ticket, attempt, decision, ledger); pure.
 //! - `history`: which commits a code review's fix rounds fold into, as
 //!   plans; pure.
@@ -44,6 +46,7 @@
 
 pub mod bitbucket;
 pub mod branch;
+pub mod check;
 mod child;
 mod confine;
 pub mod events;
@@ -133,6 +136,7 @@ pub const USAGE: &str = "usage:
   dispatch decide <ticket> <decision> <answer> [--note <text> | --file <path>]
   dispatch decisions                       what waits on you
   dispatch status                          every ticket, its stage and state
+  dispatch check <project|file>            list every problem in a pipeline file (exit 1 on an error)
   dispatch queue <project> [<ticket>...]   show, or reorder, a project's queue
   dispatch park <ticket> [--reason <text>]  a ticket's work stopped, its questions withdrawn; resume brings it back
   dispatch resume <ticket> [--no-rerun]    a parked ticket back to active; what the park cancelled runs again

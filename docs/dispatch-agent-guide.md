@@ -48,6 +48,7 @@ dispatch show <ticket> [--json]                   one ticket: stage, lanes, atte
 dispatch evidence <ticket> [<stage>]              each attempt's evidence files, by absolute path
 dispatch events [--since <seq>] [--follow [--timeout <secs>]] [--ticket <id>]... [--project <name>] [--json]
 dispatch brief <project>                          the project at a glance: tickets, what waits, recent events, the hand-off
+dispatch check <project>                          the project's pipeline files parsed and validated, every problem listed
 dispatch supervisor <project>                     the project's supervisor session: its id, age, seed, workspace
 dispatch wait <ticket> [--for decision|stage|pr|closed|move|any] [--since <seq>] [--timeout <secs>] [--json]
 dispatch subscribe <ticket> [--for move] [--since <seq>]   the runner types the ticket's moves into the supervisor's pane

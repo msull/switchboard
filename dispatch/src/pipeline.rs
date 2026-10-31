@@ -7,12 +7,63 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use switchboard_control::valid_set_name;
 
 use crate::history::Commits;
+
+/// What one file's text holds: problems that refuse it, and notes that
+/// do not.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Report {
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Every key path of `source` that is not in `parsed`: a key the parser
+/// ignores (a misspelling, a key on the wrong table), which serde drops
+/// without a word. A value the parser reshapes (`context`, `writes`,
+/// `on_dirty`) is compared by presence alone. A key spelled with its
+/// default (`false`, an empty list) is not reported: the serializer
+/// leaves those out, so it is absent from `parsed` though the parser
+/// read it.
+#[must_use]
+pub fn unknown_keys(source: &toml::Table, parsed: &toml::Table) -> Vec<String> {
+    fn walk(source: &toml::Table, parsed: &toml::Table, at: &str, out: &mut Vec<String>) {
+        for (key, value) in source {
+            let path = format!("{at}{key}");
+            let Some(back) = parsed.get(key) else {
+                let is_default = match value {
+                    toml::Value::Boolean(b) => !b,
+                    toml::Value::Array(a) => a.is_empty(),
+                    _ => false,
+                };
+                if !is_default {
+                    out.push(path);
+                }
+                continue;
+            };
+            match (value, back) {
+                (toml::Value::Table(s), toml::Value::Table(p)) => {
+                    walk(s, p, &format!("{path}."), out);
+                }
+                (toml::Value::Array(s), toml::Value::Array(p)) => {
+                    for (i, (s, p)) in s.iter().zip(p).enumerate() {
+                        if let (toml::Value::Table(s), toml::Value::Table(p)) = (s, p) {
+                            walk(s, p, &format!("{path}[{i}]."), out);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(source, parsed, "", &mut out);
+    out
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pipeline {
@@ -2031,18 +2082,28 @@ impl Pipeline {
     /// its ticket every pass and blocks `runner start` while it has an
     /// open attempt, so a new rule here never strands a running ticket.
     pub fn validate_for_take(&self) -> Result<()> {
+        self.take_problems().into_iter().next().map_or(Ok(()), Err)
+    }
+
+    /// Every problem of [`Self::validate_for_take`], in its order. Each
+    /// rule reads one stage or one dial on its own, so none hides
+    /// behind another.
+    fn take_problems(&self) -> Vec<anyhow::Error> {
+        let mut out = Vec::new();
         for stage in &self.stages {
-            self.validate_decision_vars(stage)?;
+            if let Err(e) = self.validate_decision_vars(stage) {
+                out.push(e);
+            }
         }
         for s in &self.stages {
             if s.kind() != StageKind::Review {
                 continue;
             }
             if let Some(r) = s.needs.iter().find(|n| self.resource(n).is_some()) {
-                bail!(
+                out.push(anyhow!(
                     "stage {:?} is a code review stage and may not hold {r:?}: its rounds would hold it for every other ticket",
                     s.name
-                );
+                ));
             }
         }
         for (name, value) in &self.policy.decisions {
@@ -2054,12 +2115,45 @@ impl Pipeline {
             );
             if let Some(stage) = asked_by {
                 let stage = &stage.name;
-                bail!(
+                out.push(anyhow!(
                     "stage {stage:?} is a human gate and always asks: [policy.decisions] {name} = {value:?} does nothing for it; remove the dial, or name {name:?} in a supervisor's `decides` to answer it automatically"
-                );
+                ));
             }
         }
-        Ok(())
+        out
+    }
+
+    /// Every problem `text` holds as a file being taken, and every key in
+    /// it the parser drops, with `rules` run on the parsed file for what
+    /// only the caller knows (where the file lives). A syntax or type
+    /// error ends the parse, so it is the one problem reported. Nothing
+    /// here reads the host, so a path the host refuses (`shell_unsafe`)
+    /// is left to a take.
+    pub fn check_with(text: &str, rules: impl FnOnce(&Self) -> Vec<String>) -> Report {
+        let shown = |e: &anyhow::Error| format!("{e:#}");
+        let p: Self = match toml::from_str(text).context("parse the pipeline file") {
+            Ok(p) => p,
+            Err(e) => {
+                return Report {
+                    errors: vec![shown(&e)],
+                    warnings: Vec::new(),
+                };
+            }
+        };
+        let mut errors: Vec<String> = p.problems().iter().map(shown).collect();
+        errors.extend(p.take_problems().iter().map(shown));
+        errors.extend(rules(&p));
+        let warnings = match (
+            toml::from_str::<toml::Table>(text),
+            toml::Table::try_from(&p),
+        ) {
+            (Ok(source), Ok(parsed)) => unknown_keys(&source, &parsed)
+                .into_iter()
+                .map(|k| format!("{k} is not a key the parser keeps"))
+                .collect(),
+            _ => Vec::new(),
+        };
+        Report { errors, warnings }
     }
 
     /// A code review stage: reviewers that exist, once each; an
@@ -2235,77 +2329,101 @@ impl Pipeline {
 
     /// Every reference resolves and every stage is one of the four kinds.
     fn validate(&self) -> Result<()> {
-        if self.version != 1 {
-            bail!(
-                "pipeline version {} is not understood (only 1)",
-                self.version
-            );
-        }
-        if self.lanes.is_empty() {
-            bail!("a pipeline needs at least one lane");
-        }
-        self.validate_operator_env()?;
+        self.problems().into_iter().next().map_or(Ok(()), Err)
+    }
+
+    /// Every problem in the `[policy]` operators, kept apart from
+    /// `problems` so a check lists them all: `rebaser` and `fixer` must
+    /// name an agent operator and a pull-request pipeline names neither
+    /// (it pushes nothing); `resolution_reviewer` must name an agent, or
+    /// a command that has an argv.
+    fn policy_problems(&self) -> Vec<anyhow::Error> {
+        let mut out = Vec::new();
         for (key, name) in [
             ("rebaser", &self.policy.rebaser),
             ("fixer", &self.policy.fixer),
         ] {
             if let Some(name) = name {
                 match self.operators.get(name) {
-                    None => bail!("[policy] {key} names an unknown operator {name:?}"),
-                    Some(op) if !op.kind.is_agent() => {
-                        bail!("[policy] {key} names {name:?}, which is a command, not an agent")
-                    }
+                    None => out.push(anyhow!("[policy] {key} names an unknown operator {name:?}")),
+                    Some(op) if !op.kind.is_agent() => out.push(anyhow!(
+                        "[policy] {key} names {name:?}, which is a command, not an agent"
+                    )),
                     Some(_) => {}
                 }
             }
             // Someone else's branch is theirs to change.
             if name.is_some() && self.source == Source::PullRequest {
-                bail!("[policy] {key}: a pull-request pipeline pushes nothing");
+                out.push(anyhow!(
+                    "[policy] {key}: a pull-request pipeline pushes nothing"
+                ));
             }
         }
         if let Some(name) = &self.policy.resolution_reviewer {
             match self.operators.get(name) {
-                None => bail!("[policy] resolution_reviewer names an unknown operator {name:?}"),
+                None => out.push(anyhow!(
+                    "[policy] resolution_reviewer names an unknown operator {name:?}"
+                )),
                 Some(op) if op.kind == OperatorKind::Command && op.argv.is_empty() => {
-                    bail!("[policy] resolution_reviewer {name:?} is a command with no argv")
+                    out.push(anyhow!(
+                        "[policy] resolution_reviewer {name:?} is a command with no argv"
+                    ));
                 }
                 Some(_) => {}
             }
         }
+        out
+    }
+
+    /// The rules of [`Self::validate`], in its order, all of them:
+    /// the checks a problem already found would make noisy are left out,
+    /// namely a stage's later checks once one of its own fails and the
+    /// checks over the whole stage set once any stage fails.
+    fn problems(&self) -> Vec<anyhow::Error> {
+        let mut out = Vec::new();
+        if self.version != 1 {
+            out.push(anyhow!(
+                "pipeline version {} is not understood (only 1)",
+                self.version
+            ));
+        }
+        if self.lanes.is_empty() {
+            out.push(anyhow!("a pipeline needs at least one lane"));
+        }
+        out.extend(self.validate_operator_env().err());
+        out.extend(self.policy_problems());
         match (&self.project.repo, &self.project.root) {
             (Some(_), None) | (None, Some(_)) => {}
-            (Some(_), Some(_)) => bail!("[project] takes repo or root, not both"),
-            (None, None) => bail!("[project] needs repo (a URL to clone) or root (a directory)"),
+            (Some(_), Some(_)) => out.push(anyhow!("[project] takes repo or root, not both")),
+            (None, None) => out.push(anyhow!(
+                "[project] needs repo (a URL to clone) or root (a directory)"
+            )),
         }
         let mut names = std::collections::BTreeSet::new();
         for lane in &self.lanes {
             if !names.insert(&lane.name) {
-                bail!("lane {:?} is listed twice", lane.name);
+                out.push(anyhow!("lane {:?} is listed twice", lane.name));
             }
-            Self::validate_serve(lane)?;
+            out.extend(Self::validate_serve(lane).err());
         }
-        crate::branch::validate(self)?;
-        self.validate_merge_order()?;
+        out.extend(crate::branch::validate(self).err());
+        out.extend(self.validate_merge_order().err());
+        let before_stages = out.len();
         let mut stage_names = std::collections::BTreeSet::new();
         let mut written: Vec<&str> = Vec::new();
         let mut secrets: Vec<&str> = Vec::new();
         let mut keys = BTreeMap::new();
         for (i, stage) in self.stages.iter().enumerate() {
-            if !stage_names.insert(&stage.name) {
-                bail!("stage {:?} is listed twice", stage.name);
-            }
-            self.validate_stage(stage, &written)?;
-            self.validate_inputs(stage, &self.stages[..i])?;
-            self.validate_evidence_inputs(stage, &self.stages[..i])?;
-            if let Some(subject) = &stage.subject
-                && secrets.contains(&subject.as_str())
-            {
-                bail!(
-                    "stage {:?} reviews {subject:?}, which is secret and never read",
-                    stage.name
+            if stage_names.insert(&stage.name) {
+                out.extend(
+                    self.validate_one_stage(i, &written, &secrets, &mut keys)
+                        .err(),
                 );
+            } else {
+                out.push(anyhow!("stage {:?} is listed twice", stage.name));
             }
-            Self::validate_keys(stage, &mut keys)?;
+            // What a stage declares counts for the stages after it even
+            // when it failed, so its problem is not repeated as theirs.
             written.extend(stage.write_names());
             secrets.extend(stage.secret_writes());
             if stage.review.is_some()
@@ -2316,17 +2434,46 @@ impl Pipeline {
                 written.push(subject.as_str());
             }
         }
-        self.validate_needs_runs()?;
-        self.validate_kept_commits()?;
+        if out.len() == before_stages {
+            out.extend(self.validate_needs_runs().err());
+            out.extend(self.validate_kept_commits().err());
+        }
         for (name, dial) in &self.policy.decisions {
             if !matches!(dial.as_str(), "ask" | "recommend" | "auto") {
-                bail!("decision {name:?}: the dial is ask, recommend or auto, not {dial:?}");
+                out.push(anyhow!(
+                    "decision {name:?}: the dial is ask, recommend or auto, not {dial:?}"
+                ));
             }
         }
         if let Some(sup) = &self.supervisor {
-            self.validate_supervisor(sup)?;
+            out.extend(self.validate_supervisor(sup).err());
         }
-        Ok(())
+        out
+    }
+
+    /// The checks of the stage at `index`, stopping at its first problem.
+    /// `written` and `secrets` are what the stages before it declare, and
+    /// `keys` the variable names they claimed.
+    fn validate_one_stage<'a>(
+        &'a self,
+        index: usize,
+        written: &[&str],
+        secrets: &[&str],
+        keys: &mut BTreeMap<String, (Option<&'a str>, &'a str)>,
+    ) -> Result<()> {
+        let stage = &self.stages[index];
+        self.validate_stage(stage, written)?;
+        self.validate_inputs(stage, &self.stages[..index])?;
+        self.validate_evidence_inputs(stage, &self.stages[..index])?;
+        if let Some(subject) = &stage.subject
+            && secrets.contains(&subject.as_str())
+        {
+            bail!(
+                "stage {:?} reviews {subject:?}, which is secret and never read",
+                stage.name
+            );
+        }
+        Self::validate_keys(stage, keys)
     }
 
     /// One variable name per artifact name, so no two artifacts share a
@@ -2704,6 +2851,95 @@ waiting_on_me = 2
 rates = { "claude-sonnet-5" = [3.0, 15.0] }
 decisions = { lanes = "auto", finalize = "ask", budget = "ask" }
 "#;
+
+    /// `text` checked with no rules of a caller's.
+    fn check(text: &str) -> Report {
+        Pipeline::check_with(text, |_| Vec::new())
+    }
+
+    #[test]
+    fn check_returns_what_parse_returns_first() {
+        assert_eq!(check(SWITCHBOARD), Report::default());
+        for text in [
+            SWITCHBOARD.replace("version = 1", "version = 2"),
+            SWITCHBOARD.replace("operator = \"planner\"", "operator = \"nobody\""),
+            SWITCHBOARD.replace("[policy]\n", "[policy]\nrebaser = \"nobody\"\n"),
+            SWITCHBOARD.replace("name = \"implement\"", "name = \"plan\""),
+            SWITCHBOARD.replace("version = 1", "version = = 1"),
+            SWITCHBOARD.replace("kind = \"github\"", "kind = \"gitlab\""),
+        ] {
+            let parsed = format!("{:#}", Pipeline::parse(&text).unwrap_err());
+            assert_eq!(check(&text).errors[0], parsed, "{text}");
+        }
+    }
+
+    #[test]
+    fn check_reports_independent_mistakes_that_parse_stops_at_the_first_of() {
+        let text = SWITCHBOARD
+            .replace("operator = \"planner\"", "operator = \"nobody\"")
+            .replace("[policy]\n", "[policy]\nrebaser = \"nobody\"\n");
+        let report = check(&text);
+        assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+        assert!(report.errors[0].contains("[policy] rebaser names an unknown operator"));
+        assert!(report.errors[1].contains("stage \"plan\" names an unknown operator"));
+        let parsed = format!("{:#}", Pipeline::parse(&text).unwrap_err());
+        assert!(!parsed.contains("stage \"plan\""), "{parsed}");
+    }
+
+    #[test]
+    fn check_reports_a_take_rule_beside_a_validate_rule() {
+        let text = SWITCHBOARD
+            .replace(
+                "Write to {notes}.",
+                "Write to {notes} for {decisions.nope}.",
+            )
+            .replace("[policy]\n", "[policy]\nrebaser = \"nobody\"\n");
+        let report = check(&text);
+        assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+        assert!(report.errors[0].contains("[policy] rebaser"));
+        assert!(report.errors[1].contains("{decisions.nope}"));
+    }
+
+    #[test]
+    fn a_failed_or_repeated_stage_is_reported_once_and_not_again_by_later_stages() {
+        // The plan stage fails, but what it writes is still read by the
+        // review and the implementer after it.
+        let failed = SWITCHBOARD.replace("operator = \"planner\"", "operator = \"nobody\"");
+        let report = check(&failed);
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        let repeated = SWITCHBOARD.replace("name = \"implement\"", "name = \"plan\"");
+        assert_eq!(check(&repeated).errors, ["stage \"plan\" is listed twice"]);
+    }
+
+    #[test]
+    fn a_syntax_error_is_the_one_problem() {
+        let report = check(&SWITCHBOARD.replace("version = 1", "version = = 1"));
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].starts_with("parse the pipeline file"));
+        assert!(report.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_key_the_parser_drops_is_a_warning_not_an_error() {
+        let text = SWITCHBOARD.replace(
+            "name = \"investigate\"\n",
+            "name = \"investigate\"\ngates = 1\n",
+        );
+        assert!(Pipeline::parse(&text).is_ok());
+        assert_eq!(
+            check(&text),
+            Report {
+                errors: Vec::new(),
+                warnings: vec!["stages[0].gates is not a key the parser keeps".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn a_key_spelled_with_its_default_is_not_reported_as_dropped() {
+        let text = SWITCHBOARD.replace("name = \"A\"\n", "name = \"A\"\nmerge_after = []\n");
+        assert_eq!(check(&text).warnings, Vec::<String>::new());
+    }
 
     /// The Switchboard pipeline with `table` appended as its
     /// `[supervisor]`.
@@ -3623,32 +3859,6 @@ ports = [3100, 3199]
         }
     }
 
-    /// Every key path of `source` is in `parsed`, so a key the parser
-    /// ignores (a misspelling, a key on the wrong table) is caught. A
-    /// value the parser reshapes (`context`, `writes`, `on_dirty`) is
-    /// compared by presence alone.
-    fn keys_survive(source: &toml::Table, parsed: &toml::Table, at: &str, block: usize) {
-        for (key, value) in source {
-            let path = format!("{at}{key}");
-            let Some(back) = parsed.get(key) else {
-                panic!("block at line {block}: {path} is not a key the parser keeps");
-            };
-            match (value, back) {
-                (toml::Value::Table(s), toml::Value::Table(p)) => {
-                    keys_survive(s, p, &format!("{path}."), block);
-                }
-                (toml::Value::Array(s), toml::Value::Array(p)) => {
-                    for (i, (s, p)) in s.iter().zip(p).enumerate() {
-                        if let (toml::Value::Table(s), toml::Value::Table(p)) = (s, p) {
-                            keys_survive(s, p, &format!("{path}[{i}]."), block);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
     #[test]
     fn every_block_in_the_pipeline_guide_is_a_pipeline_the_parser_knows() {
         let doc = include_str!("../../docs/dispatch-pipeline-guide.md");
@@ -3702,7 +3912,11 @@ ports = [3100, 3199]
             p.validate_for_take()
                 .unwrap_or_else(|e| panic!("block at line {block}: {e:#}"));
             let parsed = toml::Table::try_from(&p).unwrap();
-            keys_survive(&source, &parsed, "", block);
+            let unknown = unknown_keys(&source, &parsed);
+            assert!(
+                unknown.is_empty(),
+                "block at line {block}: {unknown:?} are not keys the parser keeps"
+            );
             checked += 1;
         }
         assert_eq!(checked, 16, "toml blocks in the guide");
@@ -3721,7 +3935,7 @@ ports = [3100, 3199]
         p.validate_for_take()
             .unwrap_or_else(|e| panic!("pipelines/Switchboard.toml: {e:#}"));
         let parsed = toml::Table::try_from(&p).unwrap();
-        keys_survive(&source, &parsed, "", 0);
+        assert_eq!(unknown_keys(&source, &parsed), Vec::<String>::new());
         let names: Vec<&str> = p.stages.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
             names,
@@ -3752,7 +3966,7 @@ ports = [3100, 3199]
         p.validate_for_take()
             .unwrap_or_else(|e| panic!("pipelines/examples/Orchard.toml: {e:#}"));
         let parsed = toml::Table::try_from(&p).unwrap();
-        keys_survive(&source, &parsed, "", 0);
+        assert_eq!(unknown_keys(&source, &parsed), Vec::<String>::new());
         let names: Vec<&str> = p.stages.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
             names,
@@ -3788,7 +4002,7 @@ ports = [3100, 3199]
             .unwrap_or_else(|e| panic!("pipelines/examples/Orchard.pr.toml: {e:#}"));
         assert_eq!(p.source, Source::PullRequest);
         let parsed = toml::Table::try_from(&p).unwrap();
-        keys_survive(&source, &parsed, "", 0);
+        assert_eq!(unknown_keys(&source, &parsed), Vec::<String>::new());
         let names: Vec<&str> = p.stages.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
             names,
@@ -3817,7 +4031,7 @@ ports = [3100, 3199]
         p.validate_for_take()
             .unwrap_or_else(|e| panic!("pipelines/examples/Orchard.held.toml: {e:#}"));
         let parsed = toml::Table::try_from(&p).unwrap();
-        keys_survive(&source, &parsed, "", 0);
+        assert_eq!(unknown_keys(&source, &parsed), Vec::<String>::new());
         let names: Vec<&str> = p.stages.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
             names,
