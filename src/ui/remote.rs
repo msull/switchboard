@@ -49,7 +49,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     };
     let mut keep = true;
     egui::Window::new("")
-        .id(egui::Id::new("remote-devices"))
+        .id(egui::Id::unique("remote-devices"))
         .title_bar(false)
         .collapsible(false)
         .resizable(true)

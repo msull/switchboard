@@ -1,6 +1,6 @@
 # Working in this repo
 
-Switchboard is a macOS desktop app (Rust, egui/eframe 0.36) that keeps
+Switchboard is a macOS desktop app (Rust, egui/eframe 0.37) that keeps
 agent coding sessions, shells, and services as durable records per
 project, hosts them on a private tmux server, and shows which agents are
 waiting on you. The idea in one line: **workspaces are data, processes are
@@ -184,18 +184,26 @@ by hand with the hook JSON on stdin and `SWITCHBOARD_RECORD_ID` and
   trust dialog is avoided by using a throwaway directory under
   `$HOME/code_repos`, which is already trusted.
 
-## egui / eframe 0.36 gotchas
+## egui / eframe 0.37 gotchas
 
-Much online material shows the pre-0.36 API and does not compile. When an
+Much online material shows the pre-0.37 API and does not compile. When an
 API does not match expectations, read the crate source under
-`~/.cargo/registry/src/*/egui-0.36*` rather than guessing.
+`~/.cargo/registry/src/*/egui-0.37*` rather than guessing.
 
 - `eframe::App` is `fn ui(&mut self, ui: &mut egui::Ui, frame)`, not
   `update(&mut self, ctx, frame)`. Get the context with `ui.ctx()`.
 - Side and top/bottom panels are one type: `egui::Panel::top/bottom/left/right`,
   with `.exact_size(..)` and `.resizable(false)`. Panels take `.show(ui, ..)`.
+  A panel's id is its salt under the parent `Ui`'s `scope_id`, so its
+  stored `PanelState` cannot be written from a test by name; drag its
+  `Role::Splitter` "Resize panel" node instead.
+- `Id::new` and `Ui::id` are deprecated (and `-D warnings` makes that an
+  error): use `Id::unique` and `Ui::scope_id`. `WidgetType` is now
+  `egui::Role`.
 - `egui_kittest`: `Harness::builder().with_size(..).build_eframe(|cc| ..)`.
-  Import `Role` from `egui::accesskit`.
+  Import `Role` from `egui::accesskit`. A harness panics on a glyph no
+  installed font has; egui's emoji fonts, which `theme::fonts()` falls
+  back on, come only with `egui`'s `monochrome_emoji_fonts` feature.
 - Use `GAP` and `PAD` from `ui/mod.rs` for spacing so views line up.
 - `CollapsingHeader::id_salt(x)` hashes `x` into an `IdSalt` first, so
   `ui.make_persistent_id(x)` is a different id and a `CollapsingState`

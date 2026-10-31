@@ -79,7 +79,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     let mut keep = true;
     let mut save = false;
     egui::Window::new("")
-        .id(egui::Id::new("project-config"))
+        .id(egui::Id::unique("project-config"))
         .title_bar(false)
         .collapsible(false)
         .resizable(true)

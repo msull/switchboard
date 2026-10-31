@@ -1300,6 +1300,7 @@ fn a_wide_table_in_a_document_scrolls_sideways_while_prose_wraps() {
         delta: egui::vec2(-400.0, 0.0),
         phase: egui::TouchPhase::Move,
         modifiers: egui::Modifiers::NONE,
+        source: egui::MouseWheelSource::Wheel,
     });
     harness.run_steps(3);
     let after = harness.get_by_label("far").rect().left();
@@ -3133,14 +3134,21 @@ fn a_word_that_cannot_break_does_not_widen_the_turns_after_it() {
     );
 }
 
-/// Set the side panel's stored width, as a drag on its edge would.
+/// Drag the side panel's edge so the panel starts at `left`. The panel
+/// keeps its width under an id salted by the `Ui` it is shown in, so a
+/// test cannot write that state directly; it drags the rightmost
+/// vertical handle (the rail has one too) as a user would.
 fn widen_side(harness: &mut Harness<'static, SwitchboardApp>, left: f32) {
-    let state = egui::containers::panel::PanelState {
-        outer_rect: egui::Rect::from_min_max(egui::pos2(left, 0.0), egui::pos2(1200.0, 900.0)),
-    };
-    harness
-        .ctx
-        .data_mut(|d| d.insert_persisted(egui::Id::new("files"), state));
+    let handle = harness
+        .query_all_by_role_and_label(Role::Splitter, "Resize panel")
+        .map(|n| n.rect())
+        .filter(|r| r.height() > r.width())
+        .max_by(|a, b| a.left().total_cmp(&b.left()))
+        .expect("the side's resize handle");
+    // Press near the top: mid-height the conversation beside the side
+    // takes the press first.
+    let from = egui::pos2(handle.center().x, handle.top() + 10.0);
+    drag(harness, from, egui::pos2(left, from.y));
     harness.run_steps(4);
 }
 
@@ -3411,7 +3419,7 @@ fn the_working_set_takes_a_session_from_its_header_and_a_file_from_the_tree() {
     harness.get_by_label("  README.md").click_secondary();
     harness.run_steps(2);
     // The tree's menu holds the sets as a submenu.
-    harness.get_by_label("Working sets ⏵").hover();
+    harness.get_by_label("Working sets").hover();
     harness.run_steps(2);
     click(&mut harness, "   Working Set");
     assert_eq!(
@@ -4049,7 +4057,9 @@ fn working_set_cards_show_the_last_exchange_and_send_a_line() {
         text: None,
     });
     harness.run_steps(2);
-    harness.get_by_label("Reading the tests").click();
+    harness
+        .get_by_role_and_label(Role::Label, "Reading the tests")
+        .click();
     harness.run_steps(2);
     harness.get_by_label("Full message");
 }
@@ -6913,7 +6923,7 @@ fn revise_on_the_ticket_card_opens_the_plan_tab_and_focuses_the_box() {
 fn a_focus_request_for_an_undrawn_box_is_dropped() {
     let (dispatch, edit) = ticket_with_a_pending_finalize("plan");
     let mut harness = ticket_page_on(dispatch, Changes::default(), edit);
-    harness.state_mut().ui_state.focus_feedback = Some(egui::Id::new(("finalize-note", "d7")));
+    harness.state_mut().ui_state.focus_feedback = Some(egui::Id::unique(("finalize-note", "d7")));
     harness.run_steps(2);
     assert_eq!(harness.state().ui_state.focus_feedback, None);
     click(&mut harness, "Plan");

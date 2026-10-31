@@ -6,9 +6,7 @@
 //! bottom, and follow a change of selection once. Below about 120 px it
 //! draws only dots and initials.
 
-use egui::{
-    Align2, FontId, Response, RichText, Sense, TextStyle, Ui, Vec2, WidgetInfo, WidgetType,
-};
+use egui::{Align2, FontId, Response, RichText, Sense, TextStyle, Ui, Vec2, WidgetInfo};
 
 use super::dialogs::AddProjectDraft;
 use super::{DrawCtx, theme};
@@ -43,10 +41,10 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, view: &View) {
         View::Session(id) => cx
             .core
             .session(*id)
-            .map_or(egui::Id::new(("rail", "session")), |s| {
-                egui::Id::new(("rail", s.project))
+            .map_or(egui::Id::unique(("rail", "session")), |s| {
+                egui::Id::unique(("rail", s.project))
             }),
-        _ => egui::Id::new(("rail", "projects")),
+        _ => egui::Id::unique(("rail", "projects")),
     };
     ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
     egui::Frame::new()
@@ -670,7 +668,7 @@ fn row(ui: &mut Ui, spec: &RowSpec<'_>) -> Response {
     // The count is painted, so it is also the node's value: a screen
     // reader says it, and a test can read what the row shows.
     response.widget_info(|| {
-        let mut info = WidgetInfo::labeled(WidgetType::Button, true, &text);
+        let mut info = WidgetInfo::labeled(egui::Role::Button, true, &text);
         info.current_text_value = (count > 0).then(|| count.to_string());
         info
     });

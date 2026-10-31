@@ -140,7 +140,7 @@ pub fn ticket(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: &str) {
 /// The id of the box that takes the owner's objection to a plan, so the
 /// card's "Revise…" can focus it.
 pub(super) fn finalize_note_id(d: &DecisionView) -> egui::Id {
-    egui::Id::new(("finalize-note", &d.id))
+    egui::Id::unique(("finalize-note", &d.id))
 }
 
 /// The owner's objection to the plan under review, pinned above the

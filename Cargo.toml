@@ -37,17 +37,19 @@ anyhow = "1"
 chrono = "0.4"
 directories = "6"
 dispatch-control = { path = "dispatch-control" }
-eframe = "0.36"
-egui = "0.36"
-egui_commonmark = { version = "0.25", default-features = false, features = ["pulldown_cmark"] }
-egui_extras = { version = "0.36", features = ["image", "gif", "webp"] }
+eframe = "0.37"
+# `theme::fonts()` falls back on egui's emoji fonts for arrows, dots and
+# emoji; 0.37 bundles them only with this feature.
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
+egui_commonmark = { version = "0.26", default-features = false, features = ["pulldown_cmark"] }
+egui_extras = { version = "0.37", features = ["image", "gif", "webp"] }
 egui_term = { path = "vendor/egui_term" }
 env_logger = "0.11"
 ignore = "0.4"
 glob = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 log = "0.4"
-promptbox = { git = "https://github.com/msull/promptbox", rev = "0a4f6aaf8697646956ad6c9fad5d961f0b525687" }
+promptbox = { git = "https://github.com/msull/promptbox", rev = "85f3cf81f2bd130b7f857fed6537fb4a1cfd8a81" }
 pulldown-cmark = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -77,7 +79,7 @@ security-framework = "3"
 mdns-sd = "0.21"
 
 [dev-dependencies]
-egui_kittest = { version = "0.36", features = ["eframe"] }
+egui_kittest = { version = "0.37", features = ["eframe"] }
 tempfile = "3"
 
 [lints]

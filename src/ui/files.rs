@@ -161,7 +161,7 @@ pub fn show(
     // so the preview goes first even though it sits at the bottom.
     if inline {
         let selected = state.selected.clone();
-        let outcome = egui::Panel::bottom(egui::Id::new(("files_preview", pid)))
+        let outcome = egui::Panel::bottom(egui::Id::unique(("files_preview", pid)))
             .resizable(true)
             .show_separator_line(false)
             .default_size(ui.available_height() / 2.0)

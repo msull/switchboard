@@ -260,7 +260,7 @@ fn arrange_handles(
     cell: egui::Rect,
 ) {
     let p = theme::palette(ui);
-    let id = ui.id().with(("arrange", &item.target));
+    let id = ui.scope_id().with(("arrange", &item.target));
     let handle = egui::Rect::from_min_size(cell.max - vec2(HANDLE, HANDLE), vec2(HANDLE, HANDLE));
     let body = ui
         .interact(cell, id.with("move"), Sense::drag())
@@ -576,7 +576,11 @@ fn set_card(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, rule_set:
             ui.advance_cursor_after_rect(body_rect);
             if let Some(answer) = answer.as_ref().filter(|_| !rendered) {
                 let hover = ui
-                    .interact(body_rect, ui.id().with(("body", record.id)), Sense::click())
+                    .interact(
+                        body_rect,
+                        ui.scope_id().with(("body", record.id)),
+                        Sense::click(),
+                    )
                     .on_hover_text(capped(answer))
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
                 if hover.clicked() {
@@ -790,7 +794,7 @@ pub fn radial_menu(ui: &Ui, centre: egui::Pos2, menu: &RadialMenu) {
     let p = theme::palette(ui);
     let painter = ui.ctx().layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
-        egui::Id::new("radial-menu"),
+        egui::Id::unique("radial-menu"),
     ));
     painter.circle(centre, RADIUS, p.surface, egui::Stroke::new(1.0, p.n500));
     painter.circle_filled(centre, 4.0, p.n500);
@@ -837,7 +841,7 @@ pub fn radial_menu(ui: &Ui, centre: egui::Pos2, menu: &RadialMenu) {
 /// The id of a card's "Send a line" field, so the keyboard can focus it.
 #[must_use]
 pub fn send_field_id(id: RecordId) -> egui::Id {
-    egui::Id::new(("quick-send", id))
+    egui::Id::unique(("quick-send", id))
 }
 
 /// One line to type into the session without opening it: Enter sends

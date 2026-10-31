@@ -121,7 +121,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     let mut keep = true;
     let mut save = false;
     egui::Window::new("")
-        .id(egui::Id::new("environment"))
+        .id(egui::Id::unique("environment"))
         .title_bar(false)
         .collapsible(false)
         .resizable(true)
