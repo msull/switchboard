@@ -696,6 +696,10 @@ pub struct SessionView {
     /// counts what the session spent. An older app omits it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<PathBuf>,
+    /// The pane's process id while it runs, which leads the pane's
+    /// process group. An older app omits it.
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -968,6 +972,7 @@ mod tests {
             wakeup_at_ms: Some(2),
             held_until_ms: Some(3),
             transcript: Some("/t/uuid.jsonl".into()),
+            pid: None,
         }
     }
 

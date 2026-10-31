@@ -867,7 +867,7 @@ fn service_views(t: &Ticket) -> Vec<dispatch_control::ServiceView> {
         .iter()
         .filter(|s| s.state != crate::ticket::ServiceState::Stopped)
         .map(|s| dispatch_control::ServiceView {
-            lane: s.lane.clone(),
+            lane: s.label(),
             url: s.url.clone(),
             state: s.state.label(),
             session: s.session.clone(),

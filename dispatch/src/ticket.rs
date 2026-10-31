@@ -1367,8 +1367,9 @@ pub struct Hold {
     pub taken_ms: u64,
 }
 
-/// A lane served for a stage: its `before`, its port, its Switchboard
-/// service session, and how far it got.
+/// A lane, or one process of a lane's `serve` list, served for a stage:
+/// its `before`, its port, its Switchboard service session, and how far
+/// it got.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceRecord {
     pub lane: String,
@@ -1422,6 +1423,15 @@ pub struct ServiceRecord {
     /// A later record of the lane means the address is stale.
     #[serde(default)]
     pub pointed_at: BTreeMap<String, u32>,
+    /// The process of the lane's `serve` list this record runs; `None`
+    /// for the single table.
+    #[serde(default)]
+    pub process: Option<String>,
+    /// The pane's process group, read once while its session runs: a
+    /// stop is not confirmed while the group has a member, which is how
+    /// a process that left its pane alive is seen.
+    #[serde(default)]
+    pub group: Option<CheckGroup>,
 }
 
 /// How far a served lane got. Tagged `service_state` so it reads apart
@@ -1460,7 +1470,24 @@ impl ServiceRecord {
     /// The ledger intent its launch is sent under.
     #[must_use]
     pub fn intent(&self) -> String {
-        format!("service:{}:{}:{}", self.stage, self.lane, self.n)
+        format!("service:{}:{}:{}", self.stage, self.label(), self.n)
+    }
+
+    /// Whether it is a record of `process` (`None` for the single table)
+    /// of `lane` in `stage`, whatever its state.
+    #[must_use]
+    pub fn is_for(&self, stage: &str, lane: &str, process: Option<&str>) -> bool {
+        self.stage == stage && self.lane == lane && self.process.as_deref() == process
+    }
+
+    /// The lane, or `lane/process` for a process of a `serve` list: what
+    /// tells two records of one lane apart in their keys, card and logs.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match &self.process {
+            None => self.lane.clone(),
+            Some(p) => format!("{}/{p}", self.lane),
+        }
     }
 }
 
