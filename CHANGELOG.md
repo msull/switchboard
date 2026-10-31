@@ -10,6 +10,24 @@ publishes that section as the release notes. The format follows
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-30
+
+### Added
+
+- A served lane's serve.env can name another lane the same stage serves, {services.backend} for its URL or {ports.backend} for its port; Dispatch starts that lane first, waits until it answers, and restarts the dependent if the lane is served again.
+- A pipeline can set a branch template, such as {type}/{key}-{slug}, so a lane's branch follows the repository's naming convention; the default dispatch/{number}-{slug} is unchanged.
+- A Dispatch lane's serve can be a list of named processes (a web process and a worker), each in its own service session; the tester gets the first one's URL once all are up, and a stop that leaves a process behind asks you; `dispatch status` lists each process, with "(no address)" for one that has no URL.
+- `dispatch check <project|file>` validates a pipeline file without taking a ticket, listing every problem it finds and exiting 1 if there is an error.
+
+### Changed
+
+- egui 0.37: code highlighting takes the new default colours, and text fields and code blocks have a little more inner padding.
+- Dispatch expands `{port}` in a lane's `serve.argv` as well as in `serve.env` and `serve.url`, so a tool that takes its port only as a flag needs no `sh -c` wrapper; an argv element that held the literal text `{port}` now receives the port number.
+
+### Fixed
+
+- On the headset, the boards under the session grid take the room there is instead of two rows and a scrollbar.
+
 ## [0.11.0] - 2026-10-30
 
 ### Added

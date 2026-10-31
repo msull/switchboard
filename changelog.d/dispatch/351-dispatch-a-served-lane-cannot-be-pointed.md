@@ -1,1 +1,0 @@
-Added: A served lane's serve.env can name another lane the same stage serves, {services.backend} for its URL or {ports.backend} for its port; Dispatch starts that lane first, waits until it answers, and restarts the dependent if the lane is served again.

@@ -1,1 +1,0 @@
-Added: A Dispatch lane's serve can be a list of named processes (a web process and a worker), each in its own service session; the tester gets the first one's URL once all are up, and a stop that leaves a process behind asks you; `dispatch status` lists each process, with "(no address)" for one that has no URL.

@@ -1,1 +1,0 @@
-Changed: Dispatch expands `{port}` in a lane's `serve.argv` as well as in `serve.env` and `serve.url`, so a tool that takes its port only as a flag needs no `sh -c` wrapper; an argv element that held the literal text `{port}` now receives the port number.
