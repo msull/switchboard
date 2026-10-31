@@ -61,7 +61,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ctx: &Context) {
     let mut keep = true;
     let mut chosen: Option<Target> = None;
     egui::Window::new("")
-        .id(egui::Id::new("go-to"))
+        .id(egui::Id::unique("go-to"))
         .collapsible(false)
         .resizable(false)
         .title_bar(false)

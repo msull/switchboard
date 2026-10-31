@@ -299,7 +299,7 @@ pub fn show(cx: &mut DrawCtx<'_>, ui: &mut Ui, id: WorkflowId) {
     // what is left over once the panes are split.
     if !run.state.waiting() && run.planner.is_some() {
         let draft = &mut cx.state.review_views.entry(run.id).or_default().note;
-        let field = egui::Id::new(("review-note", run.id));
+        let field = egui::Id::unique(("review-note", run.id));
         if feedback_block(ui, draft, field, "Your own feedback for the planner", "") {
             let text = draft.trim().to_owned();
             draft.clear();

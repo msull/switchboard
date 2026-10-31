@@ -578,8 +578,8 @@ fn side_panel(
     let on_left = cx.core.settings().side_left;
     let name = if on_left { "files-left" } else { "files" };
     let id = match window {
-        Some(w) => egui::Id::new((name, w)),
-        None => egui::Id::new(name),
+        Some(w) => egui::Id::unique((name, w)),
+        None => egui::Id::unique(name),
     };
     let panel = if on_left {
         egui::Panel::left(id)

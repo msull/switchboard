@@ -444,7 +444,7 @@ pub(super) fn dialog(ctx: &Context, title: &str, body: impl FnOnce(&mut Ui)) {
     // The window gets no title of its own: the heading below is the one
     // place the title appears, on screen and in the accessibility tree.
     egui::Window::new("")
-        .id(egui::Id::new(("dialog", title)))
+        .id(egui::Id::unique(("dialog", title)))
         .title_bar(false)
         .collapsible(false)
         .resizable(false)
@@ -467,7 +467,7 @@ fn scrim(ctx: &Context) {
     } else {
         egui::Color32::from_black_alpha(60)
     };
-    egui::Area::new(egui::Id::new("dialog-scrim"))
+    egui::Area::new(egui::Id::unique("dialog-scrim"))
         .order(egui::Order::Middle)
         .interactable(false)
         .fixed_pos(egui::Pos2::ZERO)

@@ -729,7 +729,7 @@ fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     }
     let mut send = false;
     let mut interrupt = false;
-    let field_id = ui.id().with(("message", record.id));
+    let field_id = ui.scope_id().with(("message", record.id));
     let p = theme::palette(ui);
     // The label is invisible but keeps the field findable by name.
     let label = ui.add(egui::Label::new(RichText::new("Message").size(0.1)));
@@ -1294,7 +1294,7 @@ fn message_menu(
     text: &str,
     menus: Menus<'_>,
 ) {
-    let response = ui.interact(rect, ui.id().with(salt), egui::Sense::hover());
+    let response = ui.interact(rect, ui.scope_id().with(salt), egui::Sense::hover());
     let right_clicked = ui.input(|i| {
         i.pointer.button_clicked(egui::PointerButton::Secondary)
             && i.pointer.interact_pos().is_some_and(|p| rect.contains(p))

@@ -489,7 +489,7 @@ pub fn new_session_cell(ui: &mut Ui) -> bool {
     let p = theme::palette(ui);
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click());
     let text = "+ New session";
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, text));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, text));
     if response.hovered() {
         ui.painter().rect_filled(rect, 2.0, p.text_alpha(0.04));
     }

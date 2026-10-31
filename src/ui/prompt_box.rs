@@ -397,7 +397,7 @@ pub fn ensure_editor<'a>(
             Box::new(FakeClipboard::default())
         };
         let mut editor = Editor::with_services(clipboard, Box::new(MemoryStore::default()));
-        editor.set_id(egui::Id::new(("prompt-box", record.id)));
+        editor.set_id(egui::Id::unique(("prompt-box", record.id)));
         editor.set_embedded(true);
         editor.set_sink(Box::new(PaneSink {
             id: record.id,
@@ -630,9 +630,7 @@ pub fn mic_button(ui: &mut Ui, listening: bool) -> egui::Response {
     } else {
         "Listen here"
     };
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
-    });
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
     let color = if listening {
         LISTENING_GREEN
     } else if response.hovered() {

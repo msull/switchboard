@@ -254,7 +254,7 @@ pub fn toasts(cx: &mut DrawCtx<'_>, ctx: &Context, window: Option<RecordId>) {
     if notice.is_none() && host_error.is_none() {
         return;
     }
-    egui::Area::new(egui::Id::new(("toasts", window)))
+    egui::Area::new(egui::Id::unique(("toasts", window)))
         .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 12.0))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {

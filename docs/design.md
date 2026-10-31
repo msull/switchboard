@@ -429,7 +429,7 @@ evidence. The decisions:
    Closing the Ghostty window detaches; the agent keeps running in tmux
    with its liveness, scrollback, hook signals, and reattach intact.
    Shells, commands, and services render inside the app with
-   `egui_term` (vendored from git; builds on egui 0.36 unchanged; renders
+   `egui_term` (vendored from git; builds on egui 0.37 unchanged; renders
    `top`, `vim`, and Claude Code's TUI correctly at 1-3 ms per frame).
    Two patches needed: keys are dropped unless the pointer is over the
    widget, and `TERM` must be set explicitly. Cmux was surveyed and is
@@ -4463,6 +4463,40 @@ terminal widget), the Cargo files or the toolchain file, and
 advisory: a required check that a path filter skips leaves the pull
 request pending, so branch protection lists `check`, `msrv` and the
 two `deny` entries, not `macos`.
+
+## egui 0.37 (2026-10-30)
+
+`eframe`, `egui`, `egui_extras` and `egui_kittest` moved to 0.37,
+`egui_commonmark` to 0.26 and the vendored `egui_term` with them, in one
+step: their types cross each other's APIs, so a single crate left on 0.36
+puts two `egui`s in the graph and nothing type-checks. promptbox crosses
+them too (`Context`, `Ui`, `Id`, `Rect`), so it moves in the same step.
+`eframe::App` is unchanged. The changes the move did need:
+
+- `Id::new` and `Ui::id` are deprecated (`Id::unique`, `Ui::scope_id`),
+  `WidgetType` is `egui::Role`; all call sites migrated rather than
+  allowed. `Id::new` forwards to `Id::unique`, so the ids keep their values.
+- egui 0.37 has no default features, and its default fonts no longer
+  carry the emoji fonts `theme::fonts()` falls back on, so `egui` takes
+  `monochrome_emoji_fonts` (see the comment in `Cargo.toml`). kittest
+  0.37 panics on a missing glyph, which is how the loss showed.
+- A panel's stored id is now salted by its parent `Ui`, so a test drags
+  the side's resize handle rather than writing its `PanelState`; a
+  submenu button's accessible label no longer carries its `⏵`.
+- The standalone `egui_term` test build passes without `default_fonts`.
+
+Before and after screenshots of the terminal, a rendered document, the
+code view and the Dispatch page, both themes, differ in three ways:
+`egui_extras`' syntax highlighting draws function names yellow rather
+than teal (the code view and a document's code blocks), a document's
+code block has more padding, and a text field's hint and text sit
+further in. Glyphs and the rest of the layout are unchanged, with
+eframe's `system_fonts` default kept.
+
+Known gaps: whether eframe 0.37 still runs only `App::logic` while
+the window is hidden (spike 12, `src/cadence.rs`) is not re-measured;
+the signed bundle's grants are the owner's to check. No record or
+schema change.
 
 ## Open questions
 

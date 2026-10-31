@@ -393,7 +393,7 @@ pub fn page(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 let total = ui.available_height();
-                egui::Panel::top(egui::Id::new(("run-output", record.id)))
+                egui::Panel::top(egui::Id::unique(("run-output", record.id)))
                     .resizable(true)
                     .default_size((total * 0.35).max(120.0))
                     .size_range(80.0..=(total - 120.0).max(80.0))
