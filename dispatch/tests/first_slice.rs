@@ -18138,7 +18138,7 @@ path = "orchard-frontend"
 repo = "git@example.com:example-org/orchard-frontend.git"
 base = "dev"
 setup = ["npm", "ci"]
-serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
+serve = { argv = ["npm", "start", "--", "--port", "{port}"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
 
 [[resources]]
 name = "my-dev"
@@ -20582,7 +20582,10 @@ fn services_start_after_before_on_a_free_port_and_the_tester_is_told_the_url() {
             "BROWSER=none",
             "PORT=3100",
             "npm",
-            "start"
+            "start",
+            "--",
+            "--port",
+            "3100"
         ]
     );
     for _ in 0..3 {

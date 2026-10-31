@@ -647,7 +647,7 @@ impl Runner {
                 .iter()
                 .map(|(k, v)| format!("{k}={}", v.replace("{port}", &port))),
         );
-        argv.extend(serve.argv.iter().cloned());
+        argv.extend(serve.argv.iter().map(|a| a.replace("{port}", &port)));
         let url = rec.url.clone().unwrap_or_default();
         let body = Body::SessionNew {
             project,

@@ -957,8 +957,9 @@ writable = ["~/.cargo"]       # under [policy] confine: extra paths the lane's s
 merge_after = ["backend"]     # lanes whose pull requests merge first: this lane's merge question waits for them (see "Merge order")
 merge_after_deploy = true     # also wait for the base pipeline on their merge commit: true until it finishes, or a step's name ("Deploy to dev") until it passes
 serve = { argv = ["npm", "start"], env = { PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
-                              # how a stage's `services` run this lane: env holds literals and {port} only (it is on the
-                              # command line), url is what the agent is told, ready.http a path probed until it answers
+                              # how a stage's `services` run this lane: {port} is filled in argv, env values and url; env holds
+                              # literals and {port} only (it is on the command line), url is what the agent is told,
+                              # ready.http a path probed until it answers
 
 [[resources]]
 name = "..."
