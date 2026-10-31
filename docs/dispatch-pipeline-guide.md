@@ -948,9 +948,13 @@ evidence.
 **`serve`** on a lane says how to run it. `argv` is the command,
 `env` its environment, `url` the address the tester is told, and
 `ready` a probe (`http`, a path, answering within `within_secs`).
-`{port}` is a port Dispatch allocates per ticket. `serve.env` travels
-on the service's command line, so it may hold only literals and
-`{port}`, and a key that looks like a secret is refused.
+`{port}` is a port Dispatch allocates per ticket, filled in wherever
+it appears in `argv`, in `env` values and in `url`. A tool that takes
+its port only as a flag gets it in `argv`:
+`argv = ["vite", "--port", "{port}"]`. `argv` and `serve.env` travel
+on the service's command line, so neither may hold a secret; `env`
+may hold only literals and `{port}`, and a key that looks like a
+secret is refused.
 
 **`services`** on a stage names lanes to serve while it runs. Each is
 started only if the ticket cut that lane; for one it did not,
@@ -964,7 +968,8 @@ not chosen.
 **`before`** maps a served lane to a command run before its service
 starts, such as linking the frontend to `my-dev`. Its keys must be
 among the stage's `services`. It must be safe to run again: a retry,
-a send-back or a runner restart runs it anew. A `before` that fails,
+a send-back or a runner restart runs it anew. It takes no `{port}`,
+since the port is chosen after it finishes. A `before` that fails,
 no free port, or a probe that never answers is a decision before the
 tester is launched.
 

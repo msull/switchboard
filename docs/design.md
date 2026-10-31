@@ -1621,7 +1621,8 @@ adapters, `serve` in the app, `tests/control.rs`, and the close:
 runner reports it would remove (`TicketView::removes`), answered by
 Dispatch with the ticket `closing` once the intent is saved, the
 runner's pass doing the rest. Dispatch's services are `session.new`
-service records with an argv launch that carries `PORT` through `env`,
+service records with an argv launch that carries the port through `env`
+and through `{port}` in the serve argv,
 killed and then removed with `session.remove`, and a service's `before`
 runs as a child of the runner. Gaps: `service.new` and `command.run`
 stay unbuilt; nothing marks Dispatch-owned records as such in the

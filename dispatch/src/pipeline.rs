@@ -4034,6 +4034,21 @@ ports = [3100, 3199]
     }
 
     #[test]
+    fn parse_leaves_port_and_json_braces_in_serve_argv_untouched() {
+        let text = DEPLOYING_BACK_HALF.replace(
+            r#"argv = ["npm", "start"]"#,
+            r#"argv = ["vite", "--port", "{port}", "--define", "{\"a\":1}"]"#,
+        );
+        assert_ne!(text, DEPLOYING_BACK_HALF);
+        let p = Pipeline::parse(&text).unwrap();
+        let serve = p.lanes.iter().find_map(|l| l.serve.as_ref()).unwrap();
+        assert_eq!(
+            serve.argv,
+            ["vite", "--port", "{port}", "--define", r#"{"a":1}"#]
+        );
+    }
+
+    #[test]
     fn a_gate_only_command_runs_in_its_context() {
         back_half_refused(
             "name = \"deploy\"\ncontext = \"lane:backend\"",
