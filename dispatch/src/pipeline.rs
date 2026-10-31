@@ -4,7 +4,7 @@
 //! when it was made; the project's file only shapes tickets taken
 //! afterwards.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
@@ -271,6 +271,87 @@ pub struct Serve {
     pub env: BTreeMap<String, String>,
     pub url: String,
     pub ready: Ready,
+}
+
+impl Serve {
+    /// Every field the `serve.env` values name, in key order.
+    #[must_use]
+    pub fn refs(&self) -> Vec<ServeRef> {
+        self.env.values().flat_map(|v| ServeRef::parse(v)).collect()
+    }
+
+    /// The other lanes the `serve.env` values name, by URL or by port.
+    #[must_use]
+    pub fn named_lanes(&self) -> BTreeSet<String> {
+        self.refs()
+            .into_iter()
+            .filter_map(|r| r.lane().map(str::to_owned))
+            .collect()
+    }
+}
+
+/// A field in braces in a `serve.env` value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServeRef {
+    /// `{port}`: the lane's own port.
+    Port,
+    /// `{services.<lane>}`: that lane's URL.
+    Url(String),
+    /// `{ports.<lane>}`: that lane's port.
+    PortOf(String),
+    /// Anything else between braces, or a brace left open; validation
+    /// refuses it. Holds the text as written (braces included for a
+    /// closed field, the raw tail for an open one), since `token` hands
+    /// it back to error messages and to the substitution.
+    Unknown(String),
+}
+
+impl ServeRef {
+    /// The fields of one `serve.env` value, in the order they appear.
+    #[must_use]
+    pub fn parse(value: &str) -> Vec<ServeRef> {
+        let mut refs = Vec::new();
+        let mut rest = value;
+        while let Some(open) = rest.find('{') {
+            let after = &rest[open + 1..];
+            let Some(close) = after.find('}') else {
+                refs.push(ServeRef::Unknown(rest[open..].to_owned()));
+                break;
+            };
+            let field = &after[..close];
+            refs.push(if field == "port" {
+                ServeRef::Port
+            } else if let Some(lane) = field.strip_prefix("services.") {
+                ServeRef::Url(lane.to_owned())
+            } else if let Some(lane) = field.strip_prefix("ports.") {
+                ServeRef::PortOf(lane.to_owned())
+            } else {
+                ServeRef::Unknown(format!("{{{field}}}"))
+            });
+            rest = &after[close + 1..];
+        }
+        refs
+    }
+
+    /// The lane it names, for a field of another lane.
+    #[must_use]
+    pub fn lane(&self) -> Option<&str> {
+        match self {
+            ServeRef::Url(l) | ServeRef::PortOf(l) => Some(l),
+            ServeRef::Port | ServeRef::Unknown(_) => None,
+        }
+    }
+
+    /// The text it stands for in a value.
+    #[must_use]
+    pub fn token(&self) -> String {
+        match self {
+            ServeRef::Port => "{port}".to_owned(),
+            ServeRef::Url(l) => format!("{{services.{l}}}"),
+            ServeRef::PortOf(l) => format!("{{ports.{l}}}"),
+            ServeRef::Unknown(t) => t.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1722,6 +1803,21 @@ impl Pipeline {
                 Some(_) => {}
             }
         }
+        // A lane's address exists only while a stage serves it, so a
+        // value may name only a lane served beside it.
+        for lane in &stage.services {
+            let Some(serve) = self.lane(lane).and_then(|l| l.serve.as_ref()) else {
+                continue;
+            };
+            for named in serve.named_lanes() {
+                if !stage.services.contains(&named) {
+                    bail!(
+                        "stage {name:?}: lane {lane:?}'s serve.env names {named:?}, which is not in its services"
+                    );
+                }
+            }
+        }
+        self.serve_order(stage)?;
         for lane in stage.before.keys() {
             if !stage.services.contains(lane) {
                 bail!("stage {name:?}: before names {lane:?}, which is not in its services");
@@ -1742,10 +1838,43 @@ impl Pipeline {
         Ok(())
     }
 
+    /// The stage's `services` in the order they start: a lane after
+    /// every lane its `serve.env` names, otherwise in list order. Refused
+    /// when the names go round in a cycle.
+    pub(crate) fn serve_order(&self, stage: &Stage) -> Result<Vec<String>> {
+        let named = |lane: &String| -> BTreeSet<String> {
+            self.lane(lane)
+                .and_then(|l| l.serve.as_ref())
+                .map(Serve::named_lanes)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|n| stage.services.contains(n))
+                .collect()
+        };
+        let mut order: Vec<String> = Vec::new();
+        let mut left: Vec<&String> = stage.services.iter().collect();
+        while !left.is_empty() {
+            let Some(at) = left
+                .iter()
+                .position(|l| named(l).iter().all(|n| order.contains(n)))
+            else {
+                let cycle: Vec<&str> = left.iter().map(|l| l.as_str()).collect();
+                bail!(
+                    "stage {:?}: the serve.env of {} name each other in a cycle",
+                    stage.name,
+                    cycle.join(", ")
+                );
+            };
+            order.push(left.remove(at).clone());
+        }
+        Ok(order)
+    }
+
     /// A lane's `serve`: a command, a URL with the port in it, a probe
-    /// path, and an environment with nothing in it but literals and the
-    /// port. The environment travels on the service's command line,
-    /// which a record and the pane keep, so no secret may be there.
+    /// path, and an environment with nothing in it but literals, the
+    /// port, and another lane's URL or port. The environment travels on
+    /// the service's command line, which a record and the pane keep, so
+    /// no secret may be there.
     fn validate_serve(lane: &Lane) -> Result<()> {
         let Some(serve) = &lane.serve else {
             return Ok(());
@@ -1770,8 +1899,20 @@ impl Pipeline {
                     "lane {l}: serve.env {key} looks like a secret; service env travels on the command line, so secrets are not allowed there"
                 );
             }
-            if value.replace("{port}", "").contains('{') {
-                bail!("lane {l}: serve.env {key}: the only field a value may name is {{port}}");
+            for r in ServeRef::parse(value) {
+                match &r {
+                    ServeRef::Unknown(field) => bail!(
+                        "lane {l}: serve.env {key}: {field} is not a field; a value may name {{port}}, {{services.<lane>}} or {{ports.<lane>}}"
+                    ),
+                    ServeRef::Url(name) | ServeRef::PortOf(name) if name.is_empty() => {
+                        bail!("lane {l}: serve.env {key}: {} names no lane", r.token())
+                    }
+                    ServeRef::Url(name) | ServeRef::PortOf(name) if name == l => bail!(
+                        "lane {l}: serve.env {key}: {} names the lane itself; use {{port}}",
+                        r.token()
+                    ),
+                    ServeRef::Port | ServeRef::Url(_) | ServeRef::PortOf(_) => {}
+                }
             }
         }
         Ok(())
@@ -3993,7 +4134,7 @@ ports = [3100, 3199]
         back_half_refused(
             "PORT = \"{port}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"admin\"",
             "PORT = \"{port}\", WHO = \"{ticket}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }\n\n[[lanes]]\nname = \"admin\"",
-            "the only field a value may name is {port}",
+            "{ticket} is not a field; a value may name {port}, {services.<lane>} or {ports.<lane>}",
         );
         // Services live until the resource's range ends, so a stage
         // that serves must hold a resource.
@@ -4012,6 +4153,88 @@ ports = [3100, 3199]
             );
         let err = Pipeline::parse(&text).unwrap_err().to_string();
         assert!(err.contains("needs no [[resources]] entry"), "{err}");
+    }
+
+    /// The back half with the frontend's `PORT` line, the first, and
+    /// then the admin's, given `frontend` and `admin` instead.
+    fn pointing(frontend: &str, admin: &str) -> String {
+        let env = "PORT = \"{port}\" }";
+        DEPLOYING_BACK_HALF
+            .replacen(env, &format!("PORT = \"{{port}}\"{frontend} }}"), 1)
+            .replacen(
+                "admin.git\"\nbase = \"master\"\nserve = { argv = [\"npm\", \"start\"], env = { BROWSER = \"none\", PORT = \"{port}\" }",
+                &format!(
+                    "admin.git\"\nbase = \"master\"\nserve = {{ argv = [\"npm\", \"start\"], env = {{ BROWSER = \"none\", PORT = \"{{port}}\"{admin} }}"
+                ),
+                1,
+            )
+    }
+
+    fn pointing_refused(frontend: &str, admin: &str, expected: &str) {
+        let text = pointing(frontend, admin);
+        assert_ne!(text, DEPLOYING_BACK_HALF, "{frontend} {admin}");
+        let err = Pipeline::parse(&text).unwrap_err().to_string();
+        assert!(err.contains(expected), "{frontend} {admin}: {err}");
+    }
+
+    #[test]
+    fn serve_env_may_name_a_lane_served_beside_it_which_starts_first() {
+        let p = Pipeline::parse(&pointing(
+            ", PROXY = \"{services.admin}\", ADMIN_PORT = \"{ports.admin}\"",
+            "",
+        ))
+        .unwrap();
+        let frontend = p.lane("frontend").unwrap().serve.as_ref().unwrap();
+        assert_eq!(
+            frontend.refs(),
+            [
+                ServeRef::PortOf("admin".into()),
+                ServeRef::Port,
+                ServeRef::Url("admin".into()),
+            ]
+        );
+        assert_eq!(
+            frontend.named_lanes().into_iter().collect::<Vec<_>>(),
+            ["admin"]
+        );
+        // Written frontend first, started admin first.
+        let try_ = |p: &Pipeline| p.stages.iter().find(|s| s.name == "try").unwrap().clone();
+        assert_eq!(p.serve_order(&try_(&p)).unwrap(), ["admin", "frontend"]);
+        // With nothing named, the list order.
+        let p = Pipeline::parse(DEPLOYING_BACK_HALF).unwrap();
+        assert_eq!(p.serve_order(&try_(&p)).unwrap(), ["frontend", "admin"]);
+
+        pointing_refused(
+            ", PROXY = \"{services.backend}\"",
+            "",
+            "names \"backend\", which is not in its services",
+        );
+        pointing_refused(
+            ", PROXY = \"{services.frontend}\"",
+            "",
+            "names the lane itself",
+        );
+        pointing_refused(
+            ", PROXY = \"{services.admin}\"",
+            ", PROXY = \"{ports.frontend}\"",
+            "frontend, admin name each other in a cycle",
+        );
+        pointing_refused(
+            ", PROXY = \"{foo.admin}\"",
+            "",
+            "{foo.admin} is not a field",
+        );
+        pointing_refused(", PROXY = \"{services.}\"", "", "{services.} names no lane");
+        pointing_refused(
+            ", PROXY = \"{services.admin\"",
+            "",
+            "{services.admin is not a field",
+        );
+        pointing_refused(
+            ", ADMIN_TOKEN = \"{services.admin}\"",
+            "",
+            "serve.env ADMIN_TOKEN looks like a secret",
+        );
     }
 
     #[test]

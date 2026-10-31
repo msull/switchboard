@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 28;
+pub const RECORD_VERSION: u32 = 29;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -610,6 +610,11 @@ pub fn migrate(mut value: Value) -> Value {
         // defaults. Nothing is transformed. A build that would drop them
         // must refuse the record, or a report would lose the transcripts
         // that a `/clear` or a removed session record no longer names.
+        //
+        // 28 to 29: a service record gains `pointed_at`, empty from its
+        // serde default. Nothing is transformed. A build that would drop
+        // it must refuse the record, or a restart would not notice that a
+        // service was launched against a lane's address that is gone.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -1409,6 +1414,29 @@ mod tests {
     }
 
     #[test]
+    fn a_version_twenty_eight_service_migrates_pointed_at_nothing() {
+        let service = r#"{"lane": "frontend", "n": 1, "stage": "try", "until": "try", "port": 3100, "url": "http://127.0.0.1:3100", "service_state": "ready", "started_ms": 1000, "ready_ms": 2000}"#;
+        let text = TICKET_V0
+            .replacen('{', "{\n  \"version\": 28,", 1)
+            .replacen(
+                r#""attempts": [],"#,
+                &format!(r#""attempts": [], "services": [{service}],"#),
+                1,
+            );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, text).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert!(t.services[0].pointed_at.is_empty());
+        t.services[0].pointed_at.insert("backend".into(), 2);
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["services"][0]["pointed_at"]["backend"], 2);
+        assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
     fn the_usage_cache_round_trips_and_a_newer_one_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t").join("usage.json");
@@ -1744,6 +1772,7 @@ mod tests {
             stopping_ms: None,
             stuck_on: None,
             released: None,
+            pointed_at: std::collections::BTreeMap::new(),
         });
         write_ticket(&path, &t).unwrap();
         let written: Value = read_json(&path).unwrap();

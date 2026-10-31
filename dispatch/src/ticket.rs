@@ -1417,6 +1417,11 @@ pub struct ServiceRecord {
     /// `stuck`), when the stop was not confirmed by the runner.
     #[serde(default)]
     pub released: Option<String>,
+    /// For each lane this service's `serve.env` named, the `n` of that
+    /// lane's record it was launched against; empty when it names none.
+    /// A later record of the lane means the address is stale.
+    #[serde(default)]
+    pub pointed_at: BTreeMap<String, u32>,
 }
 
 /// How far a served lane got. Tagged `service_state` so it reads apart

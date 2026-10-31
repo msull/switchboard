@@ -8,12 +8,12 @@
 //! the port in its environment, and the readiness probe. Both live on
 //! the ticket record; the scheduler steps them.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use switchboard_control::{self as wire, Body, Made, Reply};
 
-use crate::pipeline::{Pipeline, Serve, Stage};
+use crate::pipeline::{Pipeline, Serve, ServeRef, Stage};
 use crate::scheduler::{Ask, NO_SUCH_SESSION, Runner, SocketDown, confine_for, env_for};
 use crate::ticket::{
     Attempt, AttemptState, Decision, DecisionKind, DecisionState, Forgotten, GateRun, Hold,
@@ -276,10 +276,12 @@ impl Runner {
 
     // --- services
 
-    /// The stage's services, in order, brought one step further each
-    /// pass. A lane the ticket did not choose is not served. True once
-    /// every served lane answers; until then no agent of the stage
-    /// launches. A lane that could not be served is stopped, then asked
+    /// The stage's services, a lane after the lanes its `serve.env`
+    /// names, brought one step further each pass. A lane naming another
+    /// starts once that one answers, and is restarted when that one is
+    /// served again. A lane the ticket did not choose is not served, and
+    /// one naming it fails. True once every served lane answers; until
+    /// then no agent of the stage launches. A lane that could not be served is stopped, then asked
     /// about once (`retry` or `park`).
     pub(crate) fn ensure_services(
         &mut self,
@@ -291,7 +293,13 @@ impl Runner {
     ) -> Result<bool> {
         let mut ready = true;
         let mut failed: Vec<String> = Vec::new();
-        for lane in &stage.services {
+        // Validation refuses a cycle. A pipeline stored on an older ticket
+        // predates lane references and so cannot hold one; if what is
+        // stored ever changes, this fallback would serve in list order.
+        let order = p
+            .serve_order(stage)
+            .unwrap_or_else(|_| stage.services.clone());
+        for lane in &order {
             let Some(record) = t
                 .lanes
                 .iter()
@@ -304,6 +312,7 @@ impl Runner {
                 continue;
             };
             let i = self.service_record(t, p, &stage.name, lane, now_ms)?;
+            self.mark_stale_pointer(t, i, now_ms)?;
             // Marked by a send-back: stopped before it counts, since a
             // record being stopped still reads `Ready` until the stop is
             // confirmed, and an agent must not start against it. Once
@@ -320,6 +329,18 @@ impl Runner {
                     return Ok(false);
                 }
                 continue;
+            }
+            if t.services[i].state == ServiceState::Before {
+                if let Some((missing, lane)) = unserved_ref(t, &serve) {
+                    let reason = format!(
+                        "{} is not served (the ticket did not choose {lane})",
+                        missing.token()
+                    );
+                    self.fail_service(t, i, &reason, now_ms)?;
+                } else if !named_ready(t, &stage.name, &serve) {
+                    ready = false;
+                    continue;
+                }
             }
             match t.services[i].state.clone() {
                 ServiceState::Before => {
@@ -371,6 +392,26 @@ impl Runner {
             )?;
         }
         Ok(ready)
+    }
+
+    /// Record `i`, launched against an address that is gone, marked to
+    /// be stopped and started again the way a send-back marks it.
+    fn mark_stale_pointer(&mut self, t: &mut Ticket, i: usize, now_ms: u64) -> Result<()> {
+        let rec = &t.services[i];
+        if rec.stopping_ms.is_some()
+            || !matches!(rec.state, ServiceState::Starting | ServiceState::Ready)
+            || !stale_pointer(t, i)
+        {
+            return Ok(());
+        }
+        log::info!(
+            "ticket {} {} restarts {}: a lane it names was served again",
+            t.id,
+            rec.stage,
+            rec.lane
+        );
+        t.services[i].stopping_ms = Some(now_ms);
+        self.save_ticket(t, now_ms)
     }
 
     /// A `retry` answer to a `service` question: each failed service of
@@ -446,6 +487,7 @@ impl Runner {
             stopping_ms: None,
             stuck_on: None,
             released: None,
+            pointed_at: BTreeMap::new(),
         });
         self.save_ticket(t, now_ms)?;
         Ok(t.services.len() - 1)
@@ -603,7 +645,8 @@ impl Runner {
     /// ticket's project, in the lane's tree, run through the login shell
     /// so the user's PATH finds `npm`. The environment and command are
     /// argv elements, never shell source; only the pipeline file's
-    /// `serve.env` values and the port reach them.
+    /// `serve.env` values, the port, and the URL or port of a lane they
+    /// name reach them.
     fn send_service(
         &mut self,
         t: &mut Ticket,
@@ -622,6 +665,42 @@ impl Runner {
         };
         let rec = t.services[i].clone();
         let port = rec.port.unwrap_or_default().to_string();
+        // A named lane with a record on its way is waited for; the next
+        // pass sends again. Only a lane with no live record fails below.
+        if serve.named_lanes().iter().any(|lane| {
+            latest_live(t, &rec.stage, lane).is_some_and(|s| s.state != ServiceState::Ready)
+        }) {
+            return Ok(());
+        }
+        let mut pointed_at = BTreeMap::new();
+        for lane in serve.named_lanes() {
+            if let Some(named) = latest_live(t, &rec.stage, &lane) {
+                pointed_at.insert(lane, named.n);
+            }
+        }
+        let mut env = Vec::new();
+        for (k, v) in &serve.env {
+            let value = render_env_value(v, &port, |r| {
+                let named = latest_live(t, &rec.stage, r.lane()?)?;
+                match r {
+                    ServeRef::PortOf(_) => named.port.map(|p| p.to_string()),
+                    _ => named.url.clone(),
+                }
+            });
+            match value {
+                Ok(value) => env.push(format!("{k}={value}")),
+                Err(field) => {
+                    let reason = format!("{field} does not answer yet");
+                    return self.fail_service(t, i, &reason, now_ms);
+                }
+            }
+        }
+        // Saved before the send, so a resend after a crash is checked
+        // against what it will use.
+        if t.services[i].pointed_at != pointed_at {
+            t.services[i].pointed_at = pointed_at;
+            self.save_ticket(t, now_ms)?;
+        }
         let Some(cwd) = t
             .lanes
             .iter()
@@ -641,12 +720,7 @@ impl Runner {
             "dispatch-service".to_owned(),
             "env".to_owned(),
         ];
-        argv.extend(
-            serve
-                .env
-                .iter()
-                .map(|(k, v)| format!("{k}={}", v.replace("{port}", &port))),
-        );
+        argv.extend(env);
         argv.extend(serve.argv.iter().map(|a| a.replace("{port}", &port)));
         let url = rec.url.clone().unwrap_or_default();
         let body = Body::SessionNew {
@@ -1112,6 +1186,60 @@ fn live_ports(t: &Ticket) -> impl Iterator<Item = u16> + '_ {
         .filter_map(|s| s.port)
 }
 
+/// The stage's record of `lane` that is not stopped, the latest.
+fn latest_live<'a>(t: &'a Ticket, stage: &str, lane: &str) -> Option<&'a ServiceRecord> {
+    t.services
+        .iter()
+        .rev()
+        .find(|s| s.stage == stage && s.lane == lane && s.state != ServiceState::Stopped)
+}
+
+/// Whether record `i` was launched against a record of a lane it names
+/// that is no longer that lane's live one. A lane that only failed keeps
+/// its number, so its dependent is restarted once a retry makes the next.
+fn stale_pointer(t: &Ticket, i: usize) -> bool {
+    let rec = &t.services[i];
+    rec.pointed_at
+        .iter()
+        .any(|(lane, n)| latest_live(t, &rec.stage, lane).map(|s| s.n) != Some(*n))
+}
+
+/// The first field of `serve.env` naming a lane the ticket did not
+/// choose, so nothing will ever serve it, with the lane's name.
+fn unserved_ref(t: &Ticket, serve: &Serve) -> Option<(ServeRef, String)> {
+    serve.refs().into_iter().find_map(|r| {
+        let lane = r.lane()?.to_owned();
+        (!t.lanes.iter().any(|l| l.name == lane && l.chosen)).then_some((r, lane))
+    })
+}
+
+/// Whether every lane `serve.env` names answers in `stage`.
+fn named_ready(t: &Ticket, stage: &str, serve: &Serve) -> bool {
+    serve
+        .named_lanes()
+        .iter()
+        .all(|lane| latest_live(t, stage, lane).is_some_and(|s| s.state == ServiceState::Ready))
+}
+
+/// `value` with `{port}` filled from `port` and each other field from
+/// `lookup`. The `Err` is the first field `lookup` has nothing for.
+fn render_env_value(
+    value: &str,
+    port: &str,
+    mut lookup: impl FnMut(&ServeRef) -> Option<String>,
+) -> std::result::Result<String, String> {
+    let mut out = value.to_owned();
+    for r in ServeRef::parse(value) {
+        let filled = match &r {
+            ServeRef::Port => port.to_owned(),
+            ServeRef::Url(_) | ServeRef::PortOf(_) => lookup(&r).ok_or_else(|| r.token())?,
+            ServeRef::Unknown(field) => return Err(field.clone()),
+        };
+        out = out.replace(&r.token(), &filled);
+    }
+    Ok(out)
+}
+
 /// The other tickets of `t`'s project that hold `resource`, as
 /// `<id> (<source>) from <stage>`, the stage each holds it from.
 fn holders_of(all: &[Ticket], t: &Ticket, resource: &str) -> Vec<String> {
@@ -1173,5 +1301,35 @@ pub(crate) fn apply_service_reply(t: &mut Ticket, intent: &str, made: &[Made]) {
         if !t.processes.contains(&id) {
             t.processes.push(id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_env_value_takes_its_own_port_and_a_named_lanes_fields() {
+        let lookup = |r: &ServeRef| match r {
+            ServeRef::Url(l) if l == "backend" => Some("http://127.0.0.1:3101".to_owned()),
+            ServeRef::PortOf(l) if l == "backend" => Some("3101".to_owned()),
+            _ => None,
+        };
+        assert_eq!(
+            render_env_value("{services.backend}/api", "3100", lookup),
+            Ok("http://127.0.0.1:3101/api".to_owned())
+        );
+        assert_eq!(
+            render_env_value("{port}:{ports.backend}", "3100", lookup),
+            Ok("3100:3101".to_owned())
+        );
+        assert_eq!(
+            render_env_value("plain", "3100", lookup),
+            Ok("plain".to_owned())
+        );
+        assert_eq!(
+            render_env_value("{services.api}", "3100", lookup),
+            Err("{services.api}".to_owned())
+        );
     }
 }

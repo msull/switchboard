@@ -1624,7 +1624,11 @@ runner's pass doing the rest. Dispatch's services are `session.new`
 service records with an argv launch that carries the port through `env`
 and through `{port}` in the serve argv,
 killed and then removed with `session.remove`, and a service's `before`
-runs as a child of the runner. Gaps: `service.new` and `command.run`
+runs as a child of the runner. A service whose `serve.env` names
+another lane of its stage (`{services.<lane>}`, `{ports.<lane>}`)
+starts after that lane answers, and its record keeps which record of
+that lane it was launched against (`pointed_at`), so when the lane is
+served again it is stopped and started against the new address. Gaps: `service.new` and `command.run`
 stay unbuilt; nothing marks Dispatch-owned records as such in the
 window.
 
