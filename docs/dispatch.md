@@ -936,6 +936,9 @@ remote = "origin"             # (default origin)
 worktrees = "/path"           # where this project's trees go (~ expands); omitted: the `dispatch worktrees` setting, default ~/.dispatch/worktrees
 space = "..."                 # the Switchboard workspace every ticket's project goes in
 remotes = { github = "git@github.com:..." }   # mirrors a pull request may be taken from, by remote name
+branch = "{type}/{key}-{slug}" # the template a ticket's branch is named by (see "Branch names"); omitted: dispatch/{number}-{slug}
+branch_key = '\b([A-Z]+-[0-9]+)\b'   # for {key}: a regular expression on the issue title, one capture group or one named `key`
+branch_type = "feat"          # for {type} when the issue has no `type:` label
 
 [source]
 kind = "github" | "task-file" | "manual" | "pull-request"   # pull-request: see "Tickets from pull requests"
@@ -956,6 +959,7 @@ setup = ["cmd", "args"]       # run once, before the lane's first agent
 writable = ["~/.cargo"]       # under [policy] confine: extra paths the lane's setup, gates, checks and command reviewers may write
 merge_after = ["backend"]     # lanes whose pull requests merge first: this lane's merge question waits for them (see "Merge order")
 merge_after_deploy = true     # also wait for the base pipeline on their merge commit: true until it finishes, or a step's name ("Deploy to dev") until it passes
+branch = "{type}/{key}"       # only on a lane with its own repo: its branch template, over the project's
 serve = { argv = ["npm", "start"], env = { PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
                               # how a stage's `services` run this lane: {port} is filled in argv, env values and url; env holds
                               # literals and {port} only (it is on the command line), url is what the agent is told,
@@ -1159,6 +1163,52 @@ implementer, a code review's `review_prompt` and `fix_prompt`, a
 workflow reviewer's templates, and, for a `pr-checks` or `pr-merged`
 gate, the guidance of the policy's `rebaser` (and of its `fixer` for
 `pr-checks`).
+
+### Branch names
+
+A ticket's branch is `dispatch/{number}-{slug}` unless `[project]
+branch` names a template. A lane with its own `repo` may name its own
+`branch` over the project's; any other lane shares the ticket's tree
+and so its one branch, and a `branch` on it is refused when the file
+is read. The template has four fields and nothing else:
+
+- `{number}`: the issue's number, `0` for a source without one.
+- `{slug}`: the title, lowercased, non-word runs as one hyphen, at
+  most 40 characters; with `{key}` in the template, the text the key
+  matched is taken out of the title first, so the key is not repeated.
+  An empty slug takes the hyphen before it with it.
+- `{key}`: what `branch_key`'s one capture group, or its group named
+  `key`, matched in the issue title. `branch_key` is required by a
+  template that uses `{key}`; there is no built-in pattern.
+- `{type}`: the value of the issue's first `type:` label (only GitHub
+  issues have labels), else `branch_type`.
+
+`{key}` and `{type}` are reduced to `[A-Za-z0-9._-]` (any other
+character a hyphen, no leading `-` or `.`, no trailing `.`), and the
+whole name is checked against git's branch-name rules.
+
+**Rendered at take, recorded at cut.** A take renders the tree's name
+and each own-repo lane's from the issue and the file it is taken
+under, and refuses with the template, the field and the value when one
+cannot be made: no key in the title, no type label and no
+`branch_type`, a value with nothing left after sanitising, or a name
+git would refuse. There is no fallback to the default name. The cut
+renders the same names again from the ticket's own copy of the file,
+so an edit of the live file after the take does not reach them, and
+records each on the lane; everything after reads the record. A
+`dispatch restart` installs the live file only when it renders the
+same name for every context already cut, and refuses one that would
+rename a branch: close and retake to change the template. A context
+not yet cut takes the new name.
+
+A ticket from pull requests keeps their branches, and a
+`kind = "pull-request"` pipeline that sets any of the branch keys is
+refused. A retake looks for a kept branch only under the name the
+current template gives: one an earlier template named is left as it
+is.
+
+A runner older than these keys ignores them and names the branch
+`dispatch/{number}-{slug}`; update the runner before adding them.
 
 ### Evidence directories
 

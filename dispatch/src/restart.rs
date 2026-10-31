@@ -211,6 +211,9 @@ impl Runner {
         {
             bail!("the live pipeline changes the project's repo, base, remote or worktrees");
         }
+        if new.cuts_worktrees() && !t.source.is_pull_request() {
+            check_branches(t, old, &new)?;
+        }
         let ranged = target_old < t.stage || live_only;
         let mut targets = Vec::new();
         let mut range = vec![from.clone()];
@@ -482,7 +485,7 @@ impl Runner {
                 Target {
                     key: "root".to_owned(),
                     dir: tree.clone(),
-                    branch: tree_branch(t, tree_pr(t, old)),
+                    branch: tree_branch(t, old, tree_pr(t, old)).map_err(|e| format!("{e:#}"))?,
                     to: String::new(),
                 },
                 base,
@@ -966,4 +969,36 @@ fn remap(t: &mut Ticket, old: &Pipeline, c: &Checked) {
         t.refreshed_stage.and_then(|i| moved(i, false))
     };
     t.stage = c.target_new;
+}
+
+/// A live file's branch names for `t`, against what the cut already
+/// recorded: a template that cannot render for the ticket is refused as
+/// a take would refuse it, and so is one that names a branch already cut
+/// differently, since the branch, its pushes and its pull request all go
+/// by the recorded name. A context not yet cut takes the new name.
+fn check_branches(t: &Ticket, old: &Pipeline, new: &Pipeline) -> Result<()> {
+    let names = crate::branch::names(new, &t.source)
+        .map_err(|e| anyhow::anyhow!("the live pipeline: {e:#}"))?;
+    for (lane, name) in names {
+        let (what, was) = match lane {
+            None => {
+                if t.tree.is_none() {
+                    continue;
+                }
+                ("the tree".to_owned(), tree_branch(t, old, None)?)
+            }
+            Some(lane) => {
+                let Some(l) = t.lanes.iter().find(|l| l.name == lane) else {
+                    continue;
+                };
+                (format!("lane {lane}"), l.branch.clone())
+            }
+        };
+        if was != name {
+            bail!(
+                "the live pipeline names {what}'s branch {name}, but it was cut as {was}; close and retake to change the branch template"
+            );
+        }
+    }
+    Ok(())
 }

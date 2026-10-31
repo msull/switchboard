@@ -604,6 +604,28 @@ answer, shown with the investigator's notes. With the `lanes` dial at
 question, and an issue with no hinted label is still asked. Without
 `lane_hints`, every multi-lane ticket asks with no suggestion.
 
+**Branch names.** Every branch is `dispatch/<number>-<slug>` by
+default. A repository with its own convention names it in `[project]`:
+
+```toml fragment
+[project]
+branch = "{type}/{key}-{slug}"
+branch_key = '\b([A-Z]+-[0-9]+)\b'   # the tracker key in the issue title
+branch_type = "feat"                 # unless the issue has a type: label
+```
+
+An issue titled `ABC-123 Fix the export` with no `type:` label gets
+`feat/ABC-123-fix-the-export`; with `type:fix`, `fix/ABC-123-fix-the-export`.
+A title with no key, or no type from either place, refuses the take
+with the reason: there is no fallback to the default, since a
+repository that wants the convention may refuse any other push. A lane
+with its own `repo` can set `branch` of its own. The name is fixed
+when the lanes are cut; changing the template later reaches new
+tickets, and a restart that would rename a cut branch is refused. See
+"Branch names" in [the reference](dispatch.md). Update the runner
+before adding these keys: an older one ignores them and uses the
+default name.
+
 **The `decisions` gate** puts the open decisions in front of you
 before anything is planned, so the plan is written to your answers
 rather than revised to them. Its `question` follows the default

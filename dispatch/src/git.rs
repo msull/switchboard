@@ -2762,6 +2762,19 @@ pub fn yyyymmdd(ms: u64) -> String {
 /// as one hyphen, at most 40 characters.
 #[must_use]
 pub fn branch_name(number: u64, title: &str) -> String {
+    let slug_text = slug(title);
+    if slug_text.is_empty() {
+        format!("dispatch/{number}")
+    } else {
+        format!("dispatch/{number}-{slug_text}")
+    }
+}
+
+/// The title part of a branch name: lowercased ASCII alphanumerics,
+/// non-word runs as one hyphen, at most 40 characters, no trailing hyphen.
+/// Shared by [`branch_name`] and the branch templates so both agree.
+#[must_use]
+pub fn slug(title: &str) -> String {
     let mut slug = String::new();
     let mut dash = false;
     for c in title.chars() {
@@ -2776,12 +2789,7 @@ pub fn branch_name(number: u64, title: &str) -> String {
             break;
         }
     }
-    let slug = slug.trim_end_matches('-');
-    if slug.is_empty() {
-        format!("dispatch/{number}")
-    } else {
-        format!("dispatch/{number}-{slug}")
-    }
+    slug.trim_end_matches('-').to_owned()
 }
 
 #[cfg(test)]

@@ -14,7 +14,7 @@ use switchboard_control::{self as wire, Body, Reply, Request, RunState};
 
 use crate::UsageError;
 use crate::bitbucket::{Bitbucket, bitbucket_repo};
-use crate::git::{Adopted, Confine, Network, Push, Repo, branch_name, yyyymmdd};
+use crate::git::{Adopted, Confine, Network, Push, Repo, yyyymmdd};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::health::Health;
 use crate::pipeline::{
@@ -646,6 +646,12 @@ impl Runner {
             && let Some(why) = shell_unsafe(&self.worktree_root(pipeline))
         {
             bail!("worktrees: {why}; set another with `dispatch worktrees <path>`");
+        }
+        // Every name the cut will record, rendered now: a template that
+        // cannot name this ticket's branch refuses the take, not a cut
+        // later. A ticket from pull requests keeps theirs.
+        if pipeline.cuts_worktrees() && source.pull_requests.is_empty() {
+            crate::branch::names(pipeline, &source)?;
         }
         let id = Ticket::new_id();
         let dir = self.data.ticket_dir(&id);
@@ -1564,7 +1570,7 @@ impl Runner {
         let clone = self.data.repo_dir(&p.project.name);
         let remote = p.project.remote.clone();
         let onto = format!("{remote}/{}", p.project.base);
-        let branch = tree_branch(t, None);
+        let branch = tree_branch(t, p, None)?;
         if self.git.rebase_in_progress(tree)? {
             log::info!(
                 "ticket {} root: the tree is mid-rebase{}; left alone",
@@ -3732,8 +3738,8 @@ impl Runner {
             .tree
             .clone()
             .unwrap_or_else(|| self.worktree_root(p).join(&t.id));
-        let lanes = lanes_to_cut(t, p);
-        let todo = self.uncut(t, p, &url, &tree, &lanes);
+        let lanes = lanes_to_cut(t, p)?;
+        let todo = self.uncut(t, p, &url, &tree, &lanes)?;
         let Some(moved) = self.survey(t, ps, &todo, now_ms)? else {
             return Ok(());
         };
@@ -3807,7 +3813,7 @@ impl Runner {
         url: &str,
         tree: &Path,
         lanes: &[LaneCut],
-    ) -> Vec<Uncut> {
+    ) -> Result<Vec<Uncut>> {
         let mut todo = Vec::new();
         if t.tree.is_none() {
             let pr = tree_pr(t, p).cloned();
@@ -3817,7 +3823,7 @@ impl Runner {
                 clone: self.data.repo_dir(&p.project.name),
                 remote: p.project.remote.clone(),
                 dir: tree.to_path_buf(),
-                branch: tree_branch(t, pr.as_ref()),
+                branch: tree_branch(t, p, pr.as_ref())?,
                 start: format!("{}/{}", p.project.remote, p.project.base),
                 extra: pr.as_ref().and_then(|pr| extra_remote(p, None, pr)),
                 pr,
@@ -3841,7 +3847,7 @@ impl Runner {
                 pr: l.pr.clone(),
             });
         }
-        todo
+        Ok(todo)
     }
 
     /// Every context's clone fetched, then looked at for a branch of
@@ -9504,10 +9510,11 @@ pub fn kept_branches(t: &Ticket, p: &Pipeline, data: &DataDir) -> Vec<(String, P
             )
         })
         .collect();
-    kept.push((
-        tree_branch(t, tree_pr(t, p)),
-        data.repo_dir(&p.project.name),
-    ));
+    // A copy whose template no longer renders only leaves the tree's
+    // branch unlisted; a take and a restart refuse one that does not.
+    if let Ok(branch) = tree_branch(t, p, tree_pr(t, p)) {
+        kept.push((branch, data.repo_dir(&p.project.name)));
+    }
     kept
 }
 
@@ -9521,36 +9528,45 @@ pub(crate) fn tree_pr<'a>(t: &'a Ticket, p: &Pipeline) -> Option<&'a PullRequest
 }
 
 /// The branch of the ticket's tree: its pull request's (`tree_pr`),
-/// else the one named after the issue.
-pub(crate) fn tree_branch(t: &Ticket, pr: Option<&PullRequestSource>) -> String {
-    pr.map_or_else(
-        || branch_name(t.source.number.unwrap_or(0), &t.source.title),
-        |pr| pr.local().to_owned(),
-    )
+/// else the one the pipeline's template names after the issue.
+pub(crate) fn tree_branch(
+    t: &Ticket,
+    p: &Pipeline,
+    pr: Option<&PullRequestSource>,
+) -> Result<String> {
+    match pr {
+        Some(pr) => Ok(pr.local().to_owned()),
+        None => crate::branch::tree(p, &t.source),
+    }
 }
 
 /// The lanes the cut has yet to record, in pipeline order. A ticket
 /// from pull requests checks their branches out instead of cutting its
 /// own, so only its lanes with a pull request are cut.
-fn lanes_to_cut(t: &Ticket, p: &Pipeline) -> Vec<LaneCut> {
+fn lanes_to_cut(t: &Ticket, p: &Pipeline) -> Result<Vec<LaneCut>> {
     let prs = &t.source.pull_requests;
-    let branch = tree_branch(t, tree_pr(t, p));
-    p.lanes
-        .iter()
-        .enumerate()
-        .filter(|(_, lane)| !t.lanes.iter().any(|l| l.name == lane.name))
-        .filter_map(|(index, lane)| {
-            let pr = prs.iter().find(|pr| pr.lane == lane.name);
-            if !prs.is_empty() && pr.is_none() {
-                return None;
-            }
-            Some(LaneCut {
-                index,
-                branch: pr.map_or_else(|| branch.clone(), |pr| pr.local().to_owned()),
-                pr: pr.cloned(),
-            })
-        })
-        .collect()
+    let tree = tree_branch(t, p, tree_pr(t, p))?;
+    let mut cuts = Vec::new();
+    for (index, lane) in p.lanes.iter().enumerate() {
+        if t.lanes.iter().any(|l| l.name == lane.name) {
+            continue;
+        }
+        let pr = prs.iter().find(|pr| pr.lane == lane.name);
+        if !prs.is_empty() && pr.is_none() {
+            continue;
+        }
+        let branch = match pr {
+            Some(pr) => pr.local().to_owned(),
+            None if lane.repo.is_some() => crate::branch::lane_branch(p, lane, &t.source)?,
+            None => tree.clone(),
+        };
+        cuts.push(LaneCut {
+            index,
+            branch,
+            pr: pr.cloned(),
+        });
+    }
+    Ok(cuts)
 }
 
 /// The latest `branch` decision of the cut, the one whose answer counts.
@@ -11986,11 +12002,10 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
             .set("worktree", l.worktree.display().to_string());
     } else if let Some(tree) = primary_tree(t, p) {
         vars.set("worktree", tree.display().to_string());
-        if p.cuts_worktrees() {
-            vars.set(
-                "branch",
-                branch_name(t.source.number.unwrap_or(0), &t.source.title),
-            );
+        if p.cuts_worktrees()
+            && let Ok(branch) = tree_branch(t, p, tree_pr(t, p))
+        {
+            vars.set("branch", branch);
         }
     }
     let names: BTreeSet<&String> = t.attempts.iter().flat_map(|a| a.artifacts.keys()).collect();
