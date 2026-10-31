@@ -953,8 +953,23 @@ it appears in `argv`, in `env` values and in `url`. A tool that takes
 its port only as a flag gets it in `argv`:
 `argv = ["vite", "--port", "{port}"]`. `argv` and `serve.env` travel
 on the service's command line, so neither may hold a secret; `env`
-may hold only literals and `{port}`, and a key that looks like a
-secret is refused.
+may hold only literals, `{port}`, and another served lane's address:
+`{services.<lane>}` for its URL and `{ports.<lane>}` for its port. A
+key that looks like a secret is refused.
+
+A lane named that way must be in the same stage's `services`, and the
+names may not go round in a cycle. Dispatch starts the named lane
+first and starts the lane naming it, its `before` included, only once
+the named lane answers. When the named lane is served again under a
+new record, as a send-back serves it, the lane naming it is stopped
+and started again against the new address. A named lane the ticket did not
+cut is a `service` decision, since nothing will ever serve it. A
+frontend proxying to a backend served beside it, with
+`services = ["frontend", "backend"]` on the stage, sets
+`API_PROXY = "{services.backend}"` in its `serve.env`, and the backend's
+`serve.url` is `"http://127.0.0.1:{port}"`. Write `127.0.0.1` rather
+than `localhost` in `serve.url`: Node 17 and later may resolve
+`localhost` to IPv6, which a server bound to IPv4 does not answer.
 
 **`services`** on a stage names lanes to serve while it runs. Each is
 started only if the ticket cut that lane; for one it did not,

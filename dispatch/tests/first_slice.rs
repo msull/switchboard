@@ -20971,6 +20971,206 @@ fn services_of<'a>(t: &'a Ticket, lane: &str) -> Vec<&'a dispatch::ticket::Servi
     t.services.iter().filter(|s| s.lane == lane).collect()
 }
 
+/// The back half with the backend served beside the frontend at `try`,
+/// and the frontend's `PROXY` naming the backend's URL.
+fn pointed_env(labels: &[&str]) -> (Env, String) {
+    let mut env = Env::new();
+    let text = BACK_HALF
+        .replace("{worktrees}", &env.worktrees.display().to_string())
+        .replace(
+            "env = { BROWSER = \"none\", PORT = \"{port}\" }",
+            "env = { BROWSER = \"none\", PORT = \"{port}\", PROXY = \"{services.backend}\" }",
+        )
+        .replace(
+            "setup = [\"uv\", \"sync\"]",
+            "setup = [\"uv\", \"sync\"]\nserve = { argv = [\"uv\", \"run\", \"serve\"], env = { PORT = \"{port}\" }, url = \"http://127.0.0.1:{port}\", ready = { http = \"/\", within_secs = 120 } }",
+        )
+        .replace(
+            "services = [\"frontend\"]",
+            "services = [\"frontend\", \"backend\"]",
+        );
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, labels);
+    (env, id)
+}
+
+/// The argv of each service launch for `lane`, in order.
+fn launch_argvs(env: &Env, lane: &str) -> Vec<Vec<String>> {
+    service_launches(env)
+        .into_iter()
+        .filter_map(|r| match r.body {
+            Body::SessionNew {
+                name,
+                launch: switchboard_control::Launch::Argv(argv),
+                ..
+            } if name.starts_with(&format!("{lane} :")) => Some(argv),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The latest record of `lane` reads `Ready`, its port answering.
+fn lane_ready(env: &mut Env, id: &str, lane: &str) {
+    env.steps_until(id, "the lane launched", |t, _| {
+        services_of(t, lane)
+            .last()
+            .is_some_and(|s| s.session.is_some())
+    });
+    let port = services_of(&env.ticket(id), lane)
+        .last()
+        .and_then(|s| s.port)
+        .unwrap();
+    env.repo.lock().unwrap().answering.insert(port);
+    env.steps_until(id, "the lane ready", |t, _| {
+        services_of(t, lane)
+            .last()
+            .is_some_and(|s| s.state == ServiceState::Ready)
+    });
+}
+
+/// The frontend's record `n`: its `before` exits 0 and it answers.
+fn frontend_ready(env: &mut Env, id: &str, n: u32) {
+    let key = before_key(id, n);
+    for _ in 0..6 {
+        if started(env, &key) > 0 {
+            break;
+        }
+        env.step();
+    }
+    exits(env, &key, 0);
+    lane_ready(env, id, "frontend");
+}
+
+#[test]
+fn a_lane_naming_another_starts_once_it_answers_and_is_given_its_url() {
+    let (mut env, id) = pointed_env(BOTH);
+    deployed(&mut env, &id);
+    env.steps_until(&id, "the backend launched", |t, _| {
+        services_of(t, "backend")
+            .first()
+            .is_some_and(|s| s.session.is_some())
+    });
+    for _ in 0..2 {
+        env.step();
+    }
+    // Listed second, the backend starts first; the frontend's `before`
+    // waits with it.
+    let t = env.ticket(&id);
+    assert_eq!(launch_argvs(&env, "backend").len(), 1, "{t:#?}");
+    assert_eq!(started(&env, &before_key(&id, 1)), 0);
+    assert!(launch_argvs(&env, "frontend").is_empty());
+    assert_eq!(services_of(&t, "frontend")[0].state, ServiceState::Before);
+    lane_ready(&mut env, &id, "backend");
+    let backend = services_of(&env.ticket(&id), "backend")[0].clone();
+    let url = backend.url.clone().unwrap();
+    assert_eq!(url, format!("http://127.0.0.1:{}", backend.port.unwrap()));
+    frontend_ready(&mut env, &id, 1);
+    let argvs = launch_argvs(&env, "frontend");
+    assert_eq!(argvs.len(), 1);
+    assert!(argvs[0].contains(&format!("PROXY={url}")), "{:?}", argvs[0]);
+    let t = env.ticket(&id);
+    assert_eq!(
+        services_of(&t, "frontend")[0].pointed_at,
+        [("backend".to_owned(), 1)].into()
+    );
+    assert!(services_of(&t, "backend")[0].pointed_at.is_empty());
+}
+
+#[test]
+fn a_lane_served_again_restarts_the_lane_naming_it() {
+    let (mut env, id) = pointed_env(BOTH);
+    deployed(&mut env, &id);
+    lane_ready(&mut env, &id, "backend");
+    frontend_ready(&mut env, &id, 1);
+    // The backend's record ends, as a send-back of it alone would end
+    // it: a `Ready` record is otherwise never replaced.
+    let mut t = env.ticket(&id);
+    let b = t.services.iter().position(|s| s.lane == "backend").unwrap();
+    t.services[b].stopping_ms = Some(env.now);
+    env.runner.save_ticket(&mut t, env.now).unwrap();
+    env.steps_until(&id, "the frontend stopped", |t, _| {
+        services_of(t, "frontend")[0].state == ServiceState::Stopped
+            && services_of(t, "backend").len() == 2
+    });
+    let t = env.ticket(&id);
+    let backends = services_of(&t, "backend");
+    assert_eq!(backends[0].state, ServiceState::Stopped);
+    assert_eq!(backends.last().unwrap().n, 2);
+    // Its next record waits for the backend's next.
+    lane_ready(&mut env, &id, "backend");
+    frontend_ready(&mut env, &id, 2);
+    let t = env.ticket(&id);
+    let frontends = services_of(&t, "frontend");
+    assert_eq!(frontends.len(), 2, "{t:#?}");
+    assert_eq!(frontends[1].pointed_at, [("backend".to_owned(), 2)].into());
+    let url = services_of(&t, "backend")[1].url.clone().unwrap();
+    let argvs = launch_argvs(&env, "frontend");
+    assert_eq!(argvs.len(), 2);
+    assert!(argvs[1].contains(&format!("PROXY={url}")), "{:?}", argvs[1]);
+}
+
+#[test]
+fn a_resent_lane_waits_for_a_named_lane_that_is_not_ready() {
+    let (mut env, id) = pointed_env(BOTH);
+    deployed(&mut env, &id);
+    env.steps_until(&id, "the backend launched", |t, _| {
+        services_of(t, "backend")
+            .first()
+            .is_some_and(|s| s.session.is_some())
+    });
+    // The frontend saved `Starting` before its request was written,
+    // while the backend it names is still coming up.
+    let mut t = env.ticket(&id);
+    let f = t
+        .services
+        .iter()
+        .position(|s| s.lane == "frontend")
+        .unwrap();
+    t.services[f].state = ServiceState::Starting;
+    env.runner.save_ticket(&mut t, env.now).unwrap();
+    for _ in 0..3 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert_eq!(services_of(&t, "frontend")[0].state, ServiceState::Starting);
+    assert!(launch_argvs(&env, "frontend").is_empty());
+    lane_ready(&mut env, &id, "backend");
+    env.steps_until(&id, "the frontend launched", |t, _| {
+        services_of(t, "frontend")[0].session.is_some()
+    });
+    let argvs = launch_argvs(&env, "frontend");
+    let url = services_of(&env.ticket(&id), "backend")[0]
+        .url
+        .clone()
+        .unwrap();
+    assert!(argvs[0].contains(&format!("PROXY={url}")), "{:?}", argvs[0]);
+}
+
+#[test]
+fn a_lane_naming_one_the_ticket_does_not_serve_is_a_service_question() {
+    let (mut env, id) = pointed_env(&["area:frontend"]);
+    at_stage(&mut env, &id, "try");
+    env.steps_until(&id, "the service question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "service")
+    });
+    let t = env.ticket(&id);
+    let frontends = services_of(&t, "frontend");
+    assert!(
+        matches!(&frontends[0].state, ServiceState::Failed { reason }
+            if reason == "{services.backend} is not served (the ticket did not choose backend)"),
+        "{t:#?}"
+    );
+    assert!(services_of(&t, "backend").is_empty());
+    assert!(service_launches(&env).is_empty());
+    assert_eq!(started(&env, &before_key(&id, 1)), 0);
+    let d = pending_named(&env, &id, "service").unwrap();
+    assert!(
+        d.question.contains("{services.backend} is not served"),
+        "{}",
+        d.question
+    );
+}
+
 #[test]
 fn a_retry_leaves_a_failed_service_whose_stop_is_not_confirmed_to_its_stop() {
     use dispatch::services::STOP_LIMIT_MS;
