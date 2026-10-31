@@ -24,9 +24,16 @@ An edit to the live file therefore reaches tickets taken afterwards,
 and a running ticket only after `dispatch restart <ticket>`, which
 swaps a fresh copy in. Step 8 lists the few keys that are read live.
 
-**Checking a file.** Nothing runs a file until a `take`. A file that
-does not parse or validate is refused at the next `take` with the
-parser's reason, so read the file back after every edit. Every block
+**Checking a file.** Run `dispatch check <project>` after every edit.
+It reads `pipelines/<project>.toml` and `pipelines/<project>.pr.toml`,
+whichever exist (or one file, given a path), applies every rule a
+`take` applies, and prints each problem it finds; it exits 1 if any is
+an error and changes nothing. A key the parser does not know is a
+warning, since a take ignores it silently. Two limits: a TOML syntax
+or type error stops the parse, so it is the one problem reported until
+it is fixed; and a take also refuses a worktree root holding a
+character a shell would split on, which depends on the machine the
+runner is on, so `check` leaves it to the take. Every block
 in this guide is parsed and validated by a test
 (`every_block_in_the_pipeline_guide_is_a_pipeline_the_parser_knows`
 in `dispatch/src/pipeline.rs`), which also refuses a key the parser

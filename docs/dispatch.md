@@ -922,6 +922,19 @@ may keep a copy to install from, as this one does at
 `pipelines/Switchboard.toml`; Dispatch reads only the data directory's). [Writing a pipeline file](dispatch-pipeline-guide.md)
 builds one up step by step, with what each key buys and costs.
 
+`dispatch check <project>` reads the project's `<project>.toml` and
+`<project>.pr.toml`, whichever exist, or `dispatch check <path>` one
+file, and applies every rule a take applies to the file alone: the
+parse, `validate`, the take-only rules, the project name it is stored
+under (for the project form), and that a `.pr.toml` name goes with a
+`pull-request` source and no other name does. It lists every problem
+rather than the first, though a TOML syntax or type error stops the
+parse and is the only one; it warns of keys the parser drops, which a
+take ignores. It exits 1 on any error and 0 otherwise, and writes
+nothing. A take's refusal of a worktree root a shell would split
+depends on the host and is left to the take. A supervisor may check
+its own project by name, never a path.
+
 ```toml
 version = 1
 
@@ -3400,6 +3413,15 @@ can carry its own question:
 | The gate answered with no note; a decision never asked | Both render empty, nothing is left as written; a gate with no `question` asks the default (`a_gate_answered_without_a_note_renders_empty_and_asks_the_default`) |
 | `dispatch restart <ticket> decisions` at the gate, then past it | The answered or pending decision is cancelled and the gate asks again from the live file; the next planner reads the newest note (`a_restart_at_the_gate_asks_again_and_the_plan_reads_the_new_note`) |
 | A supervisor answers the gate | Refused unless its `decides` names `decisions`, then answered (`a_supervisor_answers_the_gate_only_when_it_decides_it`) |
+
+`dispatch check` changes nothing and reports what a take would refuse:
+
+| Case | Expected |
+|---|---|
+| A file with an unknown policy operator, stored under another project's name, and a key the parser drops | Exit 1; both errors and the warning listed, `2 errors, 1 warning`; the data directory unchanged (`a_broken_file_lists_every_problem_and_exits_one_changing_nothing`) |
+| Two independent mistakes | Both reported; `parse` still reports the first (`check_reports_independent_mistakes_that_parse_stops_at_the_first_of`) |
+| A stage that fails, or a stage name repeated | Reported once; the stages after it are not blamed for what it writes (`a_failed_or_repeated_stage_is_reported_once_and_not_again_by_later_stages`) |
+| Every file in `pipelines/examples/` | No error and no warning (`every_example_in_pipelines_examples_checks_clean`) |
 
 Then, in order: `implement` with its command gate bound to a commit,
 tested with one lane committing after another lane's checks finished;

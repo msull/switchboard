@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
+use dispatch::check;
 use dispatch::epoch_ms;
 use dispatch::events::{self, Burst, Event, For, Kind, base_name, clock, short};
 use dispatch::git::{GitCli, yyyymmdd};
@@ -158,6 +159,7 @@ fn command(args: &[&str]) -> Result<()> {
         }
         ["decisions"] => decisions(),
         ["status"] => status(),
+        ["check", target] => check(target),
         ["queue", project, rest @ ..] => queue(project, rest),
         ["park", ticket] => park(ticket, None),
         ["park", ticket, "--reason", reason] => park(ticket, Some(reason)),
@@ -368,6 +370,22 @@ fn decisions() -> Result<()> {
     }
     if !any {
         say!("nothing waits on you");
+    }
+    Ok(())
+}
+
+/// `dispatch check <project|file>`: every problem of each file, and
+/// exit 1 when any has an error. It reads the files and writes nothing.
+fn check(arg: &str) -> Result<()> {
+    let targets = check::resolve(&DataDir::from_env()?, arg)?;
+    let mut failed = false;
+    for target in &targets {
+        let report = check::check_path(target);
+        failed |= !report.errors.is_empty();
+        say!("{}", check::render(&target.path, &report));
+    }
+    if failed {
+        std::process::exit(1);
     }
     Ok(())
 }

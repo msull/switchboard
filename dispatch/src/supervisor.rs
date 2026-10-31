@@ -492,6 +492,8 @@ pub const SUPERVISOR_VERBS: &[(&str, Rule)] = &[
     ("tail", Rule::Allowed),
     ("health", Rule::Allowed),
     ("brief", Rule::Allowed),
+    // A path is not a project, so a supervisor checks only its own file.
+    ("check", Rule::OwnProject),
     ("subscribe", Rule::OwnTicket),
     ("unsubscribe", Rule::OwnTicket),
     ("subscriptions", Rule::OwnProject),
@@ -1224,6 +1226,17 @@ mod tests {
         assert!(s.contains("You may not move the worktrees"), "{s}");
         assert!(s.find("## Restarts") < s.find("## Commands"));
         assert_ne!(seed_hash("orchard", &sup), seed_hash("orchard", &table()));
+    }
+
+    #[test]
+    fn a_supervisor_checks_its_own_project_and_no_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let sup = Actor::Supervisor("orchard".into());
+        permit(&sup, &["check", "orchard"], &data).unwrap();
+        assert!(permit(&sup, &["check", "pear"], &data).is_err());
+        assert!(permit(&sup, &["check", "/tmp/x.toml"], &data).is_err());
+        permit(&Actor::Owner, &["check", "/tmp/x.toml"], &data).unwrap();
     }
 
     #[test]
