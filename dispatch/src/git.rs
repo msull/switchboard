@@ -264,6 +264,10 @@ pub trait Repo: Send {
     /// command of ours; sends no signal. A gate-only command lost to a
     /// restart is waited for through this, never stopped.
     fn group_running(&self, key: &str, group: &CheckGroup) -> bool;
+    /// The process group `pid` leads, with its start time, so a later
+    /// `group_running` can tell the group from one that reused the id;
+    /// `None` when the process is gone or its start time unreadable.
+    fn group_of(&self, pid: u32) -> Option<CheckGroup>;
     /// The commits of `base..head` in `dir`, oldest first.
     fn commits(&self, dir: &Path, base: &str, head: &str) -> Result<Vec<Commit>>;
     /// The tree `rev` names in `dir`.
@@ -1280,6 +1284,13 @@ impl Repo for GitCli {
         leader_started(group.pgid).is_none_or(|s| s == group.leader_started)
     }
 
+    fn group_of(&self, pid: u32) -> Option<CheckGroup> {
+        Some(CheckGroup {
+            pgid: pid,
+            leader_started: leader_started(pid)?,
+        })
+    }
+
     fn commits(&self, dir: &Path, base: &str, head: &str) -> Result<Vec<Commit>> {
         let out = output(git_in(dir).args([
             "log",
@@ -1767,6 +1778,9 @@ pub struct FakeRepo {
     /// kills them and `check_gone` is false until a test removes them or
     /// `escalate_check` does.
     pub orphans: std::collections::BTreeSet<String>,
+    /// What `group_of` answers for a pid, as a test set it; absent, a
+    /// group led by the pid with a start time made from it.
+    pub groups_of: std::collections::BTreeMap<u32, Option<CheckGroup>>,
     /// Keys `adopt_check` answered `Killed` for, one entry per answer.
     pub adopted: Vec<String>,
     /// Orphan keys whose leader is gone: `adopt_check` kills them only
@@ -2379,6 +2393,15 @@ impl Repo for FakeRepo {
     fn group_running(&self, key: &str, _group: &CheckGroup) -> bool {
         self.orphans.contains(key)
     }
+    fn group_of(&self, pid: u32) -> Option<CheckGroup> {
+        if let Some(group) = self.groups_of.get(&pid) {
+            return group.clone();
+        }
+        Some(CheckGroup {
+            pgid: pid,
+            leader_started: format!("started {pid}"),
+        })
+    }
     fn rev_parse(&self, dir: &Path, _rev: &str) -> Result<String> {
         Ok(self
             .bases
@@ -2713,6 +2736,9 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     }
     fn group_running(&self, key: &str, group: &CheckGroup) -> bool {
         self.lock().unwrap().group_running(key, group)
+    }
+    fn group_of(&self, pid: u32) -> Option<CheckGroup> {
+        self.lock().unwrap().group_of(pid)
     }
     fn commits(&self, dir: &Path, base: &str, head: &str) -> Result<Vec<Commit>> {
         self.lock().unwrap().commits(dir, base, head)

@@ -1000,6 +1000,48 @@ frontend proxying to a backend served beside it, with
 than `localhost` in `serve.url`: Node 17 and later may resolve
 `localhost` to IPv6, which a server bound to IPv4 does not answer.
 
+A lane that runs more than one process (a web process and a worker)
+gives `serve` as a list of named processes:
+
+```toml fragment
+[[lanes]]
+name = "frontend"
+path = "orchard-frontend"
+repo = "git@bitbucket.org:example-co/orchard-frontend.git"
+base = "dev"
+setup = ["npm", "ci", "--legacy-peer-deps"]
+serve = [
+  { name = "web", argv = ["npm", "start"], env = { PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } },
+  { name = "worker", argv = ["npm", "run", "worker"] },
+]
+```
+
+Each process has a `name`, unique in the lane, an `argv` and an
+`env`, and optionally a `url` and a `ready`. The first must have a
+`url`: it is the address the tester is told. A later one without a
+probe counts as up once its session runs, and one with neither a `url`
+nor `{port}` in its `argv` or `env` gets no port. Each starts in its own service
+session, all after the lane's one `before`, and the lane is served
+once every process is up; the tester is told the URL only then. One
+process failing to start, or exiting while the lane is served, fails
+the whole lane: the others are stopped, and you are asked once
+whether to retry, which starts them all again with a new `before`.
+Any process's `env` may name another lane as above; the lane then
+starts after that one, every process of it is up before the lane
+naming it starts, and `{services.<lane>}` and `{ports.<lane>}` of a
+listed lane are its first process's. A lane naming one served again
+restarts all its processes.
+
+**Stopping a service** is immediate: Dispatch closes each process's
+pane, which hangs up the pane's process group. A plain background
+process ends with it. A process that ignores the hang-up, or leaves the
+group (`nohup`, `setsid`, a worker that daemonizes), is not ended by
+the stop; while its port is still taken or its pane's group still has
+a member, the stop is not done, the stage keeps its resource, and
+after two minutes you are asked `stuck`, with the `lsof` or
+`pgrep -g` line to find it by. A process that left its session and
+binds no port is not seen.
+
 **`services`** on a stage names lanes to serve while it runs. Each is
 started only if the ticket cut that lane; for one it did not,
 `{services.<lane>}` renders `not served (no <lane> lane)`. A stage

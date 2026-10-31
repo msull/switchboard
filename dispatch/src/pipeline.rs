@@ -4,6 +4,7 @@
 //! when it was made; the project's file only shapes tickets taken
 //! afterwards.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -262,8 +263,10 @@ pub struct Lane {
     /// Run once in a new worktree.
     #[serde(default)]
     pub setup: Vec<String>,
+    /// What a stage that serves this lane runs: one process (a table) or
+    /// a list of named ones.
     #[serde(default)]
-    pub serve: Option<Serve>,
+    pub serve: Option<ServeSpec>,
     /// Paths this lane's setup, gates, checks and command reviewers may
     /// write besides the ticket's trees, when `[policy] confine` is on:
     /// the caches its tools fill (`~/.cargo`, `~/.cache/uv`, `~/.npm`).
@@ -419,6 +422,127 @@ impl ServeRef {
             ServeRef::PortOf(l) => format!("{{ports.{l}}}"),
             ServeRef::Unknown(t) => t.clone(),
         }
+    }
+}
+
+/// A lane's `serve`: the single table, one process, or a list of named
+/// processes, each in its own service session. The list is ordered: the
+/// first process's `url` is the one the tester is given.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ServeSpec {
+    One(Serve),
+    Many(Vec<Process>),
+}
+
+/// One process of a lane's `serve` list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Process {
+    /// Unique in the lane; it names the process's session, record and
+    /// log directory. `None` only for the single table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Where the process answers, with `{port}` in it; a process with
+    /// no `url` and no `{port}` in its `argv` or `env` is given no port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The probe that says it is up; without one it is up once its
+    /// session runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready: Option<Ready>,
+}
+
+impl ServeSpec {
+    /// The lane's processes in order; the single table is one process
+    /// with no name.
+    #[must_use]
+    pub fn processes(&self) -> Cow<'_, [Process]> {
+        match self {
+            Self::One(s) => Cow::Owned(vec![Process {
+                name: None,
+                argv: s.argv.clone(),
+                env: s.env.clone(),
+                url: Some(s.url.clone()),
+                ready: Some(s.ready.clone()),
+            }]),
+            Self::Many(list) => Cow::Borrowed(list),
+        }
+    }
+
+    /// Every field the processes' `env` values name, process by
+    /// process.
+    #[must_use]
+    pub fn refs(&self) -> Vec<ServeRef> {
+        self.processes().iter().flat_map(Process::refs).collect()
+    }
+
+    /// The other lanes any process's `env` names, by URL or by port:
+    /// the lane starts after them all.
+    #[must_use]
+    pub fn named_lanes(&self) -> BTreeSet<String> {
+        self.processes()
+            .iter()
+            .flat_map(Process::named_lanes)
+            .collect()
+    }
+}
+
+impl Process {
+    /// The other lanes the `env` values name, by URL or by port.
+    #[must_use]
+    pub fn named_lanes(&self) -> BTreeSet<String> {
+        self.refs()
+            .into_iter()
+            .filter_map(|r| r.lane().map(str::to_owned))
+            .collect()
+    }
+
+    /// Every field the `env` values name, in key order.
+    #[must_use]
+    pub fn refs(&self) -> Vec<ServeRef> {
+        self.env.values().flat_map(|v| ServeRef::parse(v)).collect()
+    }
+
+    /// Whether it is given a port: it has an address, or its command
+    /// or environment names one.
+    #[must_use]
+    pub fn wants_port(&self) -> bool {
+        self.url.is_some()
+            || self.argv.iter().any(|a| a.contains("{port}"))
+            || self.env.values().any(|v| v.contains("{port}"))
+    }
+}
+
+/// A table or an array under one key. A visitor rather than an untagged
+/// derive, so a field missing from either shape is reported by name
+/// instead of as "did not match any variant".
+impl<'de> Deserialize<'de> for ServeSpec {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct Shape;
+        impl<'de> serde::de::Visitor<'de> for Shape {
+            type Value = ServeSpec;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a serve table or a list of named processes")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> std::result::Result<ServeSpec, A::Error> {
+                Serve::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(ServeSpec::One)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                seq: A,
+            ) -> std::result::Result<ServeSpec, A::Error> {
+                Vec::<Process>::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+                    .map(ServeSpec::Many)
+            }
+        }
+        d.deserialize_any(Shape)
     }
 }
 
@@ -1913,7 +2037,7 @@ impl Pipeline {
         let named = |lane: &String| -> BTreeSet<String> {
             self.lane(lane)
                 .and_then(|l| l.serve.as_ref())
-                .map(Serve::named_lanes)
+                .map(ServeSpec::named_lanes)
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|n| stage.services.contains(n))
@@ -1938,48 +2062,100 @@ impl Pipeline {
         Ok(order)
     }
 
-    /// A lane's `serve`: a command, a URL with the port in it, a probe
-    /// path, and an environment with nothing in it but literals, the
-    /// port, and another lane's URL or port. The environment travels on
-    /// the service's command line, which a record and the pane keep, so
-    /// no secret may be there.
+    /// A lane's `serve`: each process a command, a URL with the port in
+    /// it where it has one, a probe path, and an environment with
+    /// nothing in it but literals, the port, and another lane's URL or
+    /// port. The environment travels on the service's command line,
+    /// which a record and the pane keep, so no secret may be there. A
+    /// list's processes are named, once each, and the first has the URL
+    /// the tester is given.
+    /// The checks on a `serve` list: it names its processes, each one a
+    /// single path-safe segment, since the name reaches a log directory
+    /// and the `lane/process` label that keys ledger intents.
+    fn validate_list(l: &str, list: &[Process]) -> Result<()> {
+        if list.is_empty() {
+            bail!("lane {l}: serve is an empty list");
+        }
+        let mut seen = BTreeSet::new();
+        for (i, process) in list.iter().enumerate() {
+            let name = process.name.as_deref().unwrap_or_default();
+            if name.is_empty() {
+                bail!("lane {l}: serve process {} has no name", i + 1);
+            }
+            if !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                bail!("lane {l}: serve process {name:?} must use only letters, digits, - and _");
+            }
+            if !seen.insert(name) {
+                bail!("lane {l}: serve names process {name:?} twice");
+            }
+        }
+        if list[0].url.is_none() {
+            bail!(
+                "lane {l}: serve[{}] needs a url: the first process is the tester's address",
+                list[0].name.as_deref().unwrap_or_default()
+            );
+        }
+        Ok(())
+    }
+
     fn validate_serve(lane: &Lane) -> Result<()> {
         let Some(serve) = &lane.serve else {
             return Ok(());
         };
         let l = &lane.name;
-        if serve.argv.is_empty() {
-            bail!("lane {l}: serve.argv is empty");
+        if let ServeSpec::Many(list) = serve {
+            Self::validate_list(l, list)?;
         }
-        if !serve.url.contains("{port}") {
-            bail!("lane {l}: serve.url must contain {{port}}");
-        }
-        if !serve.ready.http.starts_with('/') {
-            bail!("lane {l}: serve.ready.http must start with /");
-        }
-        for (key, value) in &serve.env {
-            let upper = key.to_ascii_uppercase();
-            if ["TOKEN", "SECRET", "PASSWORD", "KEY", "CREDENTIAL"]
-                .iter()
-                .any(|word| upper.contains(word))
-            {
-                bail!(
-                    "lane {l}: serve.env {key} looks like a secret; service env travels on the command line, so secrets are not allowed there"
-                );
+        for process in serve.processes().iter() {
+            // `serve.url` for the single table, `serve[web].url` for a
+            // process of a list.
+            let at = match &process.name {
+                None => "serve".to_owned(),
+                Some(n) => format!("serve[{n}]"),
+            };
+            if process.argv.is_empty() {
+                bail!("lane {l}: {at}.argv is empty");
             }
-            for r in ServeRef::parse(value) {
-                match &r {
-                    ServeRef::Unknown(field) => bail!(
-                        "lane {l}: serve.env {key}: {field} is not a field; a value may name {{port}}, {{services.<lane>}} or {{ports.<lane>}}"
-                    ),
-                    ServeRef::Url(name) | ServeRef::PortOf(name) if name.is_empty() => {
-                        bail!("lane {l}: serve.env {key}: {} names no lane", r.token())
+            if let Some(url) = &process.url
+                && !url.contains("{port}")
+            {
+                bail!("lane {l}: {at}.url must contain {{port}}");
+            }
+            if let Some(ready) = &process.ready {
+                if process.url.is_none() {
+                    bail!("lane {l}: {at}.ready needs a url: it probes the url's port");
+                }
+                if !ready.http.starts_with('/') {
+                    bail!("lane {l}: {at}.ready.http must start with /");
+                }
+            }
+            for (key, value) in &process.env {
+                let upper = key.to_ascii_uppercase();
+                if ["TOKEN", "SECRET", "PASSWORD", "KEY", "CREDENTIAL"]
+                    .iter()
+                    .any(|word| upper.contains(word))
+                {
+                    bail!(
+                        "lane {l}: {at}.env {key} looks like a secret; service env travels on the command line, so secrets are not allowed there"
+                    );
+                }
+                for r in ServeRef::parse(value) {
+                    match &r {
+                        ServeRef::Unknown(field) => bail!(
+                            "lane {l}: {at}.env {key}: {field} is not a field; a value may name {{port}}, {{services.<lane>}} or {{ports.<lane>}}"
+                        ),
+                        ServeRef::Url(name) | ServeRef::PortOf(name) if name.is_empty() => {
+                            bail!("lane {l}: {at}.env {key}: {} names no lane", r.token())
+                        }
+                        ServeRef::Url(name) | ServeRef::PortOf(name) if name == l => bail!(
+                            "lane {l}: {at}.env {key}: {} names the lane itself; use {{port}}",
+                            r.token()
+                        ),
+                        ServeRef::Port | ServeRef::Url(_) | ServeRef::PortOf(_) => {}
                     }
-                    ServeRef::Url(name) | ServeRef::PortOf(name) if name == l => bail!(
-                        "lane {l}: serve.env {key}: {} names the lane itself; use {{port}}",
-                        r.token()
-                    ),
-                    ServeRef::Port | ServeRef::Url(_) | ServeRef::PortOf(_) => {}
                 }
             }
         }
@@ -3919,7 +4095,7 @@ ports = [3100, 3199]
             );
             checked += 1;
         }
-        assert_eq!(checked, 16, "toml blocks in the guide");
+        assert_eq!(checked, 17, "toml blocks in the guide");
     }
 
     /// The repository's own pipeline file is installed by copying it into
@@ -4469,6 +4645,135 @@ ports = [3100, 3199]
         );
     }
 
+    /// The back half with the frontend's `serve` replaced by `serve`.
+    fn frontend_serving(serve: &str) -> Result<Pipeline> {
+        let single = "serve = { argv = [\"npm\", \"start\"], env = { BROWSER = \"none\", PORT = \"{port}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }";
+        let text = DEPLOYING_BACK_HALF.replacen(single, &format!("serve = {serve}"), 1);
+        assert_ne!(text, DEPLOYING_BACK_HALF);
+        Pipeline::parse(&text)
+    }
+
+    const WEB: &str = "{ name = \"web\", argv = [\"npm\", \"start\"], env = { PORT = \"{port}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }";
+    const WORKER: &str = "{ name = \"worker\", argv = [\"npm\", \"run\", \"worker\"] }";
+
+    #[test]
+    fn a_serve_list_parses_in_order_and_round_trips() {
+        let p = frontend_serving(&format!("[{WEB}, {WORKER}]")).unwrap();
+        let serve = p.lane("frontend").unwrap().serve.clone().unwrap();
+        assert!(matches!(serve, ServeSpec::Many(_)));
+        let processes = serve.processes();
+        let names: Vec<_> = processes.iter().map(|x| x.name.as_deref()).collect();
+        assert_eq!(names, [Some("web"), Some("worker")]);
+        assert!(processes[0].wants_port() && !processes[1].wants_port());
+        assert_eq!(processes[1].url, None);
+        assert_eq!(processes[1].ready, None);
+        let value = toml::Value::try_from(&serve).unwrap();
+        assert!(value.is_array(), "{value:?}");
+        assert_eq!(ServeSpec::deserialize(value).unwrap(), serve);
+
+        // The single table is still one process with no name.
+        let admin = p.lane("admin").unwrap().serve.clone().unwrap();
+        assert!(matches!(admin, ServeSpec::One(_)));
+        let one = admin.processes();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].name, None);
+        assert_eq!(one[0].url.as_deref(), Some("http://localhost:{port}"));
+        assert!(one[0].ready.is_some());
+        let value = toml::Value::try_from(&admin).unwrap();
+        assert!(value.is_table(), "{value:?}");
+        assert_eq!(ServeSpec::deserialize(value).unwrap(), admin);
+    }
+
+    #[test]
+    fn a_serve_list_refuses_what_it_cannot_run_naming_the_process() {
+        let refused = |serve: String, expected: &str| {
+            let err = format!("{:#}", frontend_serving(&serve).unwrap_err());
+            assert!(err.contains(expected), "{serve}: {err}");
+        };
+        // A process of a list may name another lane; the lane starts
+        // after it, and a field it does not know is refused by process.
+        let p = frontend_serving(&format!(
+            "[{WEB}, {}]",
+            WORKER.replace(" }", ", env = { API = \"{services.admin}\" } }")
+        ))
+        .unwrap();
+        let try_ = p.stages.iter().find(|s| s.name == "try").unwrap();
+        assert_eq!(p.serve_order(try_).unwrap(), ["admin", "frontend"]);
+        refused(
+            format!(
+                "[{WEB}, {}]",
+                WORKER.replace(" }", ", env = { API = \"{who}\" } }")
+            ),
+            "lane frontend: serve[worker].env API: {who} is not a field",
+        );
+        refused("[]".into(), "lane frontend: serve is an empty list");
+        refused(
+            format!("[{WEB}, {WORKER}, {WORKER}]"),
+            "serve names process \"worker\" twice",
+        );
+        refused(
+            format!("[{WEB}, {}]", WORKER.replace("\"worker\"", "\"\"")),
+            "serve process 2 has no name",
+        );
+        refused(
+            format!("[{}, {WORKER}]", WEB.replace("name = \"web\", ", "")),
+            "serve process 1 has no name",
+        );
+        refused(
+            format!("[{WEB}, {}]", WORKER.replace("\"worker\"", "\"../x\"")),
+            "serve process \"../x\" must use only",
+        );
+        refused(
+            format!("[{WEB}, {}]", WORKER.replace("\"worker\"", "\"a/b\"")),
+            "serve process \"a/b\" must use only",
+        );
+        refused(
+            format!("[{WORKER}, {WEB}]"),
+            "lane frontend: serve[worker] needs a url",
+        );
+        refused(
+            format!(
+                "[{WEB}, {}]",
+                WORKER.replace(" }", ", ready = { http = \"/\", within_secs = 5 } }")
+            ),
+            "lane frontend: serve[worker].ready needs a url",
+        );
+        refused(
+            format!(
+                "[{}, {WORKER}]",
+                WEB.replace("localhost:{port}", "localhost:3000")
+            ),
+            "lane frontend: serve[web].url must contain {port}",
+        );
+        refused(
+            format!(
+                "[{WEB}, {}]",
+                WORKER.replace(" }", ", env = { API_TOKEN = \"x\" } }")
+            ),
+            "lane frontend: serve[worker].env API_TOKEN looks like a secret",
+        );
+        refused(
+            format!(
+                "[{WEB}, {}]",
+                WORKER.replace("[\"npm\", \"run\", \"worker\"]", "[]")
+            ),
+            "lane frontend: serve[worker].argv is empty",
+        );
+        // A missing field is named, not "did not match any variant".
+        refused(
+            format!(
+                "[{WEB}, {}]",
+                WORKER.replace(", argv = [\"npm\", \"run\", \"worker\"]", "")
+            ),
+            "missing field `argv`",
+        );
+        refused(
+            "{ url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }"
+                .into(),
+            "missing field `argv`",
+        );
+    }
+
     #[test]
     fn serve_env_refuses_a_secret_looking_key() {
         for key in [
@@ -4498,7 +4803,7 @@ ports = [3100, 3199]
         let p = Pipeline::parse(&text).unwrap();
         let serve = p.lanes.iter().find_map(|l| l.serve.as_ref()).unwrap();
         assert_eq!(
-            serve.argv,
+            serve.processes()[0].argv,
             ["vite", "--port", "{port}", "--define", r#"{"a":1}"#]
         );
     }

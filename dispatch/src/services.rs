@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::Result;
 use switchboard_control::{self as wire, Body, Made, Reply};
 
-use crate::pipeline::{Pipeline, Serve, ServeRef, Stage};
+use crate::pipeline::{Pipeline, Process, ServeRef, ServeSpec, Stage};
 use crate::scheduler::{Ask, NO_SUCH_SESSION, Runner, SocketDown, confine_for, env_for};
 use crate::ticket::{
     Attempt, AttemptState, Decision, DecisionKind, DecisionState, Forgotten, GateRun, Hold,
@@ -281,8 +281,10 @@ impl Runner {
     /// starts once that one answers, and is restarted when that one is
     /// served again. A lane the ticket did not choose is not served, and
     /// one naming it fails. True once every served lane answers; until
-    /// then no agent of the stage launches. A lane that could not be served is stopped, then asked
-    /// about once (`retry` or `park`).
+    /// then no agent of the stage launches. A lane that could not be
+    /// served is stopped, then asked about once (`retry` or `park`). A
+    /// lane's processes come up together and go together: one `before`,
+    /// then every launch, and one process failing stops the others.
     pub(crate) fn ensure_services(
         &mut self,
         t: &mut Ticket,
@@ -308,110 +310,261 @@ impl Runner {
             else {
                 continue;
             };
-            let Some(serve) = p.lane(lane).and_then(|l| l.serve.clone()) else {
+            let Some(spec) = p.lane(lane).and_then(|l| l.serve.clone()) else {
                 continue;
             };
-            let i = self.service_record(t, p, &stage.name, lane, now_ms)?;
-            self.mark_stale_pointer(t, i, now_ms)?;
+            let mut records = Vec::new();
+            for process in spec.processes().iter() {
+                records.push(self.service_record(
+                    t,
+                    p,
+                    &stage.name,
+                    lane,
+                    process.name.as_deref(),
+                    now_ms,
+                )?);
+            }
+            self.mark_stale_pointer(t, p, &records, now_ms)?;
             // Marked by a send-back: stopped before it counts, since a
             // record being stopped still reads `Ready` until the stop is
             // confirmed, and an agent must not start against it. Once
-            // `Stopped`, the next pass makes a fresh record.
-            if t.services[i].stopping_ms.is_some()
-                && matches!(
-                    t.services[i].state,
-                    ServiceState::Before | ServiceState::Starting | ServiceState::Ready
-                )
-            {
+            // `Stopped`, the next pass makes a fresh record; the lane's
+            // other records wait until none is left to stop.
+            let marked: Vec<usize> = records
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    t.services[i].stopping_ms.is_some()
+                        && matches!(
+                            t.services[i].state,
+                            ServiceState::Before | ServiceState::Starting | ServiceState::Ready
+                        )
+                })
+                .collect();
+            if !marked.is_empty() {
                 ready = false;
-                self.stop_service(t, ps, i, now_ms)?;
+                for i in marked {
+                    self.stop_service(t, ps, i, now_ms)?;
+                    if !t.active() {
+                        return Ok(false);
+                    }
+                }
+                continue;
+            }
+            if !self.named_lanes_up(t, p, &stage.name, &spec, records[0], now_ms)? {
+                ready = false;
+                continue;
+            }
+            if !records.iter().any(|&i| is_failed(&t.services[i])) {
+                let cx = LaneCx {
+                    p,
+                    stage,
+                    record: &record,
+                };
+                let processes = spec.processes();
+                self.advance_lane(t, ps, &cx, processes.iter().zip(&records), now_ms)?;
+                if !t.active() {
+                    return Ok(false);
+                }
+            }
+            if records.iter().any(|&i| is_failed(&t.services[i])) {
+                ready = false;
+                failed.extend(self.fail_lane(t, ps, &records, now_ms)?);
                 if !t.active() {
                     return Ok(false);
                 }
                 continue;
             }
-            if t.services[i].state == ServiceState::Before {
-                if let Some((missing, lane)) = unserved_ref(t, &serve) {
-                    let reason = format!(
-                        "{} is not served (the ticket did not choose {lane})",
-                        missing.token()
-                    );
-                    self.fail_service(t, i, &reason, now_ms)?;
-                } else if !named_ready(t, &stage.name, &serve) {
-                    ready = false;
-                    continue;
-                }
-            }
-            match t.services[i].state.clone() {
-                ServiceState::Before => {
-                    self.service_before(t, ps, p, stage, &record, &serve, i, now_ms)?;
-                }
-                ServiceState::Starting => self.service_starting(t, ps, p, &serve, i, now_ms)?,
-                ServiceState::Ready | ServiceState::Failed { .. } | ServiceState::Stopped => {}
-            }
-            if !t.active() {
-                return Ok(false);
-            }
-            match t.services[i].state.clone() {
-                ServiceState::Ready => {}
-                // Asked about only once it is confirmed gone, so a
-                // `retry` never starts a second one beside it.
-                ServiceState::Failed { reason } => {
-                    ready = false;
-                    let end = ServiceState::Failed {
-                        reason: reason.clone(),
-                    };
-                    if self.stop_service_into(t, ps, i, end, now_ms)? {
-                        failed.push(format!("{lane}: {reason}"));
-                    }
-                }
-                _ => ready = false,
-            }
-            if !t.active() {
-                return Ok(false);
+            if records
+                .iter()
+                .any(|&i| t.services[i].state != ServiceState::Ready)
+            {
+                ready = false;
             }
         }
         if !failed.is_empty() {
-            self.ensure_decision(
-                t,
-                ps,
-                Ask {
-                    stage: &stage.name,
-                    name: SERVICE,
-                    kind: DecisionKind::Permission,
-                    question: format!(
-                        "{}: could not serve {}. Retry starts each again (its before, a new port), park stops the ticket.",
-                        stage.name,
-                        failed.join("; ")
-                    ),
-                    options: &["retry", "park"],
-                    recommendation: None,
-                    attempt: None,
-                },
-                now_ms,
-            )?;
+            self.ask_service(t, ps, &stage.name, &failed, now_ms)?;
         }
         Ok(ready)
     }
 
-    /// Record `i`, launched against an address that is gone, marked to
-    /// be stopped and started again the way a send-back marks it.
-    fn mark_stale_pointer(&mut self, t: &mut Ticket, i: usize, now_ms: u64) -> Result<()> {
-        let rec = &t.services[i];
-        if rec.stopping_ms.is_some()
-            || !matches!(rec.state, ServiceState::Starting | ServiceState::Ready)
-            || !stale_pointer(t, i)
-        {
+    /// The one `service` question of a stage: the lanes that could not
+    /// be served, with what to do about it.
+    fn ask_service(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        stage: &str,
+        failed: &[String],
+        now_ms: u64,
+    ) -> Result<()> {
+        self.ensure_decision(
+            t,
+            ps,
+            Ask {
+                stage,
+                name: SERVICE,
+                kind: DecisionKind::Permission,
+                question: format!(
+                    "{stage}: could not serve {}. Retry starts each again (its before, a new port), park stops the ticket.",
+                    failed.join("; ")
+                ),
+                options: &["retry", "park"],
+                recommendation: None,
+                attempt: None,
+            },
+            now_ms,
+        )?;
+        Ok(())
+    }
+
+    /// Whether the lanes a lane's `serve.env` names let it start: a lane
+    /// naming another waits for it, its `before` included, and one
+    /// naming a lane the ticket did not cut fails, since nothing will
+    /// ever serve that. True when the lane may go on: it is past
+    /// `Before`, or it was just failed here for an unserved name (the
+    /// caller then sees the failure and stops the lane).
+    fn named_lanes_up(
+        &mut self,
+        t: &mut Ticket,
+        p: &Pipeline,
+        stage: &str,
+        spec: &ServeSpec,
+        first: usize,
+        now_ms: u64,
+    ) -> Result<bool> {
+        if t.services[first].state != ServiceState::Before {
+            return Ok(true);
+        }
+        if let Some((missing, named)) = unserved_ref(t, spec) {
+            let reason = format!(
+                "{} is not served (the ticket did not choose {named})",
+                missing.token()
+            );
+            self.fail_service(t, first, &reason, now_ms)?;
+            return Ok(true);
+        }
+        Ok(named_ready(t, p, stage, spec))
+    }
+
+    /// Any of a lane's records launched against an address that is
+    /// gone marks every one of the lane's records (`Before` included) to
+    /// be stopped and started again the way a send-back marks them, since
+    /// a lane's processes come up together.
+    fn mark_stale_pointer(
+        &mut self,
+        t: &mut Ticket,
+        p: &Pipeline,
+        records: &[usize],
+        now_ms: u64,
+    ) -> Result<()> {
+        if !records.iter().any(|&i| stale_pointer(t, p, i)) {
             return Ok(());
         }
-        log::info!(
-            "ticket {} {} restarts {}: a lane it names was served again",
-            t.id,
-            rec.stage,
-            rec.lane
-        );
-        t.services[i].stopping_ms = Some(now_ms);
-        self.save_ticket(t, now_ms)
+        let mut marked = false;
+        for &i in records {
+            let rec = &mut t.services[i];
+            if rec.stopping_ms.is_none()
+                && matches!(
+                    rec.state,
+                    ServiceState::Before | ServiceState::Starting | ServiceState::Ready
+                )
+            {
+                log::info!(
+                    "ticket {} {} restarts {}: a lane it names was served again",
+                    t.id,
+                    rec.stage,
+                    rec.label()
+                );
+                rec.stopping_ms = Some(now_ms);
+                marked = true;
+            }
+        }
+        if marked {
+            self.save_ticket(t, now_ms)?;
+        }
+        Ok(())
+    }
+
+    /// Each of a lane's records one step further, in the lane's order:
+    /// the first runs the lane's `before`, the rest launch once it has.
+    fn advance_lane<'a>(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        cx: &LaneCx,
+        work: impl Iterator<Item = (&'a Process, &'a usize)>,
+        now_ms: u64,
+    ) -> Result<()> {
+        let mut first = None;
+        for (process, &i) in work {
+            let first = *first.get_or_insert(i);
+            match t.services[i].state.clone() {
+                ServiceState::Before if first == i => {
+                    self.service_before(t, ps, cx, process, i, now_ms)?;
+                }
+                // After the first process's `before`, so every process
+                // starts on what it set up.
+                ServiceState::Before => {
+                    if matches!(
+                        t.services[first].state,
+                        ServiceState::Starting | ServiceState::Ready
+                    ) {
+                        self.launch_service(t, ps, cx.p, process, i, now_ms)?;
+                    }
+                }
+                ServiceState::Starting => {
+                    self.service_starting(t, ps, cx.p, process, i, now_ms)?;
+                }
+                // Only a process of a list is read again once ready.
+                ServiceState::Ready if process.name.is_some() => {
+                    self.service_running(t, i, now_ms)?;
+                }
+                ServiceState::Ready | ServiceState::Failed { .. } | ServiceState::Stopped => {}
+            }
+            if !t.active() {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// A lane one of whose records failed: the others fail with it and
+    /// every record is stopped. The failures to ask about, once every
+    /// record is confirmed gone, so a `retry` never starts a second one
+    /// beside it; empty until then.
+    fn fail_lane(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        records: &[usize],
+        now_ms: u64,
+    ) -> Result<Vec<String>> {
+        let Some(&first) = records.iter().find(|&&i| is_failed(&t.services[i])) else {
+            return Ok(Vec::new());
+        };
+        let with = format!("stopped with {}", t.services[first].label());
+        for &i in records {
+            if !is_failed(&t.services[i]) {
+                self.fail_service(t, i, &with, now_ms)?;
+            }
+        }
+        let mut gone = true;
+        let mut reasons = Vec::new();
+        for &i in records {
+            let ServiceState::Failed { reason } = t.services[i].state.clone() else {
+                continue;
+            };
+            let end = ServiceState::Failed {
+                reason: reason.clone(),
+            };
+            gone &= self.stop_service_into(t, ps, i, end, now_ms)?;
+            if !t.active() {
+                return Ok(Vec::new());
+            }
+            reasons.push(format!("{}: {reason}", t.services[i].label()));
+        }
+        Ok(if gone { reasons } else { Vec::new() })
     }
 
     /// A `retry` answer to a `service` question: each failed service of
@@ -442,27 +595,30 @@ impl Runner {
         Ok(())
     }
 
-    /// The index of the stage's live record for `lane`, made in `Before`
-    /// when there is none.
+    /// The index of the stage's live record for `lane` and `process`
+    /// (`None` for the single table), made in `Before` when there is
+    /// none.
     fn service_record(
         &mut self,
         t: &mut Ticket,
         p: &Pipeline,
         stage: &str,
         lane: &str,
+        process: Option<&str>,
         now_ms: u64,
     ) -> Result<usize> {
+        let same = |s: &ServiceRecord| s.is_for(stage, lane, process);
         if let Some(i) = t
             .services
             .iter()
-            .rposition(|s| s.stage == stage && s.lane == lane && s.state != ServiceState::Stopped)
+            .rposition(|s| same(s) && s.state != ServiceState::Stopped)
         {
             return Ok(i);
         }
         let n = t
             .services
             .iter()
-            .filter(|s| s.stage == stage && s.lane == lane)
+            .filter(|s| same(s))
             .map(|s| s.n)
             .max()
             .unwrap_or(0)
@@ -488,25 +644,29 @@ impl Runner {
             stuck_on: None,
             released: None,
             pointed_at: BTreeMap::new(),
+            process: process.map(str::to_owned),
+            group: None,
         });
         self.save_ticket(t, now_ms)?;
         Ok(t.services.len() - 1)
     }
 
     /// The lane's `before`, started, watched, and once it exits 0 (or
-    /// with none) a free port and the launch.
-    #[allow(clippy::too_many_arguments)]
+    /// with none) the first process's launch.
     fn service_before(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
-        p: &Pipeline,
-        stage: &Stage,
-        lane: &LaneRecord,
-        serve: &Serve,
+        cx: &LaneCx,
+        process: &Process,
         i: usize,
         now_ms: u64,
     ) -> Result<()> {
+        let LaneCx {
+            p,
+            stage,
+            record: lane,
+        } = *cx;
         if let Some(argv) = stage.before.get(&lane.name) {
             let key = before_key(t, &t.services[i]);
             let exit = match t.services[i].before.as_ref().map(|b| b.exit) {
@@ -551,27 +711,49 @@ impl Runner {
                 );
             }
         }
-        let Some(port) = self.free_port(t, p)? else {
-            let range = p
-                .policy
-                .ports
-                .map(|[lo, hi]| format!("{lo}-{hi}"))
-                .unwrap_or_default();
-            return self.fail_service(t, i, &format!("no free port in {range}"), now_ms);
+        self.launch_service(t, ps, p, process, i, now_ms)
+    }
+
+    /// A free port, when the process has an address or names `{port}`,
+    /// and the launch.
+    fn launch_service(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        process: &Process,
+        i: usize,
+        now_ms: u64,
+    ) -> Result<()> {
+        let port = if process.wants_port() {
+            let Some(port) = self.free_port(t, p)? else {
+                let range = p
+                    .policy
+                    .ports
+                    .map(|[lo, hi]| format!("{lo}-{hi}"))
+                    .unwrap_or_default();
+                return self.fail_service(t, i, &format!("no free port in {range}"), now_ms);
+            };
+            Some(port)
+        } else {
+            None
         };
         let rec = &mut t.services[i];
-        rec.port = Some(port);
-        rec.url = Some(serve.url.replace("{port}", &port.to_string()));
+        rec.port = port;
+        rec.url = port.and_then(|port| {
+            process
+                .url
+                .as_ref()
+                .map(|u| u.replace("{port}", &port.to_string()))
+        });
         rec.state = ServiceState::Starting;
         rec.started_ms = now_ms;
-        log::info!(
-            "ticket {} {} serves {} on port {port}",
-            t.id,
-            stage.name,
-            lane.name
-        );
+        let on = port
+            .map(|port| format!(" on port {port}"))
+            .unwrap_or_default();
+        log::info!("ticket {} {} serves {}{on}", t.id, rec.stage, rec.label());
         self.save_ticket(t, now_ms)?;
-        self.send_service(t, ps, p, serve, i, now_ms)
+        self.send_service(t, ps, p, process, i, now_ms)
     }
 
     /// The lane's `before` started as a child of the runner, its log in
@@ -588,13 +770,16 @@ impl Runner {
         now_ms: u64,
     ) -> Result<()> {
         let rec = &t.services[i];
-        let dir = self
+        let mut dir = self
             .data
             .ticket_dir(&t.id)
             .join(&rec.stage)
             .join("services")
-            .join(&rec.lane)
-            .join(rec.n.to_string());
+            .join(&rec.lane);
+        if let Some(process) = &rec.process {
+            dir.push(process);
+        }
+        dir.push(rec.n.to_string());
         std::fs::create_dir_all(&dir)?;
         let log = dir.join("before.log");
         let head = self.git.head(&lane.worktree)?;
@@ -652,7 +837,7 @@ impl Runner {
         t: &mut Ticket,
         ps: &mut ProjectState,
         p: &Pipeline,
-        serve: &Serve,
+        process: &Process,
         i: usize,
         now_ms: u64,
     ) -> Result<()> {
@@ -667,21 +852,22 @@ impl Runner {
         let port = rec.port.unwrap_or_default().to_string();
         // A named lane with a record on its way is waited for; the next
         // pass sends again. Only a lane with no live record fails below.
-        if serve.named_lanes().iter().any(|lane| {
-            latest_live(t, &rec.stage, lane).is_some_and(|s| s.state != ServiceState::Ready)
+        let named_lanes = process.named_lanes();
+        if named_lanes.iter().any(|lane| {
+            latest_live(t, p, &rec.stage, lane).is_some() && !lane_ready(t, p, &rec.stage, lane)
         }) {
             return Ok(());
         }
         let mut pointed_at = BTreeMap::new();
-        for lane in serve.named_lanes() {
-            if let Some(named) = latest_live(t, &rec.stage, &lane) {
+        for lane in named_lanes {
+            if let Some(named) = latest_live(t, p, &rec.stage, &lane) {
                 pointed_at.insert(lane, named.n);
             }
         }
         let mut env = Vec::new();
-        for (k, v) in &serve.env {
+        for (k, v) in &process.env {
             let value = render_env_value(v, &port, |r| {
-                let named = latest_live(t, &rec.stage, r.lane()?)?;
+                let named = latest_live(t, p, &rec.stage, r.lane()?)?;
                 match r {
                     ServeRef::PortOf(_) => named.port.map(|p| p.to_string()),
                     _ => named.url.clone(),
@@ -721,20 +907,24 @@ impl Runner {
             "env".to_owned(),
         ];
         argv.extend(env);
-        argv.extend(serve.argv.iter().map(|a| a.replace("{port}", &port)));
-        let url = rec.url.clone().unwrap_or_default();
+        argv.extend(process.argv.iter().map(|a| a.replace("{port}", &port)));
+        let label = rec.label();
+        let (name, on) = match (rec.port, &rec.url) {
+            (Some(p), Some(url)) => (format!("{label} :{p}"), format!(" on {url}")),
+            (Some(p), None) => (format!("{label} :{p}"), format!(" on port {p}")),
+            (None, _) => (label.clone(), String::new()),
+        };
         let body = Body::SessionNew {
             project,
-            name: format!("{} :{port}", rec.lane),
+            name,
             session_kind: wire::SessionKind::Service,
             cwd,
             launch: wire::Launch::Argv(argv),
             prompt: None,
             notes: format!(
-                "Dispatch ticket {} ({}) serves {} for {} on {url}",
+                "Dispatch ticket {} ({}) serves {label} for {}{on}",
                 t.id,
                 t.source.label(),
-                rec.lane,
                 rec.stage
             ),
             env: std::collections::BTreeMap::new(),
@@ -749,15 +939,17 @@ impl Runner {
     }
 
     /// A launched service: its launch settled, then the probe until it
-    /// answers. A session that is gone, or one that does not answer
-    /// within the lane's `ready.within_secs`, fails the record; the
-    /// failure stops it before anything is asked.
+    /// answers, or with no probe its session running. A session that is
+    /// gone, or one that does not answer within the probe's
+    /// `within_secs`, fails the record; the failure stops it before
+    /// anything is asked. The pane's process group is read once here,
+    /// for the stop to check.
     fn service_starting(
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
         p: &Pipeline,
-        serve: &Serve,
+        process: &Process,
         i: usize,
         now_ms: u64,
     ) -> Result<()> {
@@ -768,7 +960,7 @@ impl Runner {
             return match entry {
                 // Saved `Starting`, then stopped before the request was
                 // written: nothing went out, so it is sent now.
-                None => self.send_service(t, ps, p, serve, i, now_ms),
+                None => self.send_service(t, ps, p, process, i, now_ms),
                 // Recovery resolves it through `find`.
                 Some(o) if o.unresolved() => Ok(()),
                 Some(o) => {
@@ -788,26 +980,44 @@ impl Runner {
                 }
             };
         };
-        let port = rec.port.unwrap_or_default();
-        if self.git.answers_http(port, &serve.ready.http) {
+        let view = self.session_view(&session)?;
+        let running = matches!(&view, Ok(v) if v.liveness == wire::Liveness::Running);
+        let gone = session_gone(&view);
+        if running
+            && rec.group.is_none()
+            && let Some(pid) = view.as_ref().ok().and_then(|v| v.pid)
+            && let Some(group) = self.git.group_of(pid)
+        {
+            t.services[i].group = Some(group);
+            self.save_ticket(t, now_ms)?;
+        }
+        let up = match &process.ready {
+            Some(ready) => self
+                .git
+                .answers_http(rec.port.unwrap_or_default(), &ready.http),
+            None => running,
+        };
+        if up {
             t.services[i].state = ServiceState::Ready;
             t.services[i].ready_ms = Some(now_ms);
             log::info!(
-                "ticket {} {} ready at {}",
+                "ticket {} {} ready{}",
                 t.id,
-                rec.lane,
-                rec.url.as_deref().unwrap_or_default()
+                rec.label(),
+                rec.url
+                    .as_deref()
+                    .map(|u| format!(" at {u}"))
+                    .unwrap_or_default()
             );
             return self.save_ticket(t, now_ms);
         }
-        let gone = match self.session_view(&session)? {
-            Ok(view) => view.liveness != wire::Liveness::Running,
-            Err(reason) => reason == NO_SUCH_SESSION,
-        };
-        let within = serve.ready.within_secs;
         if gone {
-            self.fail_service(t, i, "the service exited", now_ms)
-        } else if now_ms > rec.started_ms.saturating_add(within.saturating_mul(1000)) {
+            return self.fail_service(t, i, "the service exited", now_ms);
+        }
+        let Some(within) = process.ready.as_ref().map(|r| r.within_secs) else {
+            return Ok(());
+        };
+        if now_ms > rec.started_ms.saturating_add(within.saturating_mul(1000)) {
             let url = rec.url.unwrap_or_default();
             self.fail_service(
                 t,
@@ -820,13 +1030,33 @@ impl Runner {
         }
     }
 
+    /// A served process of a `serve` list, read again each pass: one
+    /// whose session is no longer running fails the lane, and the owner
+    /// is asked, since what the agent is trying is now half gone. The
+    /// single table is not read again once ready; it reads as up until
+    /// its stop, as it did before lists, while a list's other processes
+    /// depend on each one staying up.
+    fn service_running(&mut self, t: &mut Ticket, i: usize, now_ms: u64) -> Result<()> {
+        let Some(session) = t.services[i].session.clone() else {
+            return Ok(());
+        };
+        if !session_gone(&self.session_view(&session)?) {
+            return Ok(());
+        }
+        let name = t.services[i]
+            .process
+            .clone()
+            .unwrap_or_else(|| t.services[i].lane.clone());
+        self.fail_service(t, i, &format!("{name} exited"), now_ms)
+    }
+
     fn fail_service(&mut self, t: &mut Ticket, i: usize, reason: &str, now_ms: u64) -> Result<()> {
         let rec = &mut t.services[i];
         log::warn!(
             "ticket {} {} service {} failed: {reason}",
             t.id,
             rec.stage,
-            rec.lane
+            rec.label()
         );
         rec.state = ServiceState::Failed {
             reason: reason.to_owned(),
@@ -888,7 +1118,12 @@ impl Runner {
             let rec = &mut t.services[i];
             let ended = rec.state != end;
             if ended {
-                log::info!("ticket {} {} service {} stopped", t.id, rec.stage, rec.lane);
+                log::info!(
+                    "ticket {} {} service {} stopped",
+                    t.id,
+                    rec.stage,
+                    rec.label()
+                );
                 rec.state = end;
             }
             if ended || withdrawn {
@@ -974,6 +1209,20 @@ impl Runner {
                 "port {port} is still taken (look with `lsof -i :{port}`)"
             )));
         }
+        // A process that ignored the pane's hang-up, or left with its
+        // group, holds no port to see it by; its group is how.
+        if let Some(group) = &rec.group
+            && rec
+                .session
+                .as_ref()
+                .is_some_and(|s| t.processes.contains(s))
+            && self.git.group_running(&rec.intent(), group)
+        {
+            let pgid = group.pgid;
+            return Ok(Some(format!(
+                "process group {pgid} still has members (look with `pgrep -g {pgid}`)"
+            )));
+        }
         Ok(None)
     }
 
@@ -1032,7 +1281,7 @@ impl Runner {
             "ticket {} {} service {} released by hand: {what}",
             t.id,
             rec.stage,
-            rec.lane
+            rec.label()
         );
         withdraw_stuck(t, &rec.stage, &stuck_key(&rec));
         let rec = &mut t.services[i];
@@ -1048,7 +1297,7 @@ impl Runner {
         let question = format!(
             "{} ({}): the service has not stopped after {}s: {alive}. Stop it by hand and answer released, or answer wait to give it longer. The hold on what the stage needs stays until then.",
             rec.stage,
-            rec.lane,
+            rec.label(),
             STOP_LIMIT_MS / 1000
         );
         t.services[i].stuck_on = Some(alive.to_owned());
@@ -1088,6 +1337,45 @@ fn undo_range(t: &mut Ticket, p: &Pipeline, resource: &str, now_ms: u64) -> Opti
     back
 }
 
+/// What `advance_lane` needs of the lane beyond its processes: the
+/// pipeline, the stage, and the ticket's record of the lane.
+struct LaneCx<'a> {
+    p: &'a Pipeline,
+    stage: &'a Stage,
+    record: &'a LaneRecord,
+}
+
+/// Whether a session read says the session is gone: not running, or no
+/// such session. Any other failed read is neither gone nor running; the
+/// next pass reads again.
+fn session_gone(view: &std::result::Result<wire::SessionView, String>) -> bool {
+    match view {
+        Ok(v) => v.liveness != wire::Liveness::Running,
+        Err(reason) => reason == NO_SUCH_SESSION,
+    }
+}
+
+fn is_failed(rec: &ServiceRecord) -> bool {
+    matches!(rec.state, ServiceState::Failed { .. })
+}
+
+/// The URL the tester is given for `lane` in `stage`: the first
+/// process's, once every process of the lane has a `Ready` record for
+/// the stage; `None` until then.
+#[must_use]
+pub(crate) fn lane_url(t: &Ticket, p: &Pipeline, stage: &str, lane: &str) -> Option<String> {
+    let processes = p.lane(lane)?.serve.as_ref()?.processes();
+    let ready: Vec<&ServiceRecord> = processes
+        .iter()
+        .map(|process| {
+            t.services.iter().rev().find(|x| {
+                x.is_for(stage, lane, process.name.as_deref()) && x.state == ServiceState::Ready
+            })
+        })
+        .collect::<Option<_>>()?;
+    ready.first()?.url.clone()
+}
+
 /// Whether the record's range (its stage to its `until`) holds stage
 /// index `stage`; past the last stage none does.
 fn in_range(p: &Pipeline, s: &ServiceRecord, stage: usize) -> bool {
@@ -1101,14 +1389,14 @@ fn in_range(p: &Pipeline, s: &ServiceRecord, stage: usize) -> bool {
 /// The key a service's `before` is polled under: the record's number in
 /// it, so a retry's record never reads an earlier one's exit.
 pub(crate) fn before_key(t: &Ticket, rec: &ServiceRecord) -> String {
-    format!("{}/{}/before:{}:{}", t.id, rec.stage, rec.lane, rec.n)
+    format!("{}/{}/before:{}:{}", t.id, rec.stage, rec.label(), rec.n)
 }
 
 /// What a `stuck` question carries as its "attempt": not an attempt of
 /// any stage (`held_in` finds none, so it holds nothing), but the
 /// record it is about.
 fn stuck_key(rec: &ServiceRecord) -> (String, u32) {
-    (format!("service:{}", rec.lane), rec.n)
+    (format!("service:{}", rec.label()), rec.n)
 }
 
 /// Whether `d` is the `stuck` question about `key` in `stage`: a
@@ -1186,39 +1474,66 @@ fn live_ports(t: &Ticket) -> impl Iterator<Item = u16> + '_ {
         .filter_map(|s| s.port)
 }
 
-/// The stage's record of `lane` that is not stopped, the latest.
-fn latest_live<'a>(t: &'a Ticket, stage: &str, lane: &str) -> Option<&'a ServiceRecord> {
+/// The stage's record of `lane` that is not stopped, the latest, of
+/// the lane's first process: the one whose URL and port another lane's
+/// `serve.env` names.
+fn latest_live<'a>(
+    t: &'a Ticket,
+    p: &Pipeline,
+    stage: &str,
+    lane: &str,
+) -> Option<&'a ServiceRecord> {
+    let first = p
+        .lane(lane)
+        .and_then(|l| l.serve.as_ref())
+        .and_then(|s| s.processes().first().and_then(|x| x.name.clone()));
     t.services
         .iter()
         .rev()
-        .find(|s| s.stage == stage && s.lane == lane && s.state != ServiceState::Stopped)
+        .find(|s| s.is_for(stage, lane, first.as_deref()) && s.state != ServiceState::Stopped)
+}
+
+/// Whether every process of `lane` has a live record that answers in
+/// `stage`.
+fn lane_ready(t: &Ticket, p: &Pipeline, stage: &str, lane: &str) -> bool {
+    let Some(spec) = p.lane(lane).and_then(|l| l.serve.as_ref()) else {
+        return false;
+    };
+    spec.processes().iter().all(|process| {
+        t.services
+            .iter()
+            .rev()
+            .find(|s| {
+                s.is_for(stage, lane, process.name.as_deref()) && s.state != ServiceState::Stopped
+            })
+            .is_some_and(|s| s.state == ServiceState::Ready)
+    })
 }
 
 /// Whether record `i` was launched against a record of a lane it names
 /// that is no longer that lane's live one. A lane that only failed keeps
 /// its number, so its dependent is restarted once a retry makes the next.
-fn stale_pointer(t: &Ticket, i: usize) -> bool {
+fn stale_pointer(t: &Ticket, p: &Pipeline, i: usize) -> bool {
     let rec = &t.services[i];
     rec.pointed_at
         .iter()
-        .any(|(lane, n)| latest_live(t, &rec.stage, lane).map(|s| s.n) != Some(*n))
+        .any(|(lane, n)| latest_live(t, p, &rec.stage, lane).map(|s| s.n) != Some(*n))
 }
 
-/// The first field of `serve.env` naming a lane the ticket did not
-/// choose, so nothing will ever serve it, with the lane's name.
-fn unserved_ref(t: &Ticket, serve: &Serve) -> Option<(ServeRef, String)> {
-    serve.refs().into_iter().find_map(|r| {
+/// The first field of a process's `env` naming a lane the ticket did
+/// not choose, so nothing will ever serve it, with the lane's name.
+fn unserved_ref(t: &Ticket, spec: &ServeSpec) -> Option<(ServeRef, String)> {
+    spec.refs().into_iter().find_map(|r| {
         let lane = r.lane()?.to_owned();
         (!t.lanes.iter().any(|l| l.name == lane && l.chosen)).then_some((r, lane))
     })
 }
 
-/// Whether every lane `serve.env` names answers in `stage`.
-fn named_ready(t: &Ticket, stage: &str, serve: &Serve) -> bool {
-    serve
-        .named_lanes()
+/// Whether every lane the processes' `env` names answers in `stage`.
+fn named_ready(t: &Ticket, p: &Pipeline, stage: &str, spec: &ServeSpec) -> bool {
+    spec.named_lanes()
         .iter()
-        .all(|lane| latest_live(t, stage, lane).is_some_and(|s| s.state == ServiceState::Ready))
+        .all(|lane| lane_ready(t, p, stage, lane))
 }
 
 /// `value` with `{port}` filled from `port` and each other field from

@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 29;
+pub const RECORD_VERSION: u32 = 30;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -615,6 +615,12 @@ pub fn migrate(mut value: Value) -> Value {
         // serde default. Nothing is transformed. A build that would drop
         // it must refuse the record, or a restart would not notice that a
         // service was launched against a lane's address that is gone.
+        //
+        // 29 to 30: a service record gains `process` and `group`, absent
+        // from their serde defaults. Nothing is transformed. A build that
+        // would drop them must refuse the record, or a restart would
+        // forget which process of a lane's `serve` list a record runs,
+        // and the process group its stop must find empty.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -1773,6 +1779,8 @@ mod tests {
             stuck_on: None,
             released: None,
             pointed_at: std::collections::BTreeMap::new(),
+            process: None,
+            group: None,
         });
         write_ticket(&path, &t).unwrap();
         let written: Value = read_json(&path).unwrap();
@@ -1780,6 +1788,36 @@ mod tests {
         assert_eq!(written["holds"][0]["resource"], "my-dev");
         assert_eq!(written["services"][0]["service_state"], "failed");
         assert_eq!(read_ticket(&path).unwrap(), t);
+    }
+
+    #[test]
+    fn a_version_twenty_nine_service_reads_as_the_single_table_with_no_group() {
+        let mut value: Value = serde_json::from_str(TICKET_V0).unwrap();
+        value["version"] = 29.into();
+        value["services"] = serde_json::json!([{
+            "lane": "frontend",
+            "n": 1,
+            "stage": "try",
+            "until": "tried",
+            "port": 3100,
+            "url": "http://localhost:3100",
+            "session": "s-9",
+            "service_state": "ready",
+            "started_ms": 3000
+        }]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, value.to_string()).unwrap();
+        let t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        let rec = &t.services[0];
+        assert_eq!((rec.process.as_deref(), rec.group.as_ref()), (None, None));
+        assert_eq!(rec.label(), "frontend");
+        assert_eq!(
+            rec.intent(),
+            "service:try:frontend:1",
+            "its ledger entry still matches"
+        );
     }
 
     #[test]

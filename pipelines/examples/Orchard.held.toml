@@ -44,7 +44,14 @@ path = "orchard-frontend"
 repo = "git@bitbucket.org:example-co/orchard-frontend.git"
 base = "dev"
 setup = ["npm", "ci", "--legacy-peer-deps"]
-serve = { argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } }
+# A list of named processes, each its own service session after the one
+# before: the first's url is the tester's. The worker stands in for
+# whatever runs beside the web process; put the real one in its place.
+# With no url, no {port} and no ready, it is up once its session runs.
+serve = [
+  { name = "web", argv = ["npm", "start"], env = { BROWSER = "none", PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } },
+  { name = "worker", argv = ["npm", "run", "watch-assets"] },
+]
 
 [[resources]]
 name = "my-dev"

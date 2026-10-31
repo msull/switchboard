@@ -1788,6 +1788,22 @@ fn the_session_view_carries_last_seen_whether_running_or_not() {
     assert_eq!(view.last_seen_ms, Some(ms(Clock::at(7_000).wall)));
 }
 
+/// The pane's pid leads its process group, which Dispatch checks is
+/// empty before it calls a service stopped; only a running pane has one.
+#[test]
+fn the_session_view_carries_the_pid_of_a_running_pane_only() {
+    let p = project("p");
+    let mut w = Workspace::new(p.clone());
+    let live = record(p.id, SessionKind::Service, 0);
+    let ended = record(p.id, SessionKind::Service, 1);
+    let (live_id, ended_id) = (live.id, ended.id);
+    w.sessions.extend([live, ended]);
+    let (core, _) = loaded(vec![w], vec![running(live_id)]);
+    let now = Clock::at(9_000).wall;
+    assert_eq!(core.session_view(live_id, now).unwrap().pid, Some(42));
+    assert_eq!(core.session_view(ended_id, now).unwrap().pid, None);
+}
+
 #[test]
 fn the_session_view_says_what_the_stop_listed_and_until_when_it_holds() {
     let (mut core, _, ids) = with_records(&[agent()], |s| Some(running(s.id)));

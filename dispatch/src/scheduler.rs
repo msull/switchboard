@@ -12046,11 +12046,8 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
     }
     if let Some(stage) = p.stages.get(t.stage) {
         for lane in &stage.services {
-            let ready = t.services.iter().rev().find(|x| {
-                x.stage == stage.name && &x.lane == lane && x.state == ServiceState::Ready
-            });
             let chosen = t.lanes.iter().any(|l| &l.name == lane && l.chosen);
-            if let Some(url) = ready.and_then(|x| x.url.clone()) {
+            if let Some(url) = crate::services::lane_url(t, p, &stage.name, lane) {
                 vars.set(format!("services.{lane}"), url);
             } else if !chosen {
                 vars.set(
@@ -12394,13 +12391,7 @@ fn deployed_and_served(t: &Ticket, p: &Pipeline) -> String {
         t.services
             .iter()
             .filter(|x| x.state == ServiceState::Ready)
-            .map(|x| {
-                format!(
-                    "Served: {} {}",
-                    x.lane,
-                    x.url.as_deref().unwrap_or_default()
-                )
-            }),
+            .filter_map(|x| Some(format!("Served: {} {}", x.label(), x.url.as_deref()?))),
     );
     if lines.is_empty() {
         return String::new();

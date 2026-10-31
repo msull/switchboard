@@ -1,0 +1,47 @@
+== plain
+pane_pid=55493
+sleepers before (pid pgid ppid):
+55493 55493 55489 Ss+  sleep 702
+55502 55493 55493 S+   sleep 701
+pane_dead=
+sleepers after:
+(none)
+== trap-hup
+pane_pid=55683
+sleepers before (pid pgid ppid):
+55683 55683 55679 Ss+  sleep 704
+55692 55683 55683 S+   sleep 703
+pane_dead=
+sleepers after:
+55683 55683 55679 Ss+  sleep 704
+55692 55683 55683 S+   sleep 703
+== nohup
+pane_pid=55777
+sleepers before (pid pgid ppid):
+55777 55777 55773 Ss+  sleep 706
+55786 55777 55777 S+   sleep 705
+pane_dead=
+sleepers after:
+55786 55777     1 S    sleep 705
+== setsid
+pane_pid=55849
+sleepers before (pid pgid ppid):
+55877 55877 55849 Ss   sleep 707
+55849 55849 55841 Ss+  sleep 708
+pane_dead=
+sleepers after:
+55877 55877     1 Ss   sleep 707
+== web-exits-first
+pane_pid=55957
+sleepers before (pid pgid ppid):
+55966 55957 55957 S+   sleep 709
+pane_dead=1
+sleepers after:
+(none)
+== web-exits-then-kill
+pane_pid=56090
+sleepers before (pid pgid ppid):
+56099 56090 56090 S+   sleep 710
+pane_dead=
+sleepers after:
+(none)

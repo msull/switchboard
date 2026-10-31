@@ -257,6 +257,7 @@ impl FakeSwitchboard {
             wakeup_at_ms: None,
             held_until_ms: None,
             transcript,
+            pid: Some(5000 + u32::try_from(self.sessions.len()).unwrap()),
         });
         self.resumable.push(id.clone());
         id

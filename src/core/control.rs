@@ -808,6 +808,10 @@ impl AppCore {
                 .as_ref()
                 .and_then(super::ResumeHandle::transcript)
                 .cloned(),
+            pid: match status.map(|h| &h.liveness) {
+                Some(Liveness::Running { pid, .. }) => Some(*pid),
+                _ => None,
+            },
         })
     }
 

@@ -20974,6 +20974,13 @@ fn services_of<'a>(t: &'a Ticket, lane: &str) -> Vec<&'a dispatch::ticket::Servi
 /// The back half with the backend served beside the frontend at `try`,
 /// and the frontend's `PROXY` naming the backend's URL.
 fn pointed_env(labels: &[&str]) -> (Env, String) {
+    pointed_env_serving(labels, BACKEND_SERVE)
+}
+
+const BACKEND_SERVE: &str = "serve = { argv = [\"uv\", \"run\", \"serve\"], env = { PORT = \"{port}\" }, url = \"http://127.0.0.1:{port}\", ready = { http = \"/\", within_secs = 120 } }";
+
+/// `pointed_env` with the backend's `serve` given as `serve`.
+fn pointed_env_serving(labels: &[&str], serve: &str) -> (Env, String) {
     let mut env = Env::new();
     let text = BACK_HALF
         .replace("{worktrees}", &env.worktrees.display().to_string())
@@ -20983,7 +20990,7 @@ fn pointed_env(labels: &[&str]) -> (Env, String) {
         )
         .replace(
             "setup = [\"uv\", \"sync\"]",
-            "setup = [\"uv\", \"sync\"]\nserve = { argv = [\"uv\", \"run\", \"serve\"], env = { PORT = \"{port}\" }, url = \"http://127.0.0.1:{port}\", ready = { http = \"/\", within_secs = 120 } }",
+            &format!("setup = [\"uv\", \"sync\"]\n{serve}"),
         )
         .replace(
             "services = [\"frontend\"]",
@@ -21003,7 +21010,7 @@ fn launch_argvs(env: &Env, lane: &str) -> Vec<Vec<String>> {
                 name,
                 launch: switchboard_control::Launch::Argv(argv),
                 ..
-            } if name.starts_with(&format!("{lane} :")) => Some(argv),
+            } if name == lane || name.starts_with(&format!("{lane} :")) => Some(argv),
             _ => None,
         })
         .collect()
@@ -21107,6 +21114,94 @@ fn a_lane_served_again_restarts_the_lane_naming_it() {
     let argvs = launch_argvs(&env, "frontend");
     assert_eq!(argvs.len(), 2);
     assert!(argvs[1].contains(&format!("PROXY={url}")), "{:?}", argvs[1]);
+}
+
+/// The backend served as a list: `web` at an address, then `worker`.
+const BACKEND_LIST: &str = "serve = [ { name = \"web\", argv = [\"uv\", \"run\", \"serve\"], env = { PORT = \"{port}\" }, url = \"http://127.0.0.1:{port}\", ready = { http = \"/\", within_secs = 120 } }, { name = \"worker\", argv = [\"uv\", \"run\", \"worker\"] } ]";
+
+/// The backend's record of `process`, number `n`.
+fn backend_process(t: &Ticket, process: &str, n: u32) -> dispatch::ticket::ServiceRecord {
+    t.services
+        .iter()
+        .find(|s| s.lane == "backend" && s.process.as_deref() == Some(process) && s.n == n)
+        .unwrap_or_else(|| panic!("no backend/{process} record {n}: {t:#?}"))
+        .clone()
+}
+
+#[test]
+fn a_lane_naming_a_listed_lane_waits_for_every_process_and_restarts_with_them() {
+    let (mut env, id) = pointed_env_serving(BOTH, BACKEND_LIST);
+    deployed(&mut env, &id);
+    env.steps_until(&id, "both backend processes launched", |t, _| {
+        services_of(t, "backend")
+            .iter()
+            .filter(|s| s.session.is_some())
+            .count()
+            == 2
+    });
+    // The worker is up (no probe) while the web process has not
+    // answered: the lane is not ready, so the frontend still waits.
+    for _ in 0..3 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert_eq!(backend_process(&t, "worker", 1).state, ServiceState::Ready);
+    assert_eq!(backend_process(&t, "web", 1).state, ServiceState::Starting);
+    assert_eq!(services_of(&t, "frontend")[0].state, ServiceState::Before);
+    assert_eq!(started(&env, &before_key(&id, 1)), 0);
+    // Once web answers, the frontend goes on and is given web's URL: the
+    // first process's.
+    let web = backend_process(&t, "web", 1);
+    env.repo.lock().unwrap().answering.insert(web.port.unwrap());
+    frontend_ready(&mut env, &id, 1);
+    let argvs = launch_argvs(&env, "frontend");
+    assert_eq!(argvs.len(), 1);
+    assert!(
+        argvs[0].contains(&format!("PROXY={}", web.url.clone().unwrap())),
+        "{:?}",
+        argvs[0]
+    );
+    assert_eq!(
+        services_of(&env.ticket(&id), "frontend")[0].pointed_at,
+        [("backend".to_owned(), 1)].into()
+    );
+    // The backend is served again, as a send-back marks every record of
+    // it: the frontend is stale against the new web record and restarts
+    // once both new processes are up.
+    let mut t = env.ticket(&id);
+    for s in t.services.iter_mut().filter(|s| s.lane == "backend") {
+        s.stopping_ms = Some(env.now);
+    }
+    env.runner.save_ticket(&mut t, env.now).unwrap();
+    env.steps_until(&id, "the frontend stopped and a second backend", |t, _| {
+        services_of(t, "frontend")[0].state == ServiceState::Stopped
+            && services_of(t, "backend")
+                .iter()
+                .filter(|s| s.n == 2 && s.session.is_some())
+                .count()
+                == 2
+    });
+    let t = env.ticket(&id);
+    assert_eq!(backend_process(&t, "web", 1).state, ServiceState::Stopped);
+    assert_eq!(
+        backend_process(&t, "worker", 1).state,
+        ServiceState::Stopped
+    );
+    let web = backend_process(&t, "web", 2);
+    env.repo.lock().unwrap().answering.insert(web.port.unwrap());
+    frontend_ready(&mut env, &id, 2);
+    let t = env.ticket(&id);
+    assert_eq!(
+        services_of(&t, "frontend")[1].pointed_at,
+        [("backend".to_owned(), 2)].into()
+    );
+    let argvs = launch_argvs(&env, "frontend");
+    assert_eq!(argvs.len(), 2);
+    assert!(
+        argvs[1].contains(&format!("PROXY={}", web.url.unwrap())),
+        "{:?}",
+        argvs[1]
+    );
 }
 
 #[test]
@@ -24941,4 +25036,274 @@ fn ready_looks_for_the_pull_request_by_the_templated_name() {
         Some(7),
         "found by {branch}"
     );
+}
+
+const SINGLE_SERVE: &str = "serve = { argv = [\"npm\", \"start\", \"--\", \"--port\", \"{port}\"], env = { BROWSER = \"none\", PORT = \"{port}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }";
+
+/// The frontend served as a list: `web` with an address and a probe,
+/// then `worker` with neither.
+const LISTED_SERVE: &str = "serve = [ { name = \"web\", argv = [\"npm\", \"start\", \"--\", \"--port\", \"{port}\"], env = { BROWSER = \"none\", PORT = \"{port}\" }, url = \"http://localhost:{port}\", ready = { http = \"/\", within_secs = 120 } }, { name = \"worker\", argv = [\"npm\", \"run\", \"worker\"] } ]";
+
+fn listed_env() -> (Env, String) {
+    let mut env = Env::new();
+    let text = BACK_HALF
+        .replace("{worktrees}", &env.worktrees.display().to_string())
+        .replace(SINGLE_SERVE, LISTED_SERVE);
+    assert!(text.contains(LISTED_SERVE));
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, BOTH);
+    (env, id)
+}
+
+fn web_before(id: &str, n: u32) -> String {
+    format!("{id}/try/before:frontend/web:{n}")
+}
+
+fn record<'a>(t: &'a Ticket, process: &str, n: u32) -> &'a dispatch::ticket::ServiceRecord {
+    t.services
+        .iter()
+        .find(|s| s.process.as_deref() == Some(process) && s.n == n)
+        .unwrap_or_else(|| panic!("no {process} record {n}: {t:#?}"))
+}
+
+/// The lane's `before` exits 0 and both processes launch.
+fn listed_launched(env: &mut Env, id: &str, n: u32) {
+    let key = web_before(id, n);
+    for _ in 0..6 {
+        if started(env, &key) > 0 {
+            break;
+        }
+        env.step();
+    }
+    exits(env, &key, 0);
+    env.steps_until(id, "both launched", |t, _| {
+        t.services
+            .iter()
+            .filter(|s| s.n == n && s.session.is_some())
+            .count()
+            == 2
+    });
+}
+
+/// Both processes up and the tester started.
+fn listed_served(env: &mut Env, id: &str) {
+    deployed(env, id);
+    listed_launched(env, id, 1);
+    env.repo.lock().unwrap().answering.insert(3100);
+    env.steps_until(id, "the tester", |t, _| {
+        t.attempts_of("try").next().is_some()
+    });
+}
+
+#[test]
+fn a_serve_list_runs_one_before_then_each_process_and_the_tester_gets_the_first_url() {
+    let (mut env, id) = listed_env();
+    deployed(&mut env, &id);
+    for _ in 0..2 {
+        env.step();
+    }
+    assert_eq!(started(&env, &web_before(&id, 1)), 1);
+    assert!(service_launches(&env).is_empty(), "before runs first");
+    let t = env.ticket(&id);
+    assert_eq!(record(&t, "worker", 1).state, ServiceState::Before);
+    let log = &record(&t, "web", 1).before.as_ref().unwrap().log;
+    assert!(
+        log.ends_with("try/services/frontend/web/1/before.log"),
+        "{log:?}"
+    );
+    exits(&env, &web_before(&id, 1), 0);
+    env.step();
+    let launches = service_launches(&env);
+    assert_eq!(launches.len(), 2, "both after the one before");
+    let names: Vec<_> = launches
+        .iter()
+        .map(|r| match &r.body {
+            Body::SessionNew { name, launch, .. } => (name.clone(), launch.clone()),
+            _ => unreachable!(),
+        })
+        .collect();
+    assert_eq!(names[0].0, "frontend/web :3100");
+    assert_eq!(names[1].0, "frontend/worker");
+    let switchboard_control::Launch::Argv(worker) = &names[1].1 else {
+        panic!("{:?}", names[1].1)
+    };
+    assert_eq!(worker[4..], ["env", "npm", "run", "worker"]);
+    for _ in 0..3 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert!(
+        env.sb().sessions_named("tester").is_empty(),
+        "web has not answered"
+    );
+    // No probe: up once its session runs, with no port, and its group read.
+    let worker = record(&t, "worker", 1);
+    assert_eq!(worker.state, ServiceState::Ready);
+    assert_eq!((worker.port, worker.url.as_deref()), (None, None));
+    assert!(worker.group.is_some(), "{worker:#?}");
+    assert_ne!(
+        worker.intent(),
+        record(&t, "web", 1).intent(),
+        "each process has its own launch"
+    );
+    assert_eq!(record(&t, "web", 1).state, ServiceState::Starting);
+    env.repo.lock().unwrap().answering.insert(3100);
+    env.steps_until(&id, "the tester", |t, _| {
+        t.attempts_of("try").next().is_some()
+    });
+    let prompt = last_prompt_of(&env, "tester");
+    assert!(
+        prompt.contains("the frontend is at http://localhost:3100."),
+        "{prompt}"
+    );
+    tester_done(&mut env, &id);
+    env.steps_until(&id, "the tried question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "tried")
+    });
+    let q = pending_named(&env, &id, "tried").unwrap().question;
+    assert!(
+        q.contains("Served: frontend/web http://localhost:3100"),
+        "{q}"
+    );
+    assert!(!q.contains("frontend/worker"), "{q}");
+}
+
+#[test]
+fn a_process_failing_fails_its_lane_and_retry_brings_every_process_back() {
+    let (mut env, id) = listed_env();
+    deployed(&mut env, &id);
+    listed_launched(&mut env, &id, 1);
+    let web = record(&env.ticket(&id), "web", 1).session.clone().unwrap();
+    let worker = record(&env.ticket(&id), "worker", 1)
+        .session
+        .clone()
+        .unwrap();
+    env.sb().vanish(&web);
+    env.steps_until(&id, "the service question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "service")
+    });
+    let asked = |t: &Ticket| {
+        t.decisions
+            .iter()
+            .filter(|d| d.name == "service" && d.pending())
+            .count()
+    };
+    assert_eq!(asked(&env.ticket(&id)), 1, "one question for the lane");
+    let q = pending_named(&env, &id, "service").unwrap().question;
+    assert!(q.contains("frontend/web: the service exited"), "{q}");
+    assert!(
+        q.contains("frontend/worker: stopped with frontend/web"),
+        "{q}"
+    );
+    assert!(env.sb().killed.contains(&worker), "the worker is stopped");
+    assert!(env.sb().sessions_named("tester").is_empty());
+    answer_named(&mut env, &id, "service", "retry");
+    for _ in 0..3 {
+        env.step();
+    }
+    assert_eq!(started(&env, &web_before(&id, 2)), 1, "a fresh before");
+    listed_launched(&mut env, &id, 2);
+    env.steps_until(&id, "the worker up again", |t, _| {
+        record(t, "worker", 2).state == ServiceState::Ready
+    });
+    let t = env.ticket(&id);
+    assert_eq!(record(&t, "web", 1).state, ServiceState::Stopped);
+    assert_eq!(record(&t, "worker", 1).state, ServiceState::Stopped);
+    assert_eq!(record(&t, "worker", 2).state, ServiceState::Ready);
+    assert_eq!(service_launches(&env).len(), 4);
+}
+
+#[test]
+fn a_listed_process_exiting_once_served_fails_the_lane_but_the_single_table_reads_on() {
+    let (mut env, id) = listed_env();
+    listed_served(&mut env, &id);
+    let worker = record(&env.ticket(&id), "worker", 1)
+        .session
+        .clone()
+        .unwrap();
+    env.sb().vanish(&worker);
+    env.steps_until(&id, "the service question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "service")
+    });
+    let q = pending_named(&env, &id, "service").unwrap().question;
+    assert!(q.contains("frontend/worker: worker exited"), "{q}");
+    assert!(
+        q.contains("frontend/web: stopped with frontend/worker"),
+        "{q}"
+    );
+
+    let (mut env, id) = back_half_env(BOTH);
+    deployed(&mut env, &id);
+    served(&mut env, &id);
+    let session = env.ticket(&id).services[0].session.clone().unwrap();
+    env.sb().vanish(&session);
+    for _ in 0..4 {
+        env.step();
+    }
+    let t = env.ticket(&id);
+    assert_eq!(t.services[0].state, ServiceState::Ready);
+    assert!(pending_named(&env, &id, "service").is_none());
+}
+
+#[test]
+fn a_stop_waits_on_a_process_group_left_running_and_asks_stuck() {
+    let (mut env, id) = listed_env();
+    listed_served(&mut env, &id);
+    tester_done(&mut env, &id);
+    let intent = record(&env.ticket(&id), "worker", 1).intent();
+    env.repo.lock().unwrap().orphans.insert(intent);
+    tried(&mut env, &id, "done");
+    at_stage(&mut env, &id, "after");
+    env.step();
+    let t = env.ticket(&id);
+    assert_eq!(
+        record(&t, "web", 1).state,
+        ServiceState::Stopped,
+        "its group is empty"
+    );
+    assert_ne!(record(&t, "worker", 1).state, ServiceState::Stopped);
+    assert_eq!(holds(&t), ["my-dev"]);
+    env.wait(STOP_LIMIT_MS);
+    env.step();
+    let stuck = stuck_questions(&env, &id);
+    assert_eq!(stuck.len(), 1, "{:#?}", env.ticket(&id));
+    let pgid = record(&env.ticket(&id), "worker", 1)
+        .group
+        .as_ref()
+        .unwrap()
+        .pgid;
+    assert!(
+        stuck[0].question.contains(&format!(
+            "process group {pgid} still has members (look with `pgrep -g {pgid}`)"
+        )),
+        "{}",
+        stuck[0].question
+    );
+    assert!(stuck[0].question.contains("(frontend/worker)"));
+    answer_named(&mut env, &id, "stuck", "released");
+    env.step();
+    env.step();
+    let t = env.ticket(&id);
+    assert_eq!(record(&t, "worker", 1).state, ServiceState::Stopped);
+    assert!(t.holds.is_empty(), "{t:#?}");
+}
+
+#[test]
+fn a_restart_with_two_processes_starting_sends_neither_launch_again() {
+    let (mut env, id) = listed_env();
+    deployed(&mut env, &id);
+    listed_launched(&mut env, &id, 1);
+    assert_eq!(service_launches(&env).len(), 2);
+    env.restart();
+    for _ in 0..3 {
+        env.step();
+    }
+    assert_eq!(service_launches(&env).len(), 2, "no launch sent twice");
+    env.repo.lock().unwrap().answering.insert(3100);
+    env.steps_until(&id, "the tester", |t, _| {
+        t.attempts_of("try").next().is_some()
+    });
+    let t = env.ticket(&id);
+    assert_eq!(record(&t, "web", 1).state, ServiceState::Ready);
+    assert_eq!(record(&t, "worker", 1).state, ServiceState::Ready);
 }

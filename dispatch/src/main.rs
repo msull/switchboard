@@ -458,8 +458,8 @@ fn status() -> Result<()> {
         {
             say!(
                 "    {} {} {}",
-                s.lane,
-                s.url.as_deref().unwrap_or("(no port yet)"),
+                s.label(),
+                s.url.as_deref().unwrap_or("(no address)"),
                 s.state.label()
             );
         }

@@ -403,6 +403,12 @@ ticket's as the stage was entered; both are absent in older records.
 Version 21 adds a project's `base_tree`, absent in older records.
 Version 27 adds an attempt's `evidence` and a close's `closed_ms` and
 `drop_evidence`, absent in older records.
+Version 29 adds a service record's `pointed_at`, the record of each
+lane its `serve.env` names that it was launched against; empty in
+older records.
+Version 30 adds a service record's `process`, the process of the
+lane's `serve` list it runs, and `group`, its pane's process group as
+read while it ran; both are absent in older records.
 
 A project's record (`projects/<project>.json`) holds, besides its
 space, set and queue, its supervisor (see "Supervisor"): `supervisor`
@@ -977,6 +983,12 @@ serve = { argv = ["npm", "start"], env = { PORT = "{port}" }, url = "http://loca
                               # how a stage's `services` run this lane: {port} is filled in argv, env values and url; env holds
                               # literals and {port} only (it is on the command line), url is what the agent is told,
                               # ready.http a path probed until it answers
+serve = [ { name = "web", argv = ["npm", "start"], env = { PORT = "{port}" }, url = "http://localhost:{port}", ready = { http = "/", within_secs = 120 } },
+          { name = "worker", argv = ["npm", "run", "worker"] } ]
+                              # or a list of named processes, each its own service session after one before: the
+                              # first's url is the agent's; url and ready are optional after it (no ready: up once
+                              # running; no url and no {port} in argv or env: no port); one that exits fails the lane;
+                              # {services.<lane>} and {ports.<lane>} of a listed lane are its first process's
 
 [[resources]]
 name = "..."
@@ -1733,8 +1745,13 @@ What this pipeline showed, and what it added to the vocabulary:
   with `{port}` filled in, so `serve.env` must hold no secrets (the
   argv is kept on the record and the pane's command line); and
   readiness is the `ready` probe answering on that URL within its
-  limit. A `before` failure, no free port, or a probe that never
-  answers is a decision before the tester is launched. The tester is
+  limit. A `serve` list starts each process in its own session after
+  the one `before`, each with its own port where it has an address,
+  and the lane is served once every process is; the agent is given the
+  first process's URL. A `before` failure, no free port, or a probe that never
+  answers is a decision before the tester is launched; in a list, one
+  process failing, or exiting once served, stops the others and asks
+  once. The tester is
   told each URL and not to start a server of its own. Services live on
   the ticket record until the last stage of the run holding the
   resource ends.

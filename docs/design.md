@@ -1584,6 +1584,10 @@ whose space it belongs to, at the same rect (`AppCore::take_over_pins`;
 a set that already pins the new session just drops the old card). It
 is not written when absent; an id that does not parse refuses the
 request, and one that matches no pin moves nothing.
+A session view carries the pane's process `pid` while it runs, so
+Dispatch can read the pane's process group when it stops a service
+(dispatch `RECORD_VERSION` 30 records it on the service record); an
+older app omits it.
 
 The port runs the other way too. Dispatch serves its own
 (`dispatch-control`, `<Dispatch data dir>/dispatch.sock`, while
