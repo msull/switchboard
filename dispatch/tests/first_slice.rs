@@ -24406,3 +24406,339 @@ fn an_evidence_file_shares_the_bound_of_every_ticket_file() {
     };
     assert_eq!(too_large_len(reason), Some(1024 * 1024), "{reason}");
 }
+
+// --- a branch template: rendered at take, recorded at cut, held by a
+// restart.
+
+const TEMPLATE: &str = "branch = \"{type}/{key}-{slug}\"\nbranch_key = '\\b([A-Z]+-[0-9]+)\\b'";
+const KEYED_TITLE: &str = "ORC-12 Asset report column missing";
+const TREE_BRANCH: &str = "feat/ORC-12-asset-report-column-missing";
+
+/// `WORKSPACE` with `project` added to its `[project]` table and the
+/// frontend lane named by `{type}/{key}`, written as the live file.
+fn templated_workspace(env: &Env, project: &str) {
+    let text = WORKSPACE
+        .replace("{worktrees}", &env.worktrees.display().to_string())
+        .replace(
+            "space = \"Dispatch · Orchard\"",
+            &format!("space = \"Dispatch · Orchard\"\n{project}"),
+        )
+        .replace(
+            "base = \"dev\"",
+            "base = \"dev\"\nbranch = \"{type}/{key}\"",
+        );
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+}
+
+fn take_titled(env: &mut Env, title: &str, labels: &[&str]) -> anyhow::Result<Ticket> {
+    take_titled_with(env, title, labels, Vec::new())
+}
+
+fn take_titled_with(
+    env: &mut Env,
+    title: &str,
+    labels: &[&str],
+    pull_requests: Vec<dispatch::ticket::PullRequestSource>,
+) -> anyhow::Result<Ticket> {
+    let now = env.tick();
+    env.runner.take(
+        "Orchard",
+        &std::fs::read_to_string(env.data.pipeline("Orchard")).unwrap(),
+        SourceSnapshot {
+            kind: "github".into(),
+            identity: "example-org/orchard-workspace#42".into(),
+            number: Some(42),
+            title: title.into(),
+            body: String::new(),
+            url: None,
+            labels: labels.iter().map(|l| (*l).to_owned()).collect(),
+            taken_at_ms: now,
+            taken_by: None,
+            pull_requests,
+        },
+        now,
+    )
+}
+
+fn step_orchard(env: &mut Env) {
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+}
+
+fn lane_branches(t: &Ticket) -> Vec<(String, String)> {
+    t.lanes
+        .iter()
+        .map(|l| (l.name.clone(), l.branch.clone()))
+        .collect()
+}
+
+fn templated_branches() -> Vec<(String, String)> {
+    vec![
+        ("backend".to_owned(), TREE_BRANCH.to_owned()),
+        ("frontend".to_owned(), "feat/ORC-12".to_owned()),
+    ]
+}
+
+/// A templated ticket cut: the tree and both lanes.
+fn templated_cut() -> (Env, String) {
+    let mut env = Env::new();
+    templated_workspace(&env, &format!("{TEMPLATE}\nbranch_type = \"feat\""));
+    let id = take_titled(&mut env, KEYED_TITLE, &["area:backend"])
+        .unwrap()
+        .id;
+    step_orchard(&mut env);
+    assert_eq!(lane_branches(&env.ticket(&id)), templated_branches());
+    (env, id)
+}
+
+#[test]
+fn a_branch_template_that_cannot_name_the_branch_refuses_the_take() {
+    let mut env = Env::new();
+    templated_workspace(&env, TEMPLATE);
+    let e = take_titled(&mut env, KEYED_TITLE, &[]).unwrap_err();
+    assert!(format!("{e:#}").contains("{type} needs"), "{e:#}");
+    templated_workspace(&env, &format!("{TEMPLATE}\nbranch_type = \"feat\""));
+    let e = take_titled(&mut env, "Asset report column missing", &[]).unwrap_err();
+    let text = format!("{e:#}");
+    assert!(
+        text.contains("branch template \"{type}/{key}-{slug}\": no key matches"),
+        "{text}"
+    );
+    assert!(text.contains("\"Asset report column missing\""), "{text}");
+    assert!(env.runner.tickets().unwrap().is_empty(), "no ticket record");
+    let tickets = env.data.root.join("tickets");
+    assert!(
+        !tickets.exists() || std::fs::read_dir(&tickets).unwrap().next().is_none(),
+        "no ticket directory"
+    );
+    assert!(env.runner.load_project("Orchard").unwrap().queue.is_empty());
+}
+
+#[test]
+fn a_branch_template_names_every_cut_and_holds_across_a_restart() {
+    let (mut env, id) = templated_cut();
+    let tree = env.worktrees.join(&id);
+    {
+        let repo = env.repo.lock().unwrap();
+        let cut: Vec<&str> = repo
+            .worktrees
+            .iter()
+            .filter(|(_, d, _, _)| d.starts_with(&tree))
+            .map(|(_, _, b, _)| b.as_str())
+            .collect();
+        assert_eq!(cut, [TREE_BRANCH, TREE_BRANCH, "feat/ORC-12"]);
+    }
+    let prompt = env
+        .sb()
+        .calls
+        .iter()
+        .find_map(|r| match &r.body {
+            Body::SessionNew { prompt, .. } => prompt.clone(),
+            _ => None,
+        })
+        .unwrap();
+    assert!(prompt.contains(&format!("on {TREE_BRANCH}")), "{prompt}");
+    env.restart();
+    step_orchard(&mut env);
+    let t = env.ticket(&id);
+    assert_eq!(lane_branches(&t), templated_branches());
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(
+        repo.worktrees
+            .iter()
+            .filter(|(_, d, _, _)| d.starts_with(&tree))
+            .count(),
+        3,
+        "nothing cut twice"
+    );
+}
+
+#[test]
+fn a_live_edit_after_the_take_does_not_reach_the_cut() {
+    let mut env = Env::new();
+    templated_workspace(&env, &format!("{TEMPLATE}\nbranch_type = \"feat\""));
+    let id = take_titled(&mut env, KEYED_TITLE, &["area:backend"])
+        .unwrap()
+        .id;
+    templated_workspace(&env, &format!("{TEMPLATE}\nbranch_type = \"fix\""));
+    step_orchard(&mut env);
+    assert_eq!(lane_branches(&env.ticket(&id)), templated_branches());
+}
+
+/// The live file rewritten with `project` in `[project]`, then a restart
+/// of the cut ticket at its stage: the refusal.
+fn restart_refused_with(env: &mut Env, id: &str, project: &str) -> String {
+    templated_workspace(env, project);
+    let now = env.tick();
+    let e = env.runner.restart(id, None, None, now).unwrap_err();
+    format!("{e:#}")
+}
+
+#[test]
+fn a_restart_that_would_rename_a_cut_branch_is_refused() {
+    let (mut env, id) = templated_cut();
+    at_rerun(&mut env, &id);
+    let e = restart_refused_with(&mut env, &id, &format!("{TEMPLATE}\nbranch_type = \"fix\""));
+    assert!(
+        e.contains(&format!(
+            "names the tree's branch fix/ORC-12-asset-report-column-missing, but it was cut as {TREE_BRANCH}"
+        )),
+        "{e}"
+    );
+    assert!(
+        e.contains("close and retake to change the branch template"),
+        "{e}"
+    );
+    let e = restart_refused_with(
+        &mut env,
+        &id,
+        "branch = \"{type}/{key}-{slug}\"\nbranch_key = '\\b(ZZZ-[0-9]+)\\b'\nbranch_type = \"feat\"",
+    );
+    assert!(e.contains("no key matches"), "{e}");
+    // Only the frontend lane's own template changes.
+    let text = std::fs::read_to_string(env.data.pipeline("Orchard"))
+        .unwrap()
+        .replace("ZZZ", "[A-Z]+")
+        .replace("branch = \"{type}/{key}\"", "branch = \"{type}/{key}-x\"");
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let now = env.tick();
+    let e = format!(
+        "{:#}",
+        env.runner.restart(&id, None, None, now).unwrap_err()
+    );
+    assert!(
+        e.contains("names lane frontend's branch feat/ORC-12-x, but it was cut as feat/ORC-12"),
+        "{e}"
+    );
+    // A change that leaves every name as it was restarts.
+    templated_workspace(
+        &env,
+        &format!("# the names stay\n{TEMPLATE}\nbranch_type = \"feat\""),
+    );
+    let now = env.tick();
+    env.runner.restart(&id, None, None, now).unwrap();
+}
+
+#[test]
+fn a_restart_before_the_cut_takes_the_new_template() {
+    let mut env = Env::new();
+    templated_workspace(&env, &format!("{TEMPLATE}\nbranch_type = \"feat\""));
+    let id = take_titled(&mut env, KEYED_TITLE, &["area:backend"])
+        .unwrap()
+        .id;
+    templated_workspace(&env, &format!("{TEMPLATE}\nbranch_type = \"fix\""));
+    let now = env.tick();
+    env.runner.restart(&id, None, None, now).unwrap();
+    env.steps_until(&id, "the cut", |t, _| t.lanes.len() == 2);
+    assert_eq!(
+        lane_branches(&env.ticket(&id)),
+        [
+            (
+                "backend".to_owned(),
+                "fix/ORC-12-asset-report-column-missing".to_owned()
+            ),
+            ("frontend".to_owned(), "fix/ORC-12".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn a_retake_under_a_new_template_does_not_see_the_old_names_branch() {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    at_rerun(&mut env, &id);
+    let frontend = env.data.repo_dir("Orchard@frontend");
+    templated_workspace(
+        &env,
+        "branch = \"{type}/{number}-{slug}\"\nbranch_type = \"feat\"",
+    );
+    let path = env.data.pipeline("Orchard");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("{type}/{key}\"", "{type}/{number}\"")).unwrap();
+    let new = close_and_retake(&mut env, &id, |r| {
+        move_branch(r, frontend.clone(), "old00001", 1);
+    });
+    step_orchard(&mut env);
+    assert!(
+        env.pending(&new).iter().all(|d| d.name != "branch"),
+        "{:#?}",
+        env.pending(&new)
+    );
+    let t = env.ticket(&new);
+    let named = "feat/42-asset-report-column-missing".to_owned();
+    assert_eq!(
+        lane_branches(&t),
+        [
+            ("backend".to_owned(), named.clone()),
+            ("frontend".to_owned(), "feat/42".to_owned()),
+        ]
+    );
+    let repo = env.repo.lock().unwrap();
+    assert!(
+        repo.deleted_branches.is_empty(),
+        "{:?}",
+        repo.deleted_branches
+    );
+    assert_eq!(
+        repo.branches.get(&(frontend, retake_branch())),
+        Some(&("old00001".to_owned(), 1)),
+        "the old name's branch is left as it is"
+    );
+}
+
+#[test]
+fn a_pull_request_ticket_under_a_template_keeps_the_pull_requests_branch() {
+    let mut env = Env::new();
+    templated_workspace(&env, &format!("{TEMPLATE}\nbranch_type = \"feat\""));
+    let pr = dispatch::ticket::PullRequestSource {
+        lane: "backend".into(),
+        provider: "github".into(),
+        repo: "example-org/orchard-backend".into(),
+        number: 5,
+        url: String::new(),
+        branch: "someone/their-work".into(),
+        base: "main".into(),
+        remote: "origin".into(),
+        local: "pr/5".into(),
+        head: "pr000005".into(),
+        title: KEYED_TITLE.into(),
+    };
+    let id = take_titled_with(&mut env, KEYED_TITLE, &[], vec![pr])
+        .unwrap()
+        .id;
+    env.steps_until(&id, "the cut", |t, _| !t.lanes.is_empty());
+    assert_eq!(
+        lane_branches(&env.ticket(&id)),
+        [("backend".to_owned(), "pr/5".to_owned())]
+    );
+}
+
+#[test]
+fn ready_looks_for_the_pull_request_by_the_templated_name() {
+    let mut env = Env::new();
+    live_edit(
+        &env,
+        "space = \"Dispatch · Switchboard\"",
+        "space = \"Dispatch · Switchboard\"\nbranch = \"{type}/{number}-{slug}\"\nbranch_type = \"feat\"",
+    );
+    let id = at_ready(&mut env);
+    let branch = "feat/7-issue-7-escape-leaves-the-field";
+    assert_eq!(env.ticket(&id).lanes[0].branch, branch);
+    let pending = env.pending(&id);
+    assert!(
+        pending[0]
+            .question
+            .contains(&format!("no pull request for branch {branch}")),
+        "{}",
+        pending[0].question
+    );
+    env.pr_is(&id, "base0000", "open", Checks::Pending);
+    env.recheck(&id);
+    env.step();
+    let t = env.ticket(&id);
+    let a = t.attempts_of("ready").last().unwrap();
+    assert_eq!(
+        a.pr.as_ref().map(|p| p.number),
+        Some(7),
+        "found by {branch}"
+    );
+}

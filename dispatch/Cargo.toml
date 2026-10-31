@@ -27,6 +27,7 @@ dispatch-control = { path = "../dispatch-control" }
 toml = "1"
 uuid = { version = "1", features = ["v4"] }
 directories = "6"
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -147,6 +147,18 @@ pub struct ProjectSection {
     /// <name>:<lane>/<n>`.
     #[serde(default)]
     pub remotes: BTreeMap<String, String>,
+    /// The template a ticket's branch is named by, from the fields
+    /// `{number}`, `{slug}`, `{key}` and `{type}`; absent,
+    /// `dispatch/{number}-{slug}`. See [`crate::branch`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// A regular expression run on the issue title for `{key}`: its one
+    /// capture group, or the group named `key`, is the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_key: Option<String>,
+    /// `{type}` when the ticket has no `type:` label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_type: Option<String>,
 }
 
 fn default_base() -> String {
@@ -216,6 +228,11 @@ pub struct Lane {
     /// passes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_after_deploy: Option<MergeAfterDeploy>,
+    /// This lane's branch template, over the project's; only on a lane
+    /// with its own `repo`, since the others share the ticket's tree and
+    /// so its one branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// How much of a merged lane's base pipeline a `merge_after` waits for.
@@ -2126,6 +2143,7 @@ impl Pipeline {
             }
             Self::validate_serve(lane)?;
         }
+        crate::branch::validate(self)?;
         self.validate_merge_order()?;
         let mut stage_names = std::collections::BTreeSet::new();
         let mut written: Vec<&str> = Vec::new();
@@ -3546,7 +3564,7 @@ ports = [3100, 3199]
             keys_survive(&source, &parsed, "", block);
             checked += 1;
         }
-        assert_eq!(checked, 15, "toml blocks in the guide");
+        assert_eq!(checked, 16, "toml blocks in the guide");
     }
 
     /// The repository's own pipeline file is installed by copying it into

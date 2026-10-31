@@ -1289,6 +1289,7 @@ dependencies = [
  "dispatch-control",
  "env_logger",
  "log",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
