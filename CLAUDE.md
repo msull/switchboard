@@ -20,6 +20,11 @@ rehydrated?" before "what does the pane look like?"
   from them rather than re-deriving; add a new spike directory for any
   new risky mechanism before building on it.
 - `docs/lessons.md` explains why the architecture is shaped this way.
+- `docs/live-app.md` is the guide to working on the running app and the
+  headset: the rules that bind an agent there, how a build reaches the
+  Vision Pro, how the Mac app is relaunched and released, and the
+  visionOS, SwiftUI and tooling lessons paid for once already. Read it
+  before touching the client or the owner's running app.
 - `vendor/egui_term/SWITCHBOARD-PATCHES.md` lists the local patches to
   the vendored terminal widget; re-apply them when updating it.
 
