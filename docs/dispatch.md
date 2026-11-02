@@ -1532,7 +1532,12 @@ The hard case, and the one the vocabulary was shaped for. Facts from
 
 The block below is the pipeline as this section first wrote it. What
 it grew into on the client project, under the same names, is
-`pipelines/examples/Orchard.toml`: a decisions gate before lanes, two
+`pipelines/examples/Orchard.toml`: a decisions gate before lanes, a
+facts stage after them that settles the investigation's open questions
+with web search and the lanes' own code and tests (from the plan
+trial; it commits nothing, since every lane commit goes into a pull
+request), a two-round plan review of premises then cuts, a model named
+on each planning and code operator, two
 reviewers and a fixer on `review-code` with `commits = "one"`, a deploy
 check whose verdict the `inspect` gate shows, an evidence directory and
 an env set on `try`, a `pr` stage of its own, a supervisor block, a
