@@ -1,1 +1,0 @@
-Changed: A release is published by the "Release" workflow on GitHub, run by hand from main after the bump commit merges; the bundle is signed with the hardened runtime and notarized, so a download opens without a Gatekeeper warning.
