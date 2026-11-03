@@ -264,7 +264,9 @@ pub struct Lane {
     /// `path` inside the ticket's tree, so the layout matches a checkout.
     #[serde(default)]
     pub repo: Option<String>,
-    /// The branch this lane branches from; absent, the project's.
+    /// The branch this lane branches from; absent, the project's. On a
+    /// lane with a `repo` of its own, `commit:<sha>` pins a commit the
+    /// lane is cut from and never moves off.
     #[serde(default)]
     pub base: Option<String>,
     #[serde(default)]
@@ -1341,16 +1343,45 @@ impl Default for Policy {
     }
 }
 
+/// The prefix that makes a lane's `base` a commit rather than a
+/// branch. A pin is written, never guessed from hex digits, since a
+/// date or a word such as `20251101` or `deadbeef` is a fine branch.
+pub const COMMIT_PIN: &str = "commit:";
+
 impl Pipeline {
-    /// The branch a lane branches from: its own, else the project's.
+    /// The branch (or the commit of a pin) a lane branches from: its
+    /// own, else the project's.
     #[must_use]
     pub fn lane_base<'a>(&'a self, lane: &'a Lane) -> &'a str {
-        lane.base.as_deref().unwrap_or(&self.project.base)
+        let base = lane.base.as_deref().unwrap_or(&self.project.base);
+        base.strip_prefix(COMMIT_PIN).unwrap_or(base)
+    }
+
+    /// The commit a lane is pinned to: its `base` written
+    /// `commit:<sha>`, on a lane with a repository of its own. A pin
+    /// anywhere else is refused when the pipeline is validated.
+    #[must_use]
+    pub fn lane_pin<'a>(&'a self, lane: &'a Lane) -> Option<&'a str> {
+        lane.base
+            .as_deref()
+            .and_then(|b| b.strip_prefix(COMMIT_PIN))
+            .filter(|_| lane.repo.is_some())
     }
 
     #[must_use]
     pub fn lane_remote<'a>(&'a self, lane: &'a Lane) -> &'a str {
         lane.remote.as_deref().unwrap_or(&self.project.remote)
+    }
+
+    /// What a lane is cut from: its pinned commit, else the
+    /// remote-tracking ref of its base branch. A commit is never put
+    /// behind the remote's name, since `origin/<sha>` is no ref.
+    #[must_use]
+    pub fn lane_start(&self, lane: &Lane) -> String {
+        self.lane_pin(lane).map_or_else(
+            || format!("{}/{}", self.lane_remote(lane), self.lane_base(lane)),
+            str::to_owned,
+        )
     }
 
     /// A named remote of a lane's repository (or the project's, for a
@@ -2023,6 +2054,21 @@ impl Pipeline {
             }
         }
         self.serve_order(stage)?;
+        // Choosing the lanes moves the trees of the repo lanes (an
+        // unchosen one is detached), which would happen under a service
+        // already running from one.
+        let gate_at = self.stages.iter().position(
+            |s| matches!(&s.gate, Some(Gate::Human { decision, .. }) if decision == "lanes"),
+        );
+        let stage_at = self.stages.iter().position(|s| s.name == stage.name);
+        if !stage.services.is_empty()
+            && let (Some(gate), Some(at)) = (gate_at, stage_at)
+            && at <= gate
+        {
+            bail!(
+                "stage {name:?} names services but comes before the lanes gate, which moves the trees it would serve"
+            );
+        }
         for lane in stage.before.keys() {
             if !stage.services.contains(lane) {
                 bail!("stage {name:?}: before names {lane:?}, which is not in its services");
@@ -2588,10 +2634,26 @@ impl Pipeline {
                 "[project] needs repo (a URL to clone) or root (a directory)"
             )),
         }
+        if self.project.base.starts_with(COMMIT_PIN) {
+            out.push(anyhow!(
+                "[project] base is a branch the ticket trees are cut from; pin a commit on a lane's own base"
+            ));
+        }
         let mut names = std::collections::BTreeSet::new();
         for lane in &self.lanes {
             if !names.insert(&lane.name) {
                 out.push(anyhow!("lane {:?} is listed twice", lane.name));
+            }
+            if lane.repo.is_none()
+                && lane
+                    .base
+                    .as_deref()
+                    .is_some_and(|b| b.starts_with(COMMIT_PIN))
+            {
+                out.push(anyhow!(
+                    "lane {:?} pins its base to a commit but has no repo of its own to read it in",
+                    lane.name
+                ));
             }
             out.extend(Self::validate_serve(lane).err());
         }
@@ -2950,6 +3012,67 @@ kind = "claude"
 mod tests {
     use super::*;
     use crate::git::Network;
+
+    #[test]
+    fn a_lane_starts_from_its_remote_branch_or_from_a_written_commit_pin() {
+        let p = two_lanes("");
+        let mut lane = p.lanes[0].clone();
+        lane.repo = Some("git@example.com:o/a.git".into());
+        assert_eq!(p.lane_start(&lane), "origin/main");
+        lane.base = Some("dev".into());
+        lane.remote = Some("upstream".into());
+        assert_eq!(p.lane_start(&lane), "upstream/dev");
+        lane.base = Some("commit:abc1234".into());
+        assert_eq!(p.lane_start(&lane), "abc1234");
+        assert_eq!(p.lane_base(&lane), "abc1234");
+        // Hex-looking names are branches unless written as a pin.
+        for branch in ["20251101", "deadbeef", "release"] {
+            lane.base = Some(branch.to_owned());
+            assert_eq!(p.lane_start(&lane), format!("upstream/{branch}"));
+        }
+    }
+
+    #[test]
+    fn a_commit_pin_is_refused_on_the_project_base_and_on_a_lane_without_a_repo() {
+        let text = |project: &str, lane: &str| {
+            Pipeline::parse(&format!(
+                r#"
+version = 1
+
+[project]
+name = "P"
+repo = "git@example.com:o/p.git"
+space = "Dispatch · P"
+{project}
+
+[source]
+kind = "github"
+repo = "o/p"
+label = "dispatch"
+
+[[lanes]]
+name = "A"
+path = "a"
+{lane}
+
+[operators.agent]
+kind = "claude"
+"#
+            ))
+        };
+        assert!(text("", "").is_ok());
+        let e = text("base = \"commit:abc\"", "").unwrap_err();
+        assert!(format!("{e:#}").contains("[project] base"), "{e:#}");
+        let e = text("", "base = \"commit:abc\"").unwrap_err();
+        assert!(format!("{e:#}").contains("no repo of its own"), "{e:#}");
+        assert!(
+            text(
+                "",
+                "repo = \"git@example.com:o/a.git\"\nbase = \"commit:abc\""
+            )
+            .is_ok()
+        );
+    }
 
     const SWITCHBOARD: &str = r#"
 version = 1

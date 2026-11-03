@@ -4538,6 +4538,43 @@ how a moved lane head voids such an attempt is not traced. The root
 rebase passes lanes without a repository to `tree_changes` and can hide
 their changes.
 
+## Every listed lane is served (2026-11-02)
+
+A stage's `services` serve every lane they name, chosen or not: a lane
+the ticket is not working on is still needed for testing. Every lane
+with a repository of its own is cut at the start as before; once the
+`lanes` decision is answered, `choose_lanes` detaches each such lane
+not chosen at its base (`Pipeline::lane_start`: its remote's branch,
+or the commit its `base` pins) and checks a chosen one left detached
+back out on its branch (`Repo::checkout_branch`), parking with git's
+message when git refuses. A lane with no repository of its own is a
+path in the ticket's one tree and is not served unchosen, as before.
+Each served lane's `setup` runs once in its tree before anything of it
+is served: the stage setup that finishes a lane's setup before the
+stage serves it (`ensure_stage_setup`) counts a served unchosen lane
+as served, parking on a failure. A restart
+leaves an unchosen lane out of its reset targets, and one across the
+`lanes` gate puts every detached lane back on its branch first.
+
+A lane with a repository of its own may pin its `base` to a commit,
+written `commit:<sha>` (a bare hex-looking name such as `20251101` is a
+branch): it is cut from the bare sha, never `<remote>/<sha>`, read in
+the clone after the plain fetch, and a sha the clone does not have parks
+the ticket naming it. A pin on `[project] base` or on a lane without a
+repository is refused when the pipeline is read. Fetching a bare sha from a hosted remote is not built. A chosen
+lane pinned to a commit is never brought up, since its base never
+moves. No record or schema change.
+
+Known gaps: a lane pinned to a commit and chosen would still open its
+pull request against `base`, which is not a branch; the pin is meant
+for a lane that is only served. The `setup` of a served lane now runs
+before its service whether or not it was chosen, so a chosen lane's
+setup can run before its first agent at a serving stage, and a restart
+that changes a served unchosen lane's `setup` runs it again, once, in
+that lane's detached tree. A stage that names services may not come at
+or before the `lanes` gate, since choosing the lanes moves the trees a
+running service would be serving from (`dispatch check` refuses it).
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

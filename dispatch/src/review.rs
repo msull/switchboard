@@ -254,7 +254,7 @@ impl Runner {
         let def = p.lane(&t.lanes[i].name);
         let upstream = def.map_or_else(
             || format!("{}/{}", p.project.remote, p.project.base),
-            |l| format!("{}/{}", p.lane_remote(l), p.lane_base(l)),
+            |l| p.lane_start(l),
         );
         let sha = self.git.merge_base(cwd, &upstream, "HEAD")?;
         t.lanes[i].base_sha = Some(sha.clone());

@@ -280,6 +280,15 @@ impl Runner {
         if let Some(why) = self.reset_heads(t, targets, now_ms)? {
             return self.hold_restart(t, Some(&to), &why, now_ms);
         }
+        // Every lane is chosen again below and asked about afresh, so a
+        // lane left detached as not chosen goes back on its branch first.
+        // It comes last of what can hold the restart, so a held one never
+        // leaves a lane attached that the record still says is not chosen.
+        if lanes_again(&old, &checked)
+            && let Err(why) = self.attach_lanes(t, &old)
+        {
+            return self.hold_restart(t, Some(&to), &why, now_ms);
+        }
         let before = t.pipeline_file.clone();
         let after = self
             .data
@@ -491,12 +500,12 @@ impl Runner {
                 base,
             ));
         }
-        for lane in t.lanes.iter().filter(|l| !l.removed) {
+        // A lane not chosen never ran a stage, so it has no head to put
+        // back, and it sits detached at its base, which every check
+        // below would refuse.
+        for lane in t.lanes.iter().filter(|l| !l.removed && l.chosen) {
             if let Some(p) = old.lane(&lane.name).filter(|l| l.repo.is_some()) {
-                let base = lane
-                    .base_sha
-                    .clone()
-                    .unwrap_or_else(|| format!("{}/{}", old.lane_remote(p), old.lane_base(p)));
+                let base = lane.base_sha.clone().unwrap_or_else(|| old.lane_start(p));
                 branches.push((
                     Target {
                         key: lane.name.clone(),
@@ -896,11 +905,7 @@ fn discard(t: &mut Ticket, old: &Pipeline, c: &Checked, note: Option<&str>) -> V
             d.state = DecisionState::Cancelled;
         }
     }
-    let lanes_again = old.stages.iter().any(|s| {
-        range.contains(&s.name)
-            && matches!(&s.gate, Some(Gate::Human { decision, .. }) if decision == "lanes")
-    });
-    if lanes_again {
+    if lanes_again(old, c) {
         for lane in &mut t.lanes {
             lane.chosen = true;
         }
@@ -908,6 +913,15 @@ fn discard(t: &mut Ticket, old: &Pipeline, c: &Checked, note: Option<&str>) -> V
     t.rework
         .retain(|key, _| !range.iter().any(|s| key.starts_with(&rework_key(s, ""))));
     discarded
+}
+
+/// Whether the restart's range holds the `lanes` gate, so every lane is
+/// chosen again until it is answered afresh.
+fn lanes_again(old: &Pipeline, c: &Checked) -> bool {
+    old.stages.iter().any(|s| {
+        c.range.contains(&s.name)
+            && matches!(&s.gate, Some(Gate::Human { decision, .. }) if decision == "lanes")
+    })
 }
 
 /// The lanes whose `setup` differs between the copies, marked to run it

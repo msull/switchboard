@@ -18795,6 +18795,20 @@ fn base_backend(env: &Env) -> PathBuf {
     base_tree(env).join("orchard-backend")
 }
 
+/// The detached moves made in the base tree, in order: a ticket's own
+/// lane it did not choose is detached in its own tree, which is not one.
+fn base_tree_moves(env: &Env) -> Vec<(PathBuf, PathBuf, String)> {
+    let base = base_tree(env);
+    env.repo
+        .lock()
+        .unwrap()
+        .detached_trees
+        .iter()
+        .filter(|(_, dir, _)| dir.starts_with(&base))
+        .cloned()
+        .collect()
+}
+
 /// How often the backend's setup ran in the base tree.
 fn base_setups(env: &Env) -> usize {
     let dir = base_backend(env);
@@ -18828,23 +18842,23 @@ fn a_frontend_only_deploy_deploys_the_backend_base_and_the_tester_reads_its_comm
     let deploys: Vec<&Attempt> = t.attempts_of("deploy").collect();
     assert_eq!(deploys.len(), 1, "{t:#?}");
     assert_eq!(deploys[0].context, "backend@base");
+    assert_eq!(
+        base_tree_moves(&env),
+        [
+            (
+                env.data.repo_dir("Orchard"),
+                base.clone(),
+                "proj0001".to_owned()
+            ),
+            (
+                env.data.lane_repo_dir("Orchard", "backend"),
+                backend.clone(),
+                "back0001".to_owned()
+            ),
+        ]
+    );
     {
         let repo = env.repo.lock().unwrap();
-        assert_eq!(
-            repo.detached_trees,
-            [
-                (
-                    env.data.repo_dir("Orchard"),
-                    base.clone(),
-                    "proj0001".to_owned()
-                ),
-                (
-                    env.data.lane_repo_dir("Orchard", "backend"),
-                    backend.clone(),
-                    "back0001".to_owned()
-                ),
-            ]
-        );
         let setup: Vec<_> = repo
             .ran_confined
             .iter()
@@ -18933,8 +18947,8 @@ fn a_second_base_deploy_reuses_the_tree_at_the_moved_base() {
                 "back0002".to_owned()
             )
         );
-        assert_eq!(repo.detached_trees.len(), 4, "both trees moved again");
     }
+    assert_eq!(base_tree_moves(&env).len(), 4, "both trees moved again");
     assert_eq!(base_setups(&env), 2, "set up again at the new base");
     exits(&env, &deploy_key(&b, 1), 0);
     at_stage(&mut env, &b, "try");
@@ -18963,7 +18977,7 @@ fn a_base_tree_with_changes_fails_the_deploy_with_a_rerun_question() {
             env.repo.lock().unwrap().dirty.push(backend.clone());
             (base_tree(&env), backend)
         };
-        let moves = env.repo.lock().unwrap().detached_trees.len();
+        let moves = base_tree_moves(&env).len();
         let b = take_orchard(&mut env, 43, &["area:frontend"]);
         env.steps_until(&b, "the rerun question", |t, _| {
             t.pending_decisions()
@@ -18981,11 +18995,7 @@ fn a_base_tree_with_changes_fails_the_deploy_with_a_rerun_question() {
         );
         assert!(reason.contains(&named.display().to_string()), "{reason}");
         assert_eq!(started(&env, &deploy_key(&b, 1)), 0, "no check started");
-        assert_eq!(
-            env.repo.lock().unwrap().detached_trees.len(),
-            moves,
-            "nothing moved"
-        );
+        assert_eq!(base_tree_moves(&env).len(), moves, "nothing moved");
     }
 }
 
@@ -18993,7 +19003,7 @@ fn a_base_tree_with_changes_fails_the_deploy_with_a_rerun_question() {
 fn a_base_deploy_waits_while_another_tickets_runs_in_the_tree() {
     let (mut env, a) = base_env(two_devs);
     deploying(&mut env, &a);
-    let moves = env.repo.lock().unwrap().detached_trees.len();
+    let moves = base_tree_moves(&env).len();
     let b = take_orchard(&mut env, 43, &["area:frontend"]);
     for _ in 0..8 {
         env.step();
@@ -19005,10 +19015,10 @@ fn a_base_deploy_waits_while_another_tickets_runs_in_the_tree() {
     assert!(deploy.is_open() && deploy.gate.is_none(), "{deploy:#?}");
     assert!(t.pending_decisions().is_empty(), "no failure asked about");
     assert_eq!(started(&env, &deploy_key(&b, 1)), 0);
-    assert_eq!(env.repo.lock().unwrap().detached_trees.len(), moves);
+    assert_eq!(base_tree_moves(&env).len(), moves);
     exits(&env, &deploy_key(&a, 1), 0);
     deploying(&mut env, &b);
-    assert_eq!(env.repo.lock().unwrap().detached_trees.len(), moves + 2);
+    assert_eq!(base_tree_moves(&env).len(), moves + 2);
 }
 
 #[test]
@@ -20885,9 +20895,50 @@ fn services_start_after_before_on_a_free_port_and_the_tester_is_told_the_url() {
     );
 }
 
+/// A backend-only ticket still serves the frontend the stage lists, for
+/// testing, from the frontend's own tree detached at its base.
 #[test]
-fn a_lane_not_cut_is_not_served_and_reads_so() {
+fn a_lane_not_chosen_is_served_from_its_own_tree_and_the_tester_is_given_its_url() {
     let (mut env, id) = back_half_env(&["area:backend"]);
+    deployed(&mut env, &id);
+    let frontend = lane_tree(&env, &id, "frontend");
+    let t = env.ticket(&id);
+    let lane = t.lanes.iter().find(|l| l.name == "frontend").unwrap();
+    assert!(!lane.chosen);
+    assert_eq!(lane.worktree, frontend);
+    served(&mut env, &id);
+    let launches = service_launches(&env);
+    assert_eq!(launches.len(), 1);
+    let Body::SessionNew { cwd, .. } = &launches[0].body else {
+        unreachable!()
+    };
+    assert_eq!(cwd, &frontend);
+    let t = env.ticket(&id);
+    assert_eq!(t.services.len(), 1, "{t:#?}");
+    assert_eq!(t.services[0].lane, "frontend");
+    let prompt = last_prompt_of(&env, "tester");
+    assert!(
+        prompt.contains("the frontend is at http://localhost:3100"),
+        "{prompt}"
+    );
+}
+
+/// `BACK_HALF` with the frontend a path in the ticket's one tree, not a
+/// repository of its own.
+fn repo_less_frontend(text: &str) -> String {
+    text.replace(
+        "path = \"orchard-frontend\"\nrepo = \"git@example.com:example-org/orchard-frontend.git\"\nbase = \"dev\"\n",
+        "path = \".\"\n",
+    )
+}
+
+#[test]
+fn a_repo_less_lane_not_chosen_is_not_served_and_reads_so() {
+    let mut env = Env::new();
+    let text =
+        repo_less_frontend(&BACK_HALF.replace("{worktrees}", &env.worktrees.display().to_string()));
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, &["area:backend"]);
     deployed(&mut env, &id);
     env.steps_until(&id, "the tester", |t, _| {
         t.attempts_of("try").next().is_some()
@@ -20898,6 +20949,305 @@ fn a_lane_not_cut_is_not_served_and_reads_so() {
     assert!(
         prompt.contains("the frontend is at not served (no frontend lane)"),
         "{prompt}"
+    );
+}
+
+/// The detached trees of `lane` in ticket `id`, in order: its clone,
+/// its tree, the commit.
+fn lane_detaches(env: &Env, id: &str, lane: &str) -> Vec<(PathBuf, PathBuf, String)> {
+    let tree = lane_tree(env, id, lane);
+    env.repo
+        .lock()
+        .unwrap()
+        .detached_trees
+        .iter()
+        .filter(|(_, d, _)| *d == tree)
+        .cloned()
+        .collect()
+}
+
+/// How often `argv` ran in `dir`, confined or not.
+fn ran_in(env: &Env, dir: &std::path::Path, argv: &[&str]) -> usize {
+    let repo = env.repo.lock().unwrap();
+    let plain = repo
+        .ran
+        .iter()
+        .filter(|(d, a)| d == dir && a == argv)
+        .count();
+    let confined = repo
+        .ran_confined
+        .iter()
+        .filter(|(d, a, _)| d == dir && a == argv)
+        .count();
+    plain + confined
+}
+
+#[test]
+fn an_unchosen_repo_lane_is_detached_at_its_base_and_keeps_its_branch() {
+    let (mut env, id) = back_half_env(&["area:backend"]);
+    let clone = env.data.lane_repo_dir("Orchard", "frontend");
+    env.repo
+        .lock()
+        .unwrap()
+        .bases
+        .insert(clone.clone(), "front0001".into());
+    at_stage(&mut env, &id, "deploy");
+    let frontend = lane_tree(&env, &id, "frontend");
+    assert_eq!(
+        lane_detaches(&env, &id, "frontend"),
+        [(clone.clone(), frontend.clone(), "front0001".to_owned())]
+    );
+    assert!(lane_detaches(&env, &id, "backend").is_empty(), "chosen");
+    let t = env.ticket(&id);
+    let lane = t.lanes.iter().find(|l| l.name == "frontend").unwrap();
+    let repo = env.repo.lock().unwrap();
+    assert!(repo.detached.contains(&frontend));
+    assert!(
+        repo.branches.contains_key(&(clone, lane.branch.clone())),
+        "the branch stays"
+    );
+    assert!(
+        repo.fetched
+            .iter()
+            .any(|(d, r)| d.ends_with("Orchard@frontend") && r == "origin")
+    );
+}
+
+/// `BACK_HALF` with the lanes asked rather than read from the labels.
+fn asked_lanes_env() -> (Env, String) {
+    let mut env = Env::new();
+    let text = BACK_HALF
+        .replace("{worktrees}", &env.worktrees.display().to_string())
+        .replace(
+            "decisions = { lanes = \"auto\" }",
+            "decisions = { lanes = \"ask\" }",
+        );
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, &[]);
+    env.steps_until(&id, "the lanes question", |t, _| {
+        t.pending_decisions().iter().any(|d| d.name == "lanes")
+    });
+    (env, id)
+}
+
+#[test]
+fn a_lane_chosen_while_detached_is_checked_out_on_its_branch_again() {
+    let (mut env, id) = asked_lanes_env();
+    let frontend = lane_tree(&env, &id, "frontend");
+    env.repo.lock().unwrap().detached.push(frontend.clone());
+    answer_named(&mut env, &id, "lanes", "backend,frontend");
+    at_stage(&mut env, &id, "deploy");
+    let t = env.ticket(&id);
+    let branch = t
+        .lanes
+        .iter()
+        .find(|l| l.name == "frontend")
+        .unwrap()
+        .branch
+        .clone();
+    let repo = env.repo.lock().unwrap();
+    assert_eq!(repo.checked_out, [(frontend.clone(), branch)]);
+    assert!(!repo.detached.contains(&frontend));
+    assert!(repo.detached_trees.is_empty(), "nothing detached");
+}
+
+#[test]
+fn a_lane_git_will_not_detach_or_check_out_parks_the_ticket_with_gits_message() {
+    let (mut env, id) = asked_lanes_env();
+    let frontend = lane_tree(&env, &id, "frontend");
+    env.repo.lock().unwrap().dirty.push(frontend.clone());
+    answer_named(&mut env, &id, "lanes", "backend");
+    env.steps_until(&id, "parked", |t, _| is_parked(t));
+    let TicketState::Parked { reason } = env.ticket(&id).state else {
+        unreachable!()
+    };
+    assert!(
+        reason.contains("lane frontend: could not detach")
+            && reason.contains("would be overwritten by checkout"),
+        "{reason}"
+    );
+
+    let (mut env, id) = asked_lanes_env();
+    let frontend = lane_tree(&env, &id, "frontend");
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.detached.push(frontend.clone());
+        repo.fail_checkout = Some("error: pathspec did not match".into());
+    }
+    answer_named(&mut env, &id, "lanes", "backend,frontend");
+    env.steps_until(&id, "parked", |t, _| is_parked(t));
+    let TicketState::Parked { reason } = env.ticket(&id).state else {
+        unreachable!()
+    };
+    assert!(
+        reason.contains("lane frontend: could not check out")
+            && reason.contains("error: pathspec did not match"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn a_served_unchosen_lane_runs_its_setup_before_its_before_once() {
+    let (mut env, id) = back_half_env(&["area:backend"]);
+    deployed(&mut env, &id);
+    let frontend = lane_tree(&env, &id, "frontend");
+    let key = before_key(&id, 1);
+    for _ in 0..6 {
+        if started(&env, &key) > 0 {
+            break;
+        }
+        env.step();
+    }
+    assert_eq!(started(&env, &key), 1);
+    assert_eq!(ran_in(&env, &frontend, &["npm", "ci"]), 1, "set up first");
+    served(&mut env, &id);
+    for _ in 0..3 {
+        env.step();
+    }
+    assert_eq!(ran_in(&env, &frontend, &["npm", "ci"]), 1, "once");
+    assert!(
+        env.ticket(&id)
+            .lanes
+            .iter()
+            .find(|l| l.name == "frontend")
+            .unwrap()
+            .setup_done
+    );
+}
+
+#[test]
+fn a_served_unchosen_lane_whose_setup_fails_parks_the_ticket_with_the_setup_reason() {
+    let (mut env, id) = back_half_env(&["area:backend"]);
+    deploying(&mut env, &id);
+    env.repo.lock().unwrap().fail_run = Some("npm ci exited 1".into());
+    exits(&env, &deploy_key(&id, 1), 0);
+    env.steps_until(&id, "parked", |t, _| is_parked(t));
+    let t = env.ticket(&id);
+    let TicketState::Parked { reason } = &t.state else {
+        unreachable!()
+    };
+    assert!(
+        reason.contains("lane frontend: setup failed: npm ci exited 1"),
+        "{reason}"
+    );
+    assert!(pending_named(&env, &id, "service").is_none());
+    assert!(t.services.is_empty());
+    assert!(service_launches(&env).is_empty());
+    assert_eq!(started(&env, &before_key(&id, 1)), 0);
+}
+
+#[test]
+fn a_commit_pin_is_cut_from_the_sha_and_never_as_remote_slash_sha() {
+    let mut env = Env::new();
+    let text = BACK_HALF
+        .replace("{worktrees}", &env.worktrees.display().to_string())
+        .replace("base = \"dev\"", "base = \"commit:abc1234\"");
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, &["area:backend"]);
+    at_stage(&mut env, &id, "deploy");
+    let frontend = lane_tree(&env, &id, "frontend");
+    let repo = env.repo.lock().unwrap();
+    let cut: Vec<&str> = repo
+        .worktrees
+        .iter()
+        .filter(|(_, d, ..)| *d == frontend)
+        .map(|(.., start)| start.as_str())
+        .collect();
+    assert_eq!(cut, ["abc1234"]);
+    assert!(
+        repo.worktrees
+            .iter()
+            .all(|(.., start)| !start.ends_with("/abc1234")),
+        "{:?}",
+        repo.worktrees
+    );
+}
+
+#[test]
+fn an_unreadable_pin_parks_naming_it() {
+    let mut env = Env::new();
+    let text = BACK_HALF
+        .replace("{worktrees}", &env.worktrees.display().to_string())
+        .replace("base = \"dev\"", "base = \"commit:abc1234\"");
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    env.repo.lock().unwrap().unreadable.push("abc1234".into());
+    let id = take_orchard(&mut env, 42, BOTH);
+    env.steps_until(&id, "parked", |t, _| is_parked(t));
+    let TicketState::Parked { reason } = env.ticket(&id).state else {
+        unreachable!()
+    };
+    assert!(
+        reason
+            .contains("lane frontend: base abc1234 is not a branch of origin and not a commit in"),
+        "{reason}"
+    );
+    assert!(
+        !env.repo
+            .lock()
+            .unwrap()
+            .worktrees
+            .iter()
+            .any(|(_, d, ..)| *d == lane_tree(&env, &id, "frontend")),
+        "nothing cut"
+    );
+}
+
+#[test]
+fn a_ticket_with_a_detached_unchosen_lane_can_be_restarted_to_an_earlier_stage() {
+    let (mut env, id) = back_half_env(&["area:backend"]);
+    deployed(&mut env, &id);
+    served(&mut env, &id);
+    tester_done(&mut env, &id);
+    let t = restart_at(&mut env, &id, Some("deploy"));
+    assert!(t.active(), "{:?}", t.state);
+    assert_eq!(t.restarts.len(), 1);
+    assert!(
+        t.restarts[0].reset.iter().all(|h| h.key != "frontend"),
+        "{:?}",
+        t.restarts[0].reset
+    );
+    let frontend = lane_tree(&env, &id, "frontend");
+    assert!(env.repo.lock().unwrap().detached.contains(&frontend));
+}
+
+#[test]
+fn a_restart_across_the_lanes_gate_attaches_every_detached_lane_before_they_are_chosen_again() {
+    let (mut env, id) = back_half_env(&["area:backend"]);
+    deployed(&mut env, &id);
+    served(&mut env, &id);
+    tester_done(&mut env, &id);
+    let frontend = lane_tree(&env, &id, "frontend");
+    assert_eq!(lane_detaches(&env, &id, "frontend").len(), 1);
+    let t = restart_at(&mut env, &id, Some("lanes"));
+    assert!(t.active(), "{:?}", t.state);
+    assert!(t.lanes.iter().all(|l| l.chosen));
+    {
+        let repo = env.repo.lock().unwrap();
+        assert!(!repo.detached.contains(&frontend));
+        assert!(repo.checked_out.iter().any(|(d, _)| *d == frontend));
+        for l in &t.lanes {
+            assert!(
+                dispatch::git::Repo::branch_head(&*repo, &l.worktree, &l.branch)
+                    .unwrap()
+                    .is_some(),
+                "{} is on its branch",
+                l.name
+            );
+        }
+    }
+    at_stage(&mut env, &id, "deploy");
+    let t = env.ticket(&id);
+    assert!(
+        !t.lanes
+            .iter()
+            .find(|l| l.name == "frontend")
+            .unwrap()
+            .chosen
+    );
+    assert_eq!(
+        lane_detaches(&env, &id, "frontend").len(),
+        2,
+        "detached again once the question is answered"
     );
 }
 
@@ -21350,7 +21700,15 @@ const BACKEND_SERVE: &str = "serve = { argv = [\"uv\", \"run\", \"serve\"], env 
 /// `pointed_env` with the backend's `serve` given as `serve`.
 fn pointed_env_serving(labels: &[&str], serve: &str) -> (Env, String) {
     let mut env = Env::new();
-    let text = BACK_HALF
+    let text = pointed_text(&env, serve);
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, labels);
+    (env, id)
+}
+
+/// The pipeline text of `pointed_env_serving`.
+fn pointed_text(env: &Env, serve: &str) -> String {
+    BACK_HALF
         .replace("{worktrees}", &env.worktrees.display().to_string())
         .replace(
             "env = { BROWSER = \"none\", PORT = \"{port}\" }",
@@ -21363,10 +21721,7 @@ fn pointed_env_serving(labels: &[&str], serve: &str) -> (Env, String) {
         .replace(
             "services = [\"frontend\"]",
             "services = [\"frontend\", \"backend\"]",
-        );
-    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
-    let id = take_orchard(&mut env, 42, labels);
-    (env, id)
+        )
 }
 
 /// The argv of each service launch for `lane`, in order.
@@ -21611,7 +21966,15 @@ fn a_resent_lane_waits_for_a_named_lane_that_is_not_ready() {
 
 #[test]
 fn a_lane_naming_one_the_ticket_does_not_serve_is_a_service_question() {
-    let (mut env, id) = pointed_env(&["area:frontend"]);
+    // The backend is a path in the ticket's one tree, so not chosen it
+    // has no tree to be served from.
+    let mut env = Env::new();
+    let text = pointed_text(&env, BACKEND_SERVE).replace(
+        "path = \"orchard-backend\"\nrepo = \"git@example.com:example-org/orchard-backend.git\"\nbase = \"main\"\n",
+        "path = \".\"\n",
+    );
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, &["area:frontend"]);
     at_stage(&mut env, &id, "try");
     env.steps_until(&id, "the service question", |t, _| {
         t.pending_decisions().iter().any(|d| d.name == "service")
@@ -21620,7 +21983,7 @@ fn a_lane_naming_one_the_ticket_does_not_serve_is_a_service_question() {
     let frontends = services_of(&t, "frontend");
     assert!(
         matches!(&frontends[0].state, ServiceState::Failed { reason }
-            if reason == "{services.backend} is not served (the ticket did not choose backend)"),
+            if reason == "{services.backend} is not served (the ticket did not choose backend, which has no tree of its own)"),
         "{t:#?}"
     );
     assert!(services_of(&t, "backend").is_empty());
@@ -21631,6 +21994,81 @@ fn a_lane_naming_one_the_ticket_does_not_serve_is_a_service_question() {
         d.question.contains("{services.backend} is not served"),
         "{}",
         d.question
+    );
+}
+
+/// Three lanes with only the frontend chosen: the backend and the worker
+/// it names are each served once from their own trees, in dependency
+/// order, and the frontend is given the backend's address. Nothing is
+/// started beside them.
+#[test]
+fn a_frontend_only_ticket_reaches_the_backend_by_its_address() {
+    let mut env = Env::new();
+    let worker = "[[lanes]]\nname = \"worker\"\npath = \"orchard-worker\"\nrepo = \"git@example.com:example-org/orchard-worker.git\"\nbase = \"main\"\nserve = { argv = [\"uv\", \"run\", \"worker\"], env = { PORT = \"{port}\" }, url = \"http://127.0.0.1:{port}\", ready = { http = \"/\", within_secs = 120 } }\n\n[[resources]]";
+    let text = pointed_text(&env, BACKEND_SERVE)
+        .replace(
+            "env = { PORT = \"{port}\" }, url = \"http://127.0.0.1:{port}\"",
+            "env = { PORT = \"{port}\", QUEUE = \"{services.worker}\" }, url = \"http://127.0.0.1:{port}\"",
+        )
+        .replacen("[[resources]]", worker, 1)
+        .replace(
+            "services = [\"frontend\", \"backend\"]",
+            "services = [\"frontend\", \"backend\", \"worker\"]",
+        )
+        .replace("ports = [3100, 3101]", "ports = [3100, 3103]");
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(&mut env, 42, &["area:frontend"]);
+    at_stage(&mut env, &id, "try");
+    lane_ready(&mut env, &id, "worker");
+    lane_ready(&mut env, &id, "backend");
+    exits(&env, &before_key(&id, 1), 0);
+    lane_ready(&mut env, &id, "frontend");
+    env.steps_until(&id, "the tester", |t, _| {
+        t.attempts_of("try").next().is_some()
+    });
+    let t = env.ticket(&id);
+    let chosen: Vec<&str> = t
+        .lanes
+        .iter()
+        .filter(|l| l.chosen)
+        .map(|l| l.name.as_str())
+        .collect();
+    assert_eq!(chosen, ["frontend"]);
+    let launched: Vec<(String, PathBuf)> = service_launches(&env)
+        .into_iter()
+        .filter_map(|r| match r.body {
+            Body::SessionNew { name, cwd, .. } => {
+                Some((name.split(' ').next().unwrap().to_owned(), cwd))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        launched,
+        [
+            ("worker".to_owned(), lane_tree(&env, &id, "worker")),
+            ("backend".to_owned(), lane_tree(&env, &id, "backend")),
+            ("frontend".to_owned(), lane_tree(&env, &id, "frontend")),
+        ],
+        "each once, from its own tree, in dependency order"
+    );
+    assert_eq!(t.services.len(), 3, "{t:#?}");
+    assert!(
+        t.services
+            .iter()
+            .all(|s| s.port.is_some_and(|p| (3100..=3103).contains(&p))),
+        "{t:#?}"
+    );
+    let url_of = |lane: &str| services_of(&t, lane)[0].url.clone().unwrap();
+    let backend = launch_argvs(&env, "backend");
+    assert!(
+        backend[0].contains(&format!("QUEUE={}", url_of("worker"))),
+        "{backend:?}"
+    );
+    let frontend = launch_argvs(&env, "frontend");
+    assert!(
+        frontend[0].contains(&format!("PROXY={}", url_of("backend"))),
+        "{frontend:?}"
     );
 }
 
