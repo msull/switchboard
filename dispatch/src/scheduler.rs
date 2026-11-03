@@ -14,7 +14,7 @@ use switchboard_control::{self as wire, Body, Reply, Request, RunState};
 
 use crate::UsageError;
 use crate::bitbucket::{Bitbucket, bitbucket_repo};
-use crate::git::{Adopted, Confine, Network, Push, Repo, yyyymmdd};
+use crate::git::{Adopted, Confine, Network, Push, Repo, is_clean_beside, yyyymmdd};
 use crate::github::{Checks, Gh, PullRequests, github_repo};
 use crate::health::Health;
 use crate::pipeline::{
@@ -5806,7 +5806,7 @@ impl Runner {
         }
         let mut dirty = Vec::new();
         for (lane, tree) in &trees {
-            if !self.git.is_clean(tree)? {
+            if !self.tree_clean(t, p, tree, lane.as_deref())? {
                 dirty.push(match lane {
                     Some(lane) => {
                         format!("the tree of lane {lane} at {} is not clean", tree.display())
@@ -6245,6 +6245,24 @@ impl Runner {
             }
         }
         Ok(BaseRefresh::Ready)
+    }
+
+    /// Whether `cwd` is clean. In the root or joined context (`lane`
+    /// is `None`) each lane of `t` with a repository of its own that is
+    /// nested in `cwd` is read on its own terms: the ticket's tree holds
+    /// every lane, chosen or not, and a clean one is untracked content
+    /// there. A lane's own context keeps the plain check, since a lane
+    /// at `.` shares its path with the ticket's tree and another lane's
+    /// work is not its business. A lane without a repository is a
+    /// directory of the tree and stays in its status.
+    pub(crate) fn tree_clean(
+        &self,
+        t: &Ticket,
+        p: &Pipeline,
+        cwd: &Path,
+        lane: Option<&str>,
+    ) -> Result<bool> {
+        is_clean_beside(&*self.git, cwd, &nested_lanes(&t.lanes, p, cwd, lane))
     }
 
     /// What has changed in the base tree, said as a failure's reason;
@@ -7024,8 +7042,10 @@ impl Runner {
         list_attempt_evidence(attempt, p);
         let gated = matches!(stage.gate, Some(Gate::Command { .. }));
         // Before the kill: a dirty tree may yet be committed by the
-        // agent in the same session, once told.
-        if gated && !self.git.is_clean(cwd)? {
+        // agent in the same session, once told. `t.lanes` is a field
+        // apart from the attempt borrowed above, so it can be read
+        // while that borrow lives; `tree_clean(t, ..)` could not.
+        if gated && !is_clean_beside(&*self.git, cwd, &nested_lanes(&t.lanes, p, cwd, lane))? {
             return self.dirty_after_agent(t, ps, a, stage, idx, session, running, cwd, now_ms);
         }
         if gated {
@@ -7268,7 +7288,7 @@ impl Runner {
         };
         let missing = missing_artifacts(&a);
         let why = if missing.is_empty() {
-            (!self.git.is_clean(&cwd)?).then(|| format!(
+            (!self.tree_clean(t, p, &cwd, lane.as_deref())?).then(|| format!(
                 "the tree {} is not clean; have the session commit its work or revert what is not part of it, then answer proceed again. Dispatch commits nothing for you.",
                 cwd.display()
             ))
@@ -7729,7 +7749,7 @@ impl Runner {
         if let Some(reason) = self.run_setup(t, p, cwd, now_ms)? {
             return self.fail_gate(t, ps, a, &reason, now_ms);
         }
-        if !self.git.is_clean(cwd)? {
+        if !self.tree_clean(t, p, cwd, lane)? {
             let reason = if a.kind == AttemptKind::GateOnly {
                 format!("the tree at {} is not clean", cwd.display())
             } else {
@@ -7854,7 +7874,7 @@ impl Runner {
                 return self.start_gate(t, ps, p, a, stage, cwd, lane, now_ms);
             }
         };
-        let clean = self.git.is_clean(cwd)?;
+        let clean = self.tree_clean(t, p, cwd, lane)?;
         let head = self.git.head(cwd)?;
         if let Some(attempt) = find_attempt_mut(t, &a.stage, a.n)
             && let Some(g) = &mut attempt.gate
@@ -9569,6 +9589,28 @@ pub fn ticket_costs_slot(t: &Ticket) -> bool {
 /// Any other lane is a path inside the ticket's tree and goes with it.
 fn removes_lane(p: &Pipeline, lane: &LaneRecord) -> bool {
     !lane.removed && p.lane(&lane.name).is_some_and(|l| l.repo.is_some())
+}
+
+/// The worktrees of the lanes in `lanes` that have a repository of
+/// their own and sit strictly inside `cwd`, for the root or joined
+/// context; none for a lane's own (`lane` is `Some`). What `tree_clean`
+/// reads on their own terms. It takes the lanes alone so a caller
+/// holding one of the ticket's attempts mutably can still borrow them.
+fn nested_lanes(
+    lanes: &[LaneRecord],
+    p: &Pipeline,
+    cwd: &Path,
+    lane: Option<&str>,
+) -> Vec<PathBuf> {
+    if lane.is_some() {
+        return Vec::new();
+    }
+    lanes
+        .iter()
+        .filter(|l| removes_lane(p, l))
+        .map(|l| l.worktree.clone())
+        .filter(|w| w != cwd && w.starts_with(cwd))
+        .collect()
 }
 
 /// The paths a close of `t` would remove, in the order `remove_trees`

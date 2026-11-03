@@ -278,7 +278,7 @@ impl Runner {
         now_ms: u64,
     ) -> Result<()> {
         let (stage_name, n) = key.clone();
-        if !self.git.is_clean(cwd)? {
+        if !self.tree_clean(t, p, cwd, lane)? {
             let reason = format!(
                 "the tree at {} is not clean when a review round would start",
                 cwd.display()
@@ -696,7 +696,9 @@ impl Runner {
             return self.open_round(t, ps, p, stage, &key, cwd, lane, now_ms);
         };
         match round.state {
-            RoundState::Reviewing => self.poll_reviewers(t, ps, p, stage, a, &round, cwd, now_ms),
+            RoundState::Reviewing => {
+                self.poll_reviewers(t, ps, p, stage, a, &round, cwd, lane, now_ms)
+            }
             RoundState::Findings => {
                 if round.fix_authorised {
                     self.start_fix(t, ps, p, stage, &key, &round, cwd, lane, now_ms)
@@ -704,7 +706,7 @@ impl Runner {
                     Ok(())
                 }
             }
-            RoundState::Fixing => self.poll_fix(t, ps, stage, a, &round, cwd, now_ms),
+            RoundState::Fixing => self.poll_fix(t, ps, p, stage, a, &round, cwd, lane, now_ms),
             RoundState::Fixed | RoundState::Converged | RoundState::Accepted => {
                 // A rewrite whose intent was saved and whose end was not:
                 // the checks passed, and the branch may have moved since.
@@ -744,6 +746,7 @@ impl Runner {
         a: &Attempt,
         round: &ReviewRound,
         cwd: &Path,
+        lane: Option<&str>,
         now_ms: u64,
     ) -> Result<()> {
         let key = (a.stage.clone(), a.n);
@@ -778,7 +781,7 @@ impl Runner {
             return Ok(());
         }
         let head = self.git.head(cwd)?;
-        if !self.git.is_clean(cwd)? || head != round.head {
+        if !self.tree_clean(t, p, cwd, lane)? || head != round.head {
             let reason = format!(
                 "round {}: the tree at {} changed while the reviewers read it (head {} then {head}); the round's evidence is void",
                 round.n,
@@ -1395,10 +1398,12 @@ impl Runner {
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
+        p: &Pipeline,
         stage: &Stage,
         a: &Attempt,
         round: &ReviewRound,
         cwd: &Path,
+        lane: Option<&str>,
         now_ms: u64,
     ) -> Result<()> {
         let key = (a.stage.clone(), a.n);
@@ -1464,10 +1469,11 @@ impl Runner {
         if !settle_file(&response, &mut rm.settle)? {
             return self.save_ticket(t, now_ms);
         }
-        if !self.git.is_clean(cwd)? {
+        if !self.tree_clean(t, p, cwd, lane)? {
             // A commit whose hook is still running leaves the tree
             // dirty for minutes after the response settles; while the
             // session lives the round waits for it, within a bound.
+            let rm = round_of(t, &key, round.n);
             if running && waits_for_commit(rm, &ticket_id, &key.0, &a.context, now_ms) {
                 return self.save_ticket(t, now_ms);
             }
@@ -1587,7 +1593,7 @@ impl Runner {
         if let Some(reason) = self.run_setup(t, p, cwd, now_ms)? {
             return self.fail_checks(t, ps, &key.0, key.1, &reason, now_ms);
         }
-        if !self.git.is_clean(cwd)? {
+        if !self.tree_clean(t, p, cwd, lane)? {
             let reason = format!(
                 "the tree at {} is not clean before the checks",
                 cwd.display()
@@ -1714,7 +1720,7 @@ impl Runner {
                 return self.start_checks(t, ps, p, stage, &a, round, cwd, lane, now_ms);
             }
         };
-        let clean = self.git.is_clean(cwd)?;
+        let clean = self.tree_clean(t, p, cwd, lane)?;
         let head = self.git.head(cwd)?;
         if let Some(g) = &mut record_of(t, &key.0, key.1).gate {
             g.exit = Some(code);
@@ -1905,7 +1911,7 @@ impl Runner {
         // A tree changed since is not what the checks saw. The branch
         // is still at the reviewed head, so `keep` stays on offer for
         // once the tree is cleaned.
-        if !self.git.is_clean(&cwd)? {
+        if !self.tree_clean(t, p, &cwd, lane.as_deref())? {
             let reason = format!(
                 "the tree at {} is not clean, so the commits at {before} cannot be kept",
                 cwd.display()
@@ -1949,7 +1955,7 @@ impl Runner {
         if mode == Commits::Keep {
             return Ok(Some(before.to_owned()));
         }
-        if !self.git.is_clean(cwd)? {
+        if !self.tree_clean(t, p, cwd, lane)? {
             let reason = format!(
                 "the tree at {} is not clean when its commits would be rewritten",
                 cwd.display()
@@ -2016,7 +2022,7 @@ impl Runner {
         record.to = count(groups.len());
         record_of(t, &key.0, key.1).rewrite = Some(record);
         self.save_ticket(t, now_ms)?;
-        self.replay_and_move(t, ps, key, cwd, &base, before, &groups, now_ms)
+        self.replay_and_move(t, ps, p, key, cwd, lane, &base, before, &groups, now_ms)
     }
 
     /// `groups` replayed onto `base` and the branch moved from `before`
@@ -2028,14 +2034,16 @@ impl Runner {
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
+        p: &Pipeline,
         key: &(String, u32),
         cwd: &Path,
+        lane: Option<&str>,
         base: &str,
         before: &str,
         groups: &[history::Group],
         now_ms: u64,
     ) -> Result<Option<String>> {
-        let swap = self.replay_and_swap(t, ps, key, cwd, base, before, groups, now_ms)?;
+        let swap = self.replay_and_swap(t, ps, p, key, cwd, lane, base, before, groups, now_ms)?;
         let built = match &swap {
             Swap::Moved(after) | Swap::Parked(after) => Some(after.clone()),
             Swap::Refused { built, .. } => built.clone(),
@@ -2078,8 +2086,10 @@ impl Runner {
         &mut self,
         t: &mut Ticket,
         ps: &mut ProjectState,
+        p: &Pipeline,
         key: &(String, u32),
         cwd: &Path,
+        lane: Option<&str>,
         base: &str,
         from: &str,
         groups: &[history::Group],
@@ -2111,7 +2121,7 @@ impl Runner {
             });
         }
         let head = self.git.head(cwd)?;
-        let clean = self.git.is_clean(cwd)?;
+        let clean = self.tree_clean(t, p, cwd, lane)?;
         let tree = self.git.tree(cwd, "HEAD")?;
         if head != after || !clean || tree != want {
             let problem = format!(
@@ -2199,7 +2209,7 @@ impl Runner {
             );
             return self.complete_review(t, ps, p, stage, &key, cwd, lane, before, now_ms);
         }
-        let clean = self.git.is_clean(cwd)?;
+        let clean = self.tree_clean(t, p, cwd, lane)?;
         let tree = self.git.tree(cwd, "HEAD")?;
         let want = self.git.tree(cwd, before)?;
         if clean && tree == want {
@@ -2714,7 +2724,7 @@ impl Runner {
         // The rewriter's work is over, whatever comes of it.
         self.kill_rewriter(t, ps, key, now_ms)?;
         let head = self.git.head(cwd)?;
-        let clean = self.git.is_clean(cwd)?;
+        let clean = self.tree_clean(t, p, cwd, lane)?;
         if !clean || head != from {
             let context = record_of(t, &key.0, key.1).context.clone();
             return self.park(
@@ -2752,7 +2762,7 @@ impl Runner {
         groups: &[history::Group],
         now_ms: u64,
     ) -> Result<()> {
-        match self.replay_and_swap(t, ps, key, cwd, base, from, groups, now_ms)? {
+        match self.replay_and_swap(t, ps, p, key, cwd, lane, base, from, groups, now_ms)? {
             Swap::Moved(new) => self.message_landed(t, ps, p, key, cwd, lane, &new, now_ms),
             // Not through `fail_rewrite`: its `keep` assumes the branch
             // is at `before`, and it is at the folded head.
@@ -2921,7 +2931,7 @@ impl Runner {
             };
             return self.swap_messages(t, ps, p, key, cwd, lane, &base, &from, &groups, now_ms);
         }
-        let clean = self.git.is_clean(cwd)?;
+        let clean = self.tree_clean(t, p, cwd, lane)?;
         let tree = self.git.tree(cwd, "HEAD")?;
         let want = self.git.tree(cwd, &from)?;
         if clean && tree == want {
