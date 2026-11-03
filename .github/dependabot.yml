@@ -7,6 +7,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # A new release waits a week before Dependabot offers it: the
+    # first days are when a yanked crate or a broken point release
+    # shows itself.
+    cooldown:
+      default-days: 7
     groups:
       minor-and-patch:
         update-types:
@@ -17,8 +22,18 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # A new release waits a week before Dependabot offers it: the
+    # first days are when a yanked crate or a broken point release
+    # shows itself.
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: npm
     directory: /tests/browser
     schedule:
       interval: weekly
+    # A new release waits a week before Dependabot offers it: the
+    # first days are when a yanked crate or a broken point release
+    # shows itself.
+    cooldown:
+      default-days: 7
