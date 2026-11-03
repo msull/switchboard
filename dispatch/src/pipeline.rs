@@ -240,6 +240,19 @@ pub enum Source {
     PullRequest,
 }
 
+impl Source {
+    /// The `kind` the pipeline file spells it with.
+    #[must_use]
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Source::Github { .. } => "github",
+            Source::TaskFile { .. } => "task-file",
+            Source::Manual => "manual",
+            Source::PullRequest => "pull-request",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lane {
     pub name: String,

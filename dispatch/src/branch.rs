@@ -12,6 +12,12 @@
 //! renders them again from the ticket's own copy of the file, cannot
 //! fail later. There is no fallback to the default name: a repository
 //! that wants a convention may refuse a push of any other.
+//!
+//! A manual ticket is the exception. It has no number, and its `{key}`
+//! is the one `take --key` gave, not a match in the title. Without a
+//! template it is `dispatch/manual-<key>`, or `dispatch/manual-<id>`
+//! when taken without a key. A template that uses `{key}` for a ticket
+//! taken without one gives the same fallback.
 
 use anyhow::{Result, anyhow, bail};
 use regex::Regex;
@@ -110,7 +116,120 @@ pub fn names<'a>(p: &'a Pipeline, s: &SourceSnapshot) -> Result<Vec<(Option<&'a 
     Ok(out)
 }
 
+/// The name a manual ticket falls back to when its template cannot
+/// name it: `dispatch/manual-<key>`, or `dispatch/manual-<id>` without a
+/// key. A manual ticket has no number, so the GitHub default
+/// `branch_name(number, ..)` cannot name it.
+fn manual_fallback(s: &SourceSnapshot) -> Result<String> {
+    let name = s
+        .manual_name()
+        .ok_or_else(|| anyhow!("{:?} is not a manual ticket", s.identity))?;
+    let name = format!("dispatch/manual-{}", manual_key(name)?);
+    check_ref_name(&name).map_err(|why| anyhow!(why))?;
+    Ok(name)
+}
+
+/// A manual ticket's name (its key, or its id without one) as a branch
+/// name may hold it, refused when nothing of it is left.
+fn manual_key(key: &str) -> Result<String> {
+    let clean = sanitize(key);
+    if clean.is_empty() {
+        bail!("the name {key:?} has no character a branch name may hold");
+    }
+    Ok(clean)
+}
+
+/// A manual ticket's name as its branch spells it, so two names that
+/// share a branch compare equal. A name with nothing a branch may hold
+/// stands as written; the take refuses it when it names the branch.
+pub(crate) fn manual_slug(name: &str) -> String {
+    let clean = sanitize(name);
+    if clean.is_empty() {
+        name.to_owned()
+    } else {
+        clean
+    }
+}
+
+/// A manual ticket's name from the template: its `{key}` is the one it
+/// was taken with, not a match in the title, so the title is the whole
+/// slug. A template that wants a key the ticket has none for gives way
+/// to [`manual_fallback`].
+fn render_manual(p: &Pipeline, lane: Option<&Lane>, s: &SourceSnapshot) -> Result<String> {
+    let Some(template) = template_for(p, lane) else {
+        return manual_fallback(s);
+    };
+    let fail = |why: String| anyhow!("branch template {template:?}: {why}");
+    let parts = parse(template).map_err(fail)?;
+    let uses = |f: Field| parts.contains(&Part::Field(f));
+    if uses(Field::Key) && s.key.is_none() {
+        return manual_fallback(s);
+    }
+    if uses(Field::Number) {
+        return Err(fail("a manual ticket has no number".to_owned()));
+    }
+    let key = match &s.key {
+        Some(key) if uses(Field::Key) => manual_key(key).map_err(|e| fail(e.to_string()))?,
+        _ => String::new(),
+    };
+    // A manual ticket's labels are its lanes, never a type.
+    let kind = if uses(Field::Type) {
+        branch_type(p, None, &fail)?
+    } else {
+        String::new()
+    };
+    assemble(&parts, 0, &slug(&s.title), &key, &kind).map_err(fail)
+}
+
+/// The `{type}` field: a `type:` label, else `[project] branch_type`.
+fn branch_type(
+    p: &Pipeline,
+    label: Option<&str>,
+    fail: &dyn Fn(String) -> anyhow::Error,
+) -> Result<String> {
+    let raw = label
+        .map(str::trim)
+        .or(p.project.branch_type.as_deref())
+        .ok_or_else(|| {
+            fail("{type} needs a type: label on the issue or [project] branch_type".to_owned())
+        })?;
+    let kind = sanitize(raw);
+    if kind.is_empty() {
+        return Err(fail(format!(
+            "the type {raw:?} has no character a branch name may hold"
+        )));
+    }
+    Ok(kind)
+}
+
+/// The template's parts filled in and checked as a ref name.
+fn assemble(
+    parts: &[Part],
+    number: u64,
+    slug_text: &str,
+    key: &str,
+    kind: &str,
+) -> std::result::Result<String, String> {
+    let mut name = String::new();
+    for part in parts {
+        match part {
+            Part::Text(t) => name.push_str(t),
+            Part::Field(Field::Number) => name.push_str(&number.to_string()),
+            Part::Field(Field::Slug) => name.push_str(slug_text),
+            Part::Field(Field::Key) => name.push_str(key),
+            Part::Field(Field::Type) => name.push_str(kind),
+        }
+    }
+    // An empty slug leaves the hyphen before it.
+    let name = name.trim_end_matches('-');
+    check_ref_name(name)?;
+    Ok(name.to_owned())
+}
+
 fn render(p: &Pipeline, lane: Option<&Lane>, s: &SourceSnapshot) -> Result<String> {
+    if s.is_manual() {
+        return render_manual(p, lane, s);
+    }
     let number = s.number.unwrap_or(0);
     let Some(template) = template_for(p, lane) else {
         return Ok(branch_name(number, &s.title));
@@ -155,40 +274,12 @@ fn render(p: &Pipeline, lane: Option<&Lane>, s: &SourceSnapshot) -> Result<Strin
         String::new()
     };
     let kind = if uses(Field::Type) {
-        let raw = s
-            .labels
-            .iter()
-            .find_map(|l| l.strip_prefix("type:"))
-            .map(str::trim)
-            .or(p.project.branch_type.as_deref())
-            .ok_or_else(|| {
-                fail("{type} needs a type: label on the issue or [project] branch_type".to_owned())
-            })?;
-        let kind = sanitize(raw);
-        if kind.is_empty() {
-            return Err(fail(format!(
-                "the type {raw:?} has no character a branch name may hold"
-            )));
-        }
-        kind
+        let label = s.labels.iter().find_map(|l| l.strip_prefix("type:"));
+        branch_type(p, label, &fail)?
     } else {
         String::new()
     };
-    let slug_text = slug(&title);
-    let mut name = String::new();
-    for part in &parts {
-        match part {
-            Part::Text(t) => name.push_str(t),
-            Part::Field(Field::Number) => name.push_str(&number.to_string()),
-            Part::Field(Field::Slug) => name.push_str(&slug_text),
-            Part::Field(Field::Key) => name.push_str(&key),
-            Part::Field(Field::Type) => name.push_str(&kind),
-        }
-    }
-    // An empty slug leaves the hyphen before it.
-    let name = name.trim_end_matches('-');
-    check_ref_name(name).map_err(fail)?;
-    Ok(name.to_owned())
+    assemble(&parts, number, &slug(&title), &key, &kind).map_err(fail)
 }
 
 /// `value` reduced to `[A-Za-z0-9._-]`: every other character a hyphen,
@@ -257,7 +348,8 @@ fn check_ref_name(name: &str) -> Result<(), String> {
 }
 
 /// The checks a pipeline's branch keys need before any ticket: each
-/// template's fields, a `branch_key` for `{key}` with one capture group
+/// template's fields, a `branch_key` for `{key}` (except on a manual
+/// pipeline, whose tickets carry their key) with one capture group
 /// or a group named `key`, a lane's `branch` only on a lane with its
 /// own repository, and none of them on a pull-request pipeline, whose
 /// tickets keep the pull requests' branches.
@@ -290,7 +382,14 @@ pub(crate) fn validate(p: &Pipeline) -> Result<()> {
     let mut uses_key = false;
     for (what, t) in templates {
         let parts = parse(t).map_err(|why| anyhow!("{what} {t:?}: {why}"))?;
-        uses_key |= parts.contains(&Part::Field(Field::Key));
+        let has_key = parts.contains(&Part::Field(Field::Key));
+        // A manual ticket's key is its identity and it has no number, so
+        // a template without `{key}` could give two open tickets the
+        // same branch.
+        if p.source == Source::Manual && !has_key {
+            bail!("{what} {t:?}: a manual pipeline's template needs {{key}} to tell tickets apart");
+        }
+        uses_key |= has_key;
     }
     if let Some(pattern) = &project.branch_key {
         let re = Regex::new(pattern).map_err(|e| {
@@ -302,7 +401,8 @@ pub(crate) fn validate(p: &Pipeline) -> Result<()> {
                 "[project] branch_key {pattern:?} needs exactly one capture group, or one named `key`"
             );
         }
-    } else if uses_key {
+    } else if uses_key && p.source != Source::Manual {
+        // A manual ticket brings its key with it (`take --key`).
         bail!("a branch template uses {{key}}, which needs [project] branch_key");
     }
     if let Some(kind) = &project.branch_type
@@ -319,7 +419,7 @@ mod tests {
 
     const BASE: &str = r#"
 version = 1
-source = { kind = "manual" }
+source = { kind = "github", repo = "o/r", label = "dispatch" }
 
 [project]
 name = "demo"
@@ -350,7 +450,7 @@ path = "."
 
     fn snapshot(title: &str, labels: &[&str]) -> SourceSnapshot {
         SourceSnapshot {
-            kind: "manual".into(),
+            kind: "github".into(),
             identity: "x".into(),
             number: Some(7),
             title: title.into(),
@@ -360,6 +460,7 @@ path = "."
             taken_at_ms: 0,
             pull_requests: Vec::new(),
             taken_by: None,
+            key: None,
         }
     }
 
@@ -557,8 +658,138 @@ repo = "https://example.invalid/docs.git"
             "[[lanes]]\nname = \"app\"\npath = \".\"\nbranch = \"x/{slug}\"",
             "only for a lane with its own repo",
         );
-        let pr = BASE.replace("{ kind = \"manual\" }", "{ kind = \"pull-request\" }");
+        let pr = BASE.replace(
+            "{ kind = \"github\", repo = \"o/r\", label = \"dispatch\" }",
+            "{ kind = \"pull-request\" }",
+        );
         let e = Pipeline::parse(&format!("{pr}branch_type = \"feat\"\n{LANE}")).unwrap_err();
         assert!(format!("{e:#}").contains("pull-request pipeline"), "{e:#}");
+    }
+
+    fn manual_pipeline(project_extra: &str, lanes: &str) -> Result<Pipeline> {
+        let base = BASE.replace(
+            "{ kind = \"github\", repo = \"o/r\", label = \"dispatch\" }",
+            "{ kind = \"manual\" }",
+        );
+        Pipeline::parse(&format!("{base}{project_extra}\n{lanes}"))
+    }
+
+    fn manual(title: &str, key: Option<&str>) -> SourceSnapshot {
+        SourceSnapshot {
+            kind: "manual".into(),
+            identity: key.unwrap_or("9f8e7d6c").into(),
+            number: None,
+            labels: vec!["lane:app".into()],
+            key: key.map(str::to_owned),
+            ..snapshot(title, &[])
+        }
+    }
+
+    #[test]
+    fn a_manual_key_fills_the_template_and_the_whole_title_is_the_slug() {
+        let p = manual_pipeline(
+            "branch = \"{type}/{key}-{slug}\"\nbranch_type = \"feat\"",
+            LANE,
+        )
+        .unwrap();
+        // The title is not searched for the key, so it is not stripped.
+        let s = manual("ABC-123 Fix the thing", Some("ABC-123"));
+        assert_eq!(tree(&p, &s).unwrap(), "feat/ABC-123-abc-123-fix-the-thing");
+        let s = manual("Fix the thing", Some("ABC-123"));
+        assert_eq!(tree(&p, &s).unwrap(), "feat/ABC-123-fix-the-thing");
+        // A `branch_key` on a manual pipeline is allowed and unused.
+        let p = manual_pipeline("branch = \"{key}-{slug}\"\nbranch_key = '(Z+)'", LANE).unwrap();
+        assert_eq!(tree(&p, &s).unwrap(), "ABC-123-fix-the-thing");
+    }
+
+    #[test]
+    fn a_manual_ticket_without_a_key_falls_back_to_its_id() {
+        let p = manual_pipeline("branch = \"{key}-{slug}\"", LANE).unwrap();
+        let s = manual("Fix the thing", None);
+        assert_eq!(tree(&p, &s).unwrap(), "dispatch/manual-9f8e7d6c");
+        // The fallback comes before the number check.
+        let p = manual_pipeline("branch = \"{key}/{number}-{slug}\"", LANE).unwrap();
+        assert_eq!(tree(&p, &s).unwrap(), "dispatch/manual-9f8e7d6c");
+    }
+
+    #[test]
+    fn a_manual_ticket_without_a_template_is_named_by_its_key_or_id() {
+        let p = manual_pipeline("", LANE).unwrap();
+        assert_eq!(
+            tree(&p, &manual("Fix it", Some("ABC-123"))).unwrap(),
+            "dispatch/manual-ABC-123"
+        );
+        assert_eq!(
+            tree(&p, &manual("Fix it", None)).unwrap(),
+            "dispatch/manual-9f8e7d6c"
+        );
+    }
+
+    #[test]
+    fn a_manual_ticket_has_no_number_for_a_template() {
+        let p = manual_pipeline("branch = \"{key}/{number}\"", LANE).unwrap();
+        let e = tree(&p, &manual("Fix it", Some("ABC-1"))).unwrap_err();
+        assert!(
+            e.to_string().contains("a manual ticket has no number"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_manual_template_without_a_key_is_refused() {
+        let e = manual_pipeline("branch = \"feat/{slug}\"", LANE).unwrap_err();
+        assert!(format!("{e:#}").contains("needs {key}"), "{e:#}");
+    }
+
+    #[test]
+    fn a_manual_key_with_nothing_a_branch_may_hold_is_refused() {
+        let p = manual_pipeline("branch = \"{key}-{slug}\"", LANE).unwrap();
+        let e = tree(&p, &manual("Fix it", Some("???"))).unwrap_err();
+        assert!(e.to_string().contains("no character"), "{e}");
+        let p = manual_pipeline("", LANE).unwrap();
+        let e = tree(&p, &manual("Fix it", Some("///"))).unwrap_err();
+        assert!(e.to_string().contains("no character"), "{e}");
+    }
+
+    #[test]
+    fn a_key_template_needs_branch_key_only_off_a_manual_pipeline() {
+        manual_pipeline("branch = \"{key}\"", LANE).unwrap();
+        let e = pipeline("branch = \"{key}\"", LANE).unwrap_err();
+        assert!(
+            format!("{e:#}").contains("needs [project] branch_key"),
+            "{e:#}"
+        );
+    }
+
+    #[test]
+    fn a_manual_lane_with_its_own_repo_follows_the_same_rule() {
+        let lanes = r#"
+[[lanes]]
+name = "app"
+path = "."
+
+[[lanes]]
+name = "infra"
+path = "infra"
+repo = "https://example.invalid/infra.git"
+branch = "infra/{key}"
+"#;
+        let p = manual_pipeline("branch = \"{key}-{slug}\"", lanes).unwrap();
+        let keyed = manual("Go", Some("ABC-1"));
+        assert_eq!(
+            names(&p, &keyed).unwrap(),
+            vec![
+                (None, "ABC-1-go".to_owned()),
+                (Some("infra"), "infra/ABC-1".to_owned()),
+            ]
+        );
+        let keyless = manual("Go", None);
+        assert_eq!(
+            names(&p, &keyless).unwrap(),
+            vec![
+                (None, "dispatch/manual-9f8e7d6c".to_owned()),
+                (Some("infra"), "dispatch/manual-9f8e7d6c".to_owned()),
+            ]
+        );
     }
 }

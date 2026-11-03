@@ -131,6 +131,9 @@ pub const USAGE: &str = "usage:
   dispatch take <project> <issue-number>   make a ticket from an issue and queue it
   dispatch take <project> pr <lane>/<n>... a ticket from someone's pull requests, one per lane,
                                            on <project>.pr.toml; the lane may be left off with one lane
+  dispatch take <project> --title <text> (--body <text> | --body-file <path>) [--key <id>] [--lane <name>]...
+                                           a ticket typed in, for a pipeline with [source] kind = \"manual\";
+                                           --key names its branch through {key}, --lane hints its lanes
   dispatch run [--once]                    drive every ticket (once, or until stopped)
   dispatch runner stop|start|restart       stop or start the runner the app runs; restart waits for the new pid
   dispatch decide <ticket> <decision> <answer> [--note <text> | --file <path>]

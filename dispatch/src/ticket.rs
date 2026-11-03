@@ -11,6 +11,10 @@ use switchboard_control::{Body, Class, Reply};
 use crate::events::short;
 use crate::history::Commits;
 
+/// The prefix of a manual ticket's label for each `take --lane`: the
+/// lanes it names, which the `lanes` decision takes as hints.
+pub const MANUAL_LANE_LABEL: &str = "lane:";
+
 /// Where a ticket came from, as it was when taken.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceSnapshot {
@@ -33,6 +37,11 @@ pub struct SourceSnapshot {
     /// Who took it: `supervisor`, or `None` for the owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taken_by: Option<String>,
+    /// The tracker's key for a manual ticket (`ABC-123`), as `--key`
+    /// gave it; `None` for a manual ticket taken without one and for
+    /// every other source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 impl SourceSnapshot {
@@ -43,9 +52,26 @@ impl SourceSnapshot {
         !self.pull_requests.is_empty()
     }
 
-    /// How a listing names the source: `#12` for an issue, and for pull
+    /// Whether the ticket was typed in with `take --title`, not read
+    /// from a tracker.
+    #[must_use]
+    pub fn is_manual(&self) -> bool {
+        self.kind == "manual"
+    }
+
+    /// What names a manual ticket: the key it was taken with or, without
+    /// one, its own id, which take copies into `identity`. `None` for any
+    /// other source.
+    #[must_use]
+    pub fn manual_name(&self) -> Option<&str> {
+        self.is_manual()
+            .then(|| self.key.as_deref().unwrap_or(&self.identity))
+    }
+
+    /// How a listing names the source: `#12` for an issue, for pull
     /// requests `pr <lane>/<n>` joined by `+`, as `take` spells them, so
-    /// a PR and an issue with the same number never read alike.
+    /// a PR and an issue with the same number never read alike, and for
+    /// a manual ticket its key or, without one, its id.
     #[must_use]
     pub fn label(&self) -> String {
         if self.is_pull_request() {
@@ -55,6 +81,20 @@ impl SourceSnapshot {
                 .map(|pr| format!("{}/{}", pr.lane, pr.number))
                 .collect();
             format!("pr {}", prs.join("+"))
+        } else if self.is_manual() {
+            self.manual_name().unwrap_or_default().to_owned()
+        } else {
+            format!("#{}", self.number.unwrap_or(0))
+        }
+    }
+
+    /// How prose names the ticket: `#12` for anything with a number, as
+    /// a pull request's title and notes always have, and the label for a
+    /// manual ticket, which has none.
+    #[must_use]
+    pub fn reference(&self) -> String {
+        if self.is_manual() {
+            self.label()
         } else {
             format!("#{}", self.number.unwrap_or(0))
         }
@@ -1901,6 +1941,7 @@ pub(crate) fn blank() -> Ticket {
             labels: vec![],
             taken_at_ms: 0,
             taken_by: None,
+            key: None,
         },
         pipeline_fingerprint: String::new(),
         pipeline_file: PathBuf::new(),
@@ -1951,6 +1992,79 @@ pub(crate) fn chosen_lane(name: &str) -> LaneRecord {
 mod tests {
     use super::*;
     use crate::scheduler::new_attempt;
+
+    fn manual(key: Option<&str>) -> SourceSnapshot {
+        SourceSnapshot {
+            identity: key.unwrap_or("9f8e7d6c").into(),
+            key: key.map(str::to_owned),
+            ..blank().source
+        }
+    }
+
+    fn github(number: u64) -> SourceSnapshot {
+        SourceSnapshot {
+            kind: "github".into(),
+            identity: format!("o/r#{number}"),
+            number: Some(number),
+            ..blank().source
+        }
+    }
+
+    #[test]
+    fn a_key_round_trips_and_a_snapshot_without_one_reads_none() {
+        let keyed = manual(Some("ABC-123"));
+        let json = serde_json::to_value(&keyed).unwrap();
+        assert_eq!(json["key"], "ABC-123");
+        let back: SourceSnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(back, keyed);
+
+        let keyless = manual(None);
+        let json = serde_json::to_value(&keyless).unwrap();
+        assert!(json.get("key").is_none(), "an absent key is not written");
+        let mut old = json.clone();
+        old.as_object_mut().unwrap().remove("key");
+        let back: SourceSnapshot = serde_json::from_value(old).unwrap();
+        assert_eq!(back.key, None);
+        assert_eq!(back, keyless);
+    }
+
+    #[test]
+    fn a_manual_ticket_is_named_by_its_key_or_its_id_and_never_hash_zero() {
+        let keyed = manual(Some("ABC-123"));
+        assert_eq!(keyed.manual_name(), Some("ABC-123"));
+        assert_eq!(keyed.label(), "ABC-123");
+        assert_eq!(keyed.reference(), "ABC-123");
+
+        let keyless = manual(None);
+        assert_eq!(keyless.manual_name(), Some("9f8e7d6c"));
+        assert_eq!(keyless.label(), "9f8e7d6c");
+        assert_eq!(keyless.reference(), "9f8e7d6c");
+
+        let issue = github(42);
+        assert_eq!(issue.manual_name(), None);
+        assert_eq!(issue.label(), "#42");
+        assert_eq!(issue.reference(), "#42");
+
+        let pr = SourceSnapshot {
+            pull_requests: vec![PullRequestSource {
+                lane: "api".into(),
+                provider: "github".into(),
+                repo: "o/r".into(),
+                number: 7,
+                url: "u".into(),
+                branch: "feature".into(),
+                base: "main".into(),
+                remote: String::new(),
+                local: String::new(),
+                head: "abc".into(),
+                title: "t".into(),
+            }],
+            ..github(7)
+        };
+        assert_eq!(pr.manual_name(), None);
+        assert_eq!(pr.label(), "pr api/7");
+        assert_eq!(pr.reference(), "#7");
+    }
 
     #[test]
     fn inputs_come_from_the_latest_completed_attempt_that_wrote_them() {

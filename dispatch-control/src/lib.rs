@@ -541,6 +541,10 @@ pub struct TicketView {
     /// someone else's work, `task-file` or `manual`.
     pub kind: String,
     pub number: Option<u64>,
+    /// What names a manual ticket, which has no number: the tracker key
+    /// it was taken with (`ABC-123`), or its own id when taken without
+    /// one. `None` for every other source.
+    pub key: Option<String>,
     pub title: String,
     pub body: String,
     pub url: Option<String>,
@@ -1156,6 +1160,20 @@ fn to_line<T: Serialize>(value: &T) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ticket_view_carries_its_key_and_reads_without_one() {
+        let with: TicketView =
+            serde_json::from_str(r#"{"id": "9f8e7d6c", "kind": "manual", "key": "ABC-123"}"#)
+                .unwrap();
+        assert_eq!(with.key.as_deref(), Some("ABC-123"));
+        let without: TicketView =
+            serde_json::from_str(r#"{"id": "a1b2c3d4", "kind": "github", "number": 42}"#).unwrap();
+        assert_eq!(without.key, None);
+        let back: TicketView =
+            serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(back, with);
+    }
 
     #[test]
     fn a_too_large_reason_reads_back_its_size_and_nothing_else_does() {

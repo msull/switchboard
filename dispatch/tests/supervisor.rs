@@ -204,6 +204,7 @@ fn source(project: &str, number: u64, now: u64) -> SourceSnapshot {
         labels: vec!["dispatch".into()],
         taken_at_ms: now,
         taken_by: None,
+        key: None,
         pull_requests: Vec::new(),
     }
 }

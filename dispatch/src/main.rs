@@ -15,7 +15,7 @@ use dispatch::pipeline::{DeployWait, Lane};
 use dispatch::port::SocketPort;
 use dispatch::report::{self, TicketReport};
 use dispatch::scheduler::{BY_SUPERVISOR, Runner, attempt_label, kept_branches};
-use dispatch::serve::{Handler, Server, take_issue, take_pull_requests};
+use dispatch::serve::{Handler, ManualTicket, Server, take_issue, take_manual, take_pull_requests};
 use dispatch::serve::{ticket_paths, ticket_view};
 use dispatch::store::{DataDir, read_ticket};
 use dispatch::subscribe;
@@ -143,6 +143,12 @@ fn command(args: &[&str]) -> Result<()> {
     }
     match args {
         ["take", project, "pr", specs @ ..] => take_prs(project, specs),
+        // Before `<issue>`, which would take `--title` for an issue
+        // number; any leading flag is a typed ticket, whose parser
+        // names the flags it does not know.
+        ["take", project, rest @ ..] if rest.first().is_some_and(|w| w.starts_with("--")) => {
+            take_typed(project, rest)
+        }
         ["take", project, issue] => take(project, issue),
         ["run"] => run(false),
         ["run", "--once"] => run(true),
@@ -258,6 +264,57 @@ fn take_prs(project: &str, specs: &[&str]) -> Result<()> {
 fn take(project: &str, issue: &str) -> Result<()> {
     let mut runner = runner()?;
     let ticket = take_issue(&mut runner, &Gh, project, issue, now_ms())?;
+    say!(
+        "{} {} {}",
+        ticket.id,
+        ticket.source.label(),
+        ticket.source.title
+    );
+    Ok(())
+}
+
+/// `take <project> --title <text> (--body <text> | --body-file <path>)
+/// [--key <id>] [--lane <name>]...`: a ticket typed on the command line.
+/// The body file is read here, so the library takes text only.
+fn take_typed(project: &str, args: &[&str]) -> Result<()> {
+    let flags = Flags::parse(
+        args,
+        &["--title", "--body", "--body-file", "--key", "--lane"],
+        &[],
+    );
+    if !flags.rest.is_empty() {
+        eprintln!(
+            "take with --title takes no other words: {}",
+            flags.rest.join(" ")
+        );
+        usage();
+    }
+    let Some(title) = flags.value("--title") else {
+        eprintln!("take with flags needs --title");
+        usage();
+    };
+    let body = match (flags.value("--body"), flags.value("--body-file")) {
+        (Some(body), None) => body.to_owned(),
+        (None, Some(path)) => {
+            std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("--body-file {path}: {e}"))?
+        }
+        _ => {
+            eprintln!("take needs exactly one of --body and --body-file");
+            usage();
+        }
+    };
+    let mut runner = runner()?;
+    let ticket = take_manual(
+        &mut runner,
+        project,
+        &ManualTicket {
+            title,
+            body: &body,
+            key: flags.value("--key"),
+            lanes: &flags.all("--lane"),
+        },
+        now_ms(),
+    )?;
     say!(
         "{} {} {}",
         ticket.id,

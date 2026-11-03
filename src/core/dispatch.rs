@@ -522,14 +522,15 @@ pub(crate) struct StaleGuard {
     pub still_noted: bool,
 }
 
-/// `#104` for an issue, `PR #3` for a pull request, nothing for a
-/// ticket without a number.
+/// `#104` for an issue, `PR #3` for a pull request, and for a ticket
+/// without a number (one typed in) its key, `ABC-123` or its own id;
+/// nothing when it has neither, as from a runner too old to send a key.
 #[must_use]
 pub fn ticket_source(t: &TicketView) -> String {
     match t.number {
         Some(n) if t.kind == "pull-request" => format!("PR #{n}"),
         Some(n) => format!("#{n}"),
-        None => String::new(),
+        None => t.key.clone().unwrap_or_default(),
     }
 }
 

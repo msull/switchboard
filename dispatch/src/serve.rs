@@ -199,6 +199,100 @@ pub fn take_issue(
     runner.take(project, &text, source, now_ms)
 }
 
+/// What `take --title` was given: a title and body, the tracker key the
+/// ticket is known by (`ABC-123`), and the lanes it names, each kept as
+/// a `lane:<name>` label the `lanes` decision reads as a hint.
+#[derive(Debug, Clone, Copy)]
+pub struct ManualTicket<'a> {
+    pub title: &'a str,
+    pub body: &'a str,
+    pub key: Option<&'a str>,
+    pub lanes: &'a [&'a str],
+}
+
+/// The snapshot of a ticket typed on the command line, for a project
+/// whose pipeline takes from `[source] kind = "manual"`. Without a key
+/// its identity is left for take to fill with the ticket's own id.
+pub fn manual_source(
+    pipeline: &Pipeline,
+    ticket: &ManualTicket,
+    now_ms: u64,
+) -> Result<SourceSnapshot> {
+    let ManualTicket {
+        title,
+        body,
+        key,
+        lanes,
+    } = *ticket;
+    let title = title.trim();
+    if title.is_empty() {
+        bail!("--title is empty");
+    }
+    if body.trim().is_empty() {
+        bail!("the body is empty");
+    }
+    let key = key.map(str::trim);
+    if let Some(key) = key {
+        if key.is_empty() {
+            bail!("--key is empty");
+        }
+        if key.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            bail!("--key {key:?} holds a space or a control character");
+        }
+    }
+    let mut labels = Vec::new();
+    for lane in lanes {
+        if pipeline.lane(lane).is_none() {
+            let names: Vec<&str> = pipeline.lanes.iter().map(|l| l.name.as_str()).collect();
+            bail!(
+                "--lane {lane}: the pipeline has no such lane; its lanes are {}",
+                names.join(", ")
+            );
+        }
+        let label = format!("{}{lane}", crate::ticket::MANUAL_LANE_LABEL);
+        if labels.contains(&label) {
+            bail!("lane {lane} is named twice");
+        }
+        labels.push(label);
+    }
+    Ok(SourceSnapshot {
+        kind: "manual".into(),
+        identity: key.unwrap_or_default().to_owned(),
+        number: None,
+        title: title.to_owned(),
+        body: body.to_owned(),
+        url: None,
+        labels,
+        taken_at_ms: now_ms,
+        pull_requests: Vec::new(),
+        taken_by: None,
+        key: key.map(str::to_owned),
+    })
+}
+
+/// Make a ticket typed on the command line, as `dispatch take <project>
+/// --title ...` does, on a project whose pipeline has a manual source.
+/// Nothing is fetched: the ticket is what `manual_source` builds.
+pub fn take_manual(
+    runner: &mut Runner,
+    project: &str,
+    ticket: &ManualTicket,
+    now_ms: u64,
+) -> Result<Ticket> {
+    let path = runner.data.pipeline(project);
+    let text = fs::read_to_string(&path)
+        .with_context(|| format!("no pipeline for {project} at {}", path.display()))?;
+    let pipeline = Pipeline::parse(&text)?;
+    if pipeline.source != Source::Manual {
+        let kind = pipeline.source.kind_name();
+        bail!(
+            "{project}'s pipeline takes from kind = \"{kind}\", not \"manual\": a ticket is typed in only for a manual source"
+        );
+    }
+    let source = manual_source(&pipeline, ticket, now_ms)?;
+    runner.take(project, &text, source, now_ms)
+}
+
 /// Make a ticket from someone else's pull requests, one per lane, on
 /// the project's pull-request pipeline. A spec is `<lane>/<number>`,
 /// or `<number>` alone where the pipeline has one lane.
@@ -265,6 +359,7 @@ pub fn take_pull_requests(
         labels: Vec::new(),
         taken_at_ms: now_ms,
         taken_by: None,
+        key: None,
         pull_requests: prs,
     };
     runner.take(project, &text, source, now_ms)
@@ -702,6 +797,7 @@ pub fn ticket_view(t: &Ticket, p: Option<&Pipeline>) -> TicketView {
         project: t.project.clone(),
         kind: t.source.kind.clone(),
         number: t.source.number,
+        key: t.source.manual_name().map(str::to_owned),
         title: t.source.title.clone(),
         body: t.source.body.clone(),
         url: t.source.url.clone(),
@@ -1024,6 +1120,8 @@ fn serve_connection(stream: UnixStream, handler: &Mutex<Handler>) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use dispatch_control::Client;
 
     use super::*;
@@ -1076,6 +1174,115 @@ slots = 1
                 issues: vec![("o/r".into(), 7, "Seven".into(), "body".into())],
             }),
         }
+    }
+
+    const MANUAL_SOURCE: &str = "[source]\nkind = \"manual\"\n";
+
+    fn manual_pipeline() -> Pipeline {
+        Pipeline::parse(&PIPELINE.replace(
+            "[source]\nkind = \"github\"\nrepo = \"o/r\"\nlabel = \"dispatch\"\n",
+            MANUAL_SOURCE,
+        ))
+        .unwrap()
+    }
+
+    fn typed<'a>(title: &'a str, key: Option<&'a str>) -> ManualTicket<'a> {
+        ManualTicket {
+            title,
+            body: "b",
+            key,
+            lanes: &[],
+        }
+    }
+
+    #[test]
+    fn a_manual_source_refuses_what_cannot_name_a_ticket() {
+        let p = manual_pipeline();
+        let refused = |title: &str, body: &str, key: Option<&str>, lanes: &[&str], why: &str| {
+            let ticket = ManualTicket {
+                title,
+                body,
+                key,
+                lanes,
+            };
+            let e = manual_source(&p, &ticket, 5).unwrap_err();
+            assert!(e.to_string().contains(why), "{e}");
+        };
+        refused(" ", "b", None, &[], "--title is empty");
+        refused("t", "\n", None, &[], "the body is empty");
+        refused("t", "b", Some("  "), &[], "--key is empty");
+        refused("t", "b", Some("ABC 1"), &[], "a space or a control");
+        refused("t", "b", Some("ABC\u{1}1"), &[], "a space or a control");
+        refused("t", "b", None, &["web"], "no such lane; its lanes are repo");
+        refused("t", "b", None, &["repo", "repo"], "named twice");
+    }
+
+    #[test]
+    fn a_manual_source_keeps_its_key_and_its_lanes_as_labels() {
+        let p = manual_pipeline();
+        let s = manual_source(
+            &p,
+            &ManualTicket {
+                title: " Fix it ",
+                body: "why",
+                key: Some(" ABC-123 "),
+                lanes: &["repo"],
+            },
+            5,
+        )
+        .unwrap();
+        assert_eq!(s.kind, "manual");
+        assert_eq!((s.number, s.url.as_deref()), (None, None));
+        assert_eq!(s.title, "Fix it");
+        assert_eq!(s.key.as_deref(), Some("ABC-123"));
+        assert_eq!(s.identity, "ABC-123");
+        assert_eq!(s.labels, ["lane:repo"]);
+        assert_eq!(s.taken_at_ms, 5);
+        let s = manual_source(&p, &typed("Fix it", None), 5).unwrap();
+        assert_eq!(s.key, None);
+        assert!(s.labels.is_empty());
+    }
+
+    #[test]
+    fn a_manual_take_is_refused_on_a_github_pipeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = handler(dir.path());
+        let e = take_manual(&mut h.runner, "P", &typed("t", None), 5).unwrap_err();
+        assert!(e.to_string().contains("kind = \"github\""), "{e}");
+    }
+
+    #[test]
+    fn a_manual_ticket_shows_its_key_or_its_id_and_status_carries_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = handler(dir.path());
+        let manual = PIPELINE.replace(
+            "[source]\nkind = \"github\"\nrepo = \"o/r\"\nlabel = \"dispatch\"\n",
+            MANUAL_SOURCE,
+        );
+        fs::write(h.runner.data.pipeline("P"), manual).unwrap();
+        let keyed = take_manual(&mut h.runner, "P", &typed("Fix it", Some("ABC-123")), 5).unwrap();
+        assert_eq!(ticket_view(&keyed, None).key.as_deref(), Some("ABC-123"));
+        let keyless = take_manual(&mut h.runner, "P", &typed("Other", None), 6).unwrap();
+        assert_eq!(keyless.source.identity, keyless.id);
+        assert_eq!(
+            ticket_view(&keyless, None).key.as_deref(),
+            Some(keyless.id.as_str())
+        );
+        let json = serde_json::to_value(status(&h.runner).unwrap()).unwrap();
+        let keys: BTreeSet<String> = json["tickets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["key"].as_str().map(str::to_owned))
+            .collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from(["ABC-123".to_owned(), keyless.id.clone()])
+        );
+        let mut issue = crate::ticket::blank();
+        issue.source.kind = "github".into();
+        issue.source.number = Some(7);
+        assert_eq!(ticket_view(&issue, None).key, None);
     }
 
     #[test]

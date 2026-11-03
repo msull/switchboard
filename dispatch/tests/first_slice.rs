@@ -371,6 +371,7 @@ fn take_issue(
             labels: vec!["dispatch".into()],
             taken_at_ms: now,
             taken_by: None,
+            key: None,
             pull_requests: Vec::new(),
         },
         now,
@@ -5607,6 +5608,7 @@ fn the_worktree_root_is_a_setting_a_tilde_is_the_home_and_a_space_is_refused() {
                 labels: vec![],
                 taken_at_ms: now,
                 taken_by: None,
+                key: None,
                 pull_requests: Vec::new(),
             },
             now,
@@ -6778,6 +6780,7 @@ fn workspace_env_with(text: &str, labels: &[&str]) -> (Env, String) {
                 labels: labels.iter().map(|l| (*l).to_owned()).collect(),
                 taken_at_ms: now,
                 taken_by: None,
+                key: None,
                 pull_requests: Vec::new(),
             },
             now,
@@ -12465,6 +12468,7 @@ fn close_and_retake(env: &mut Env, id: &str, edit: impl FnOnce(&mut FakeRepo)) -
                 labels: vec!["area:backend".into()],
                 taken_at_ms: now,
                 taken_by: None,
+                key: None,
                 pull_requests: Vec::new(),
             },
             now,
@@ -18477,6 +18481,7 @@ fn take_orchard(env: &mut Env, number: u64, labels: &[&str]) -> String {
                 taken_at_ms: now,
                 pull_requests: Vec::new(),
                 taken_by: None,
+                key: None,
             },
             now,
         )
@@ -24689,6 +24694,7 @@ fn an_issue_is_taken_once_per_project() {
         labels: vec!["dispatch".into()],
         taken_at_ms: env.now,
         taken_by: None,
+        key: None,
         pull_requests: Vec::new(),
     };
     let second = env
@@ -25112,6 +25118,7 @@ fn take_titled_with(
             labels: labels.iter().map(|l| (*l).to_owned()).collect(),
             taken_at_ms: now,
             taken_by: None,
+            key: None,
             pull_requests,
         },
         now,
@@ -25669,4 +25676,109 @@ fn a_restart_with_two_processes_starting_sends_neither_launch_again() {
     let t = env.ticket(&id);
     assert_eq!(record(&t, "web", 1).state, ServiceState::Ready);
     assert_eq!(record(&t, "worker", 1).state, ServiceState::Ready);
+}
+
+/// The test pipeline with a manual source and `branch`, written as the
+/// project's pipeline: a ticket is typed in, not fetched.
+fn manual_env(branch: &str) -> Env {
+    let env = Env::new();
+    let text = pipeline(&env.worktrees)
+        .replace(
+            "[source]\nkind = \"github\"\nrepo = \"msull/switchboard\"\nlabel = \"dispatch\"\n",
+            "[source]\nkind = \"manual\"\n",
+        )
+        .replace(
+            "space = \"Dispatch · Switchboard\"\n",
+            &format!("space = \"Dispatch · Switchboard\"\nbranch = \"{branch}\"\n"),
+        );
+    assert!(text.contains("kind = \"manual\""), "{text}");
+    std::fs::write(env.data.pipeline(PROJECT), text).unwrap();
+    env
+}
+
+#[test]
+fn a_manual_take_writes_the_ticket_with_its_key_and_no_switchboard() {
+    let mut env = manual_env("feat/{key}-{slug}");
+    let now = env.tick();
+    let t = dispatch::serve::take_manual(
+        &mut env.runner,
+        PROJECT,
+        &dispatch::serve::ManualTicket {
+            title: "Escape leaves the field",
+            body: "It should leave the set.",
+            key: Some("ABC-123"),
+            lanes: &["repo"],
+        },
+        now,
+    )
+    .unwrap();
+    let path = env.data.ticket_file(&t.id);
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(record["source"]["kind"], "manual");
+    assert_eq!(record["source"]["number"], serde_json::Value::Null);
+    assert_eq!(record["source"]["key"], "ABC-123");
+    assert_eq!(record["source"]["identity"], "ABC-123");
+    assert_eq!(record["source"]["labels"], serde_json::json!(["lane:repo"]));
+    let copy = std::fs::read_to_string(&t.pipeline_file).unwrap();
+    assert!(copy.contains("kind = \"manual\""), "{copy}");
+    assert_eq!(
+        env.runner.load_project(PROJECT).unwrap().queue,
+        [t.id.as_str()]
+    );
+    assert!(
+        env.sb().calls.is_empty(),
+        "take asks nothing of Switchboard"
+    );
+    assert_eq!(t.source.label(), "ABC-123");
+
+    // The same key is refused while the first is open, and taken again
+    // once it is closed.
+    let again_as = |env: &mut Env, key: &'static str| {
+        let now = env.tick();
+        dispatch::serve::take_manual(
+            &mut env.runner,
+            PROJECT,
+            &dispatch::serve::ManualTicket {
+                title: "Again",
+                body: "b",
+                key: Some(key),
+                lanes: &[],
+            },
+            now,
+        )
+    };
+    let again = |env: &mut Env| again_as(env, "ABC-123");
+    let err = format!("{:#}", again(&mut env).unwrap_err());
+    assert!(err.contains("is already ticket"), "{err}");
+    // A key the branch spells the same would cut to the same branch.
+    let err = format!("{:#}", again_as(&mut env, "ABC/123").unwrap_err());
+    assert!(err.contains("is already ticket"), "{err}");
+    let now = env.tick();
+    env.runner.close_by_hand(&t.id, None, false, now).unwrap();
+    let second = again(&mut env).unwrap();
+    assert_ne!(second.id, t.id);
+}
+
+#[test]
+fn a_keyless_manual_take_is_known_by_its_own_id_in_its_branch() {
+    let mut env = manual_env("feat/{key}-{slug}");
+    let now = env.tick();
+    let t = dispatch::serve::take_manual(
+        &mut env.runner,
+        PROJECT,
+        &dispatch::serve::ManualTicket {
+            title: "Escape leaves the field",
+            body: "It should leave the set.",
+            key: None,
+            lanes: &[],
+        },
+        now,
+    )
+    .unwrap();
+    assert_eq!(t.source.identity, t.id);
+    assert_eq!(t.source.key, None);
+    assert_eq!(t.source.label(), t.id);
+    let p = env.runner.pipeline_of(&t).unwrap();
+    let names = dispatch::branch::names(&p, &t.source).unwrap();
+    assert_eq!(names[0].1, format!("dispatch/manual-{}", t.id));
 }

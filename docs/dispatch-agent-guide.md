@@ -29,6 +29,8 @@ on stderr, naming the process that holds it; stdout is unchanged.
 ```
 dispatch take <project> <issue-number>           ticket from a GitHub issue
 dispatch take <project> pr [<remote>:]<lane>/<n>  ticket from someone else's pull request(s)
+dispatch take <project> --title <text> (--body <text> | --body-file <path>) [--key <id>] [--lane <name>]...
+                                                  ticket typed in, on a manual pipeline (a supervisor: --body only)
 dispatch status                                   every ticket: id, project, title, stage, state
 dispatch decisions                                what waits on the owner, with the exact answer command
 dispatch decide <ticket> <decision> <answer> [--note <text> | --file <path>]
