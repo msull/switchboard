@@ -43,9 +43,11 @@ A user-visible change adds `changelog.d/<branch>.md` in the same commit,
 one `Added:`, `Changed:` or `Fixed:` line (format in
 `changelog.d/README.md`); never edit `CHANGELOG.md` by hand.
 `./scripts/bump.sh` folds the fragments. A release is
-`./scripts/bump.sh patch|minor|major`, a commit "Release X.Y.Z", then
-`./scripts/release.sh`; the version in `Cargo.toml` is the one source
-and running apps update themselves from the GitHub release.
+`./scripts/bump.sh patch|minor|major`, a commit "Release X.Y.Z" merged
+to `main` through a pull request (`main` takes nothing else), then the
+"Release" workflow, which only the owner starts; the version in
+`Cargo.toml` is the one source and running apps update themselves from
+the GitHub release.
 
 The pre-commit hook runs the first four. Enable it with
 `git config core.hooksPath .githooks` on a fresh clone. Never commit with

@@ -187,7 +187,10 @@ first "Developer ID Application" identity (has a Team ID, so Keychain
 items stay allowed across rebuilds), else a "Switchboard Dev" or "Prompt
 Box Dev" certificate from Keychain Access (keeps the Accessibility grant,
 but the Keychain asks for its items again after each build), else ad-hoc
-(the grant is reset each rebuild). The bundle's `Info.plist` gives macOS
+(the grant is reset each rebuild). A signed build uses the hardened
+runtime with `assets/Switchboard.entitlements` (Apple Events and the
+microphone), which notarization requires, so a local bundle runs under
+the same rules as a release. The bundle's `Info.plist` gives macOS
 the usage text for Automation (System Events), the microphone and the
 Local Network, and names the `_switchboard._tcp` Bonjour service; a bare
 `cargo run` binary has no `Info.plist` and so carries none of that text.
@@ -202,24 +205,32 @@ listed in `CHANGELOG.md`; the version in `Cargo.toml` is the one source,
 and it reaches the binary (`env!("CARGO_PKG_VERSION")`, shown at the
 bottom of the Settings menu), the bundle's `Info.plist` and the host's
 `/info` reply (the headset shows it beside each host). A release is
-three steps:
+three steps, the last of which runs on GitHub:
 
 ```sh
 ./scripts/bump.sh minor          # or patch, major, or X.Y.Z: Cargo.toml, Cargo.lock, changelog.d/ into CHANGELOG.md
-git commit -am "Release 0.3.0"   # after a look at the diff
-./scripts/release.sh             # builds, signs, zips, tags v0.3.0, publishes with the changelog section
+git commit -am "Release 0.3.0"   # after a look at the diff; lands on main through a pull request
+gh workflow run release          # once that is on main: builds, signs, notarizes, tags v0.3.0, publishes
 ```
 
 Every user-visible change adds a fragment, `changelog.d/<branch>.md`,
 as it lands (format in `changelog.d/README.md`), so concurrent branches
 never edit the same lines of `CHANGELOG.md`; the bump folds the
-fragments into the new version's section and removes them.
-`scripts/release.sh` builds the bundle through `bundle.sh` into a
-staging directory, zips it with `ditto` (a plain `zip` would lose the
-signature), writes the zip's SHA-256 as a file of its own, tags the
-commit `v<version>` and attaches both to a GitHub release whose notes
-are the changelog's section. It refuses a dirty tree, a version without
-a changelog section, and a tag that exists.
+fragments into the new version's section and removes them. `main` takes
+pull requests only (a repository ruleset), so the bump commit is a pull
+request like any other, and merging it publishes nothing. The "Release"
+workflow (`.github/workflows/release.yml`) is run by hand, from `main`
+only, and waits for the owner's approval of the `release` environment,
+which holds the signing identity and the notarization key; it then runs
+`scripts/release.sh` exactly as a Mac would. That script builds the
+bundle through `bundle.sh` into a staging directory, zips it with
+`ditto` (a plain `zip` would lose the signature), has Apple notarize
+the zip and staples the ticket to the bundle, writes the zip's SHA-256
+as a file of its own, tags the commit `v<version>` and attaches both to
+a GitHub release whose notes are the changelog's section. It refuses a
+dirty tree, a version without a changelog section, and a tag that
+exists. The workflow's `dry_run` input stops before the tag and leaves
+the zip as a workflow artifact.
 
 A running Switchboard checks the repository's latest release
 (`core::updates`, the `adapters::updates::GitHubReleases` source over
@@ -473,13 +484,15 @@ scripts/bump.sh          the next version into Cargo.toml and Cargo.lock, and th
 scripts/fold-changelog.sh  the fold bump.sh runs: `changelog.d/` fragments grouped Added, Changed, Fixed into a new version section of CHANGELOG.md, then removed; every line checked before anything is written
 .github/workflows/ci.yml  CI on every pull request and non-docs push to main (caches saved from main only, so branches never evict them): `check` (Linux, the hook's commands with `ci-test.sh`), `msrv` (the tests on 1.95), `deny` (`cargo deny`: advisories apart from bans, licenses and sources), `browser` (the web page in headless Chromium on Linux, the `#[ignore]`d test run with `--ignored`, advisory); actions pinned to a commit
 .github/workflows/macos.yml  the `macos` job: the hook's commands on a macOS runner, `--no-fail-fast`, the only job compiling the `cfg(target_os = "macos")` code and the only one with tmux; on every non-docs push to main, on pull requests touching the macOS-only files, the Cargo files or the vendored widget, and by hand; advisory
+.github/workflows/release.yml  the `release` job, run by hand from `main` only and gated on the owner's approval of the `release` environment (signing identity, notarization key): a throwaway keychain, then `scripts/release.sh`; `dry_run` stops before the tag and uploads the zip as an artifact
 .github/dependabot.yml   weekly update pull requests for the cargo lockfile (minor and patch grouped), the workflow's actions and `tests/browser`'s npm lockfile; the spikes are left out
 deny.toml                `cargo deny`'s configuration: the licences the lockfile may use, git sources limited to promptbox, and the ignored advisories, each an unmaintained crate with no safe upgrade and a reason
 pipelines/Switchboard.toml  this project's own Dispatch pipeline, the plan trial's result: haiku investigates, a sonnet facts stage settles the open questions with web search or a spike, a sonnet plan with a two-round review, then implement, code review and the pull request; a supervisor block for a Mac that runs the released app. Installed by copying it to `pipelines/Switchboard.toml` in Dispatch's data directory (a ticket runs the copy it froze at take); parsed and validated by a test in dispatch/src/pipeline.rs
 pipelines/examples/Orchard.toml  a multi-lane pipeline with one queued local resource, the shape the client pipeline grew into under the guide's Orchard names: three lanes, two of them served, a decisions gate, a facts stage before the plan with a two-round plan review, the plan trial's models per operator, two reviewers and a fixer, a deploy check read at inspect, deploy, try and tried holding the stack, evidence, a supervisor block; the file to copy to another machine for work of that shape, with the names to change listed at its top
 pipelines/examples/Orchard.pr.toml  its companion for someone else's pull requests, one per lane: an investigator reads them and ends with a QUEUE line, two reviewers whose findings are a question, a deploy check, then the inspect gate as the decision to queue on the stack, which deploy, try and tried hold; nothing in it pushes
 pipelines/examples/Orchard.held.toml  a held build under the same names: deploy to my-dev, then an agent stage with a human gate whose session stays open while the owner works in it, asked `built` at its first stop; `proceed` checks the running note and a clean tree and records the head, then code review with its own checks, the pull request, ready and merge; its frontend's `serve` is the list form, a web process and a worker; parsed and validated by a test in dispatch/src/pipeline.rs
-scripts/release.sh       the signed bundle and its SHA-256 attached to a GitHub release tagged `v<version>`, with the changelog section as notes; what the app updates itself from
+scripts/release.sh       the signed, notarized bundle and its SHA-256 attached to a GitHub release tagged `v<version>`, with the changelog section as notes; what the app updates itself from; run by the Release workflow, or from a Mac as the fallback
+assets/Switchboard.entitlements  what the hardened runtime lets a signed bundle do: Apple Events (System Events raises a Ghostty window) and the microphone
 CHANGELOG.md             every released user-visible change by version; written only by a bump
 changelog.d/             one fragment per branch, `<branch>.md`, of `Added:`, `Changed:` or `Fixed:` lines, folded into CHANGELOG.md by a bump (`README.md` there has the format)
 client/                  the Swift client (docs/remote-client.md §7): `SwitchboardProtocol` (the wire views as Codable, qualified refs, the envelope, the event frame and resource keys), `SwitchboardTransport` (HTTPS and the events WebSocket with the SPKI-pinning delegate, Bonjour browsing), `SwitchboardClientCore` (known servers, credentials, one connection actor per host that subscribes before it snapshots and reconciles events by revision, holds reference-counted screen watches that are resent after a reconnect, the unified store), `SwitchboardUI` (SwiftUI browser and server views), the `switchboard-remote` command-line browser, tests, `Fixtures/` shared with `tests/remote.rs`, and the apps: `project.yml` (xcodegen writes the git-ignored Xcode project from it), `Apps/SwitchboardVision/` (the visionOS entry, thin over `SwitchboardUI`: the main window with list, grid and focus layouts and the filters, the card window group, the prompt window and the keys panel placed as the virtual keyboard is), `scripts/sim.sh` (build, run and screenshot on the simulator), `scripts/device.sh` (build, install and launch on a paired headset); docs/live-app.md is the guide to working on the live app and the headset

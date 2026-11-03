@@ -95,7 +95,13 @@ if [ -z "$IDENTITY" ]; then
   done
 fi
 if [ -n "$IDENTITY" ]; then
-  codesign --force --deep --sign "$IDENTITY" "$APP"
+  # The hardened runtime and a secure timestamp are what notarization
+  # requires; a local build signs the same way so that what the owner
+  # runs every day is what a release ships. The entitlements open the
+  # two doors the runtime would otherwise close (System Events, the
+  # microphone).
+  codesign --force --deep --options runtime --timestamp \
+    --entitlements assets/Switchboard.entitlements --sign "$IDENTITY" "$APP"
   echo "Signed with \"$IDENTITY\"; Accessibility grants persist across rebuilds."
   if ! codesign -dvv "$APP" 2>&1 | grep -q '^TeamIdentifier=[A-Z0-9]'; then
     echo "No Team ID in this identity: the Keychain asks again after each build."
