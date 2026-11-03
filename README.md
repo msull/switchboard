@@ -573,8 +573,11 @@ documented here.
 
 `.githooks/pre-commit` checks formatting, runs Clippy, and runs the tests
 before each commit, including the vendored terminal widget's tests, which
-`--workspace` does not reach because `vendor/egui_term` is excluded. It
-never modifies or stages files. Enable it once per clone:
+`--workspace` does not reach because `vendor/egui_term` is excluded. A
+commit whose staged files all lie under `client/` runs `swift test`
+instead and none of cargo (the Rust checks still run on the pull
+request), so client work on a Mac without a warm Rust build costs
+seconds. It never modifies or stages files. Enable it once per clone:
 
 ```sh
 git config core.hooksPath .githooks
