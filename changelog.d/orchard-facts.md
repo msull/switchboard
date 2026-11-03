@@ -1,1 +1,0 @@
-Changed: The Orchard example pipeline settles the investigation's open questions in a facts stage before the plan, reviews the plan in two rounds (premises, then cuts), and names a model on each planning and code operator, as the plan trial found worked.

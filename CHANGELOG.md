@@ -10,6 +10,17 @@ publishes that section as the release notes. The format follows
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-02
+
+### Changed
+
+- A release is published by the "Release" workflow on GitHub, run by hand from main after the bump commit merges; the bundle is signed with the hardened runtime and notarized, so a download opens without a Gatekeeper warning.
+- The Orchard example pipeline settles the investigation's open questions in a facts stage before the plan, reviews the plan in two rounds (premises, then cuts), and names a model on each planning and code operator, as the plan trial found worked.
+
+### Fixed
+
+- pulldown-cmark 0.13.6 (RUSTSEC-2026-0433) and clipboard-win 5.4.3 (5.4.1 was yanked) in the lockfile.
+
 ## [0.12.0] - 2026-10-30
 
 ### Added
