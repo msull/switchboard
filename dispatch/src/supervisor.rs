@@ -613,6 +613,11 @@ pub fn permit(actor: &Actor, args: &[&str], data: &DataDir) -> Result<()> {
             _ => Ok(()),
         }
     };
+    // A body file is a path the supervisor's session can read and the
+    // owner cannot see in the command line; it types the body instead.
+    if verb == "take" && args.contains(&"--body-file") {
+        return Err(refused("take --body-file"));
+    }
     match rule(verb) {
         None | Some(Rule::Refused) => Err(refused(verb)),
         Some(Rule::Allowed) => Ok(()),
@@ -1237,6 +1242,24 @@ mod tests {
         assert!(permit(&sup, &["check", "pear"], &data).is_err());
         assert!(permit(&sup, &["check", "/tmp/x.toml"], &data).is_err());
         permit(&Actor::Owner, &["check", "/tmp/x.toml"], &data).unwrap();
+    }
+
+    #[test]
+    fn a_supervisor_takes_a_typed_ticket_on_its_own_project_with_body_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let sup = Actor::Supervisor("orchard".into());
+        let typed = |project: &'static str, body: &'static str| {
+            vec!["take", project, "--title", "t", body, "b"]
+        };
+        permit(&sup, &typed("orchard", "--body"), &data).unwrap();
+        let e = permit(&sup, &typed("orchard", "--body-file"), &data).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "the supervisor may not run `dispatch take --body-file`; the owner does"
+        );
+        assert!(permit(&sup, &typed("pear", "--body"), &data).is_err());
+        permit(&Actor::Owner, &typed("orchard", "--body-file"), &data).unwrap();
     }
 
     #[test]

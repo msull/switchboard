@@ -144,6 +144,7 @@ confine = true
                 labels: Vec::new(),
                 taken_at_ms: now_ms(),
                 taken_by: None,
+                key: None,
                 pull_requests: Vec::new(),
             },
             now_ms(),

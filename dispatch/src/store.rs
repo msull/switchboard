@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 30;
+pub const RECORD_VERSION: u32 = 31;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -621,6 +621,10 @@ pub fn migrate(mut value: Value) -> Value {
         // would drop them must refuse the record, or a restart would
         // forget which process of a lane's `serve` list a record runs,
         // and the process group its stop must find empty.
+        //
+        // 30 to 31: a ticket's source gains `key`, absent from its serde
+        // default, which is what every ticket taken before was: one with
+        // no tracker key. Nothing is transformed.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -1818,6 +1822,28 @@ mod tests {
             "service:try:frontend:1",
             "its ledger entry still matches"
         );
+    }
+
+    #[test]
+    fn a_version_thirty_record_migrates_with_no_key_and_is_otherwise_unchanged() {
+        let mut value: Value = serde_json::from_str(TICKET_V0).unwrap();
+        value["version"] = 30.into();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.json");
+        fs::write(&path, value.to_string()).unwrap();
+        let mut t = read_ticket(&path).unwrap();
+        assert_eq!(t.version, RECORD_VERSION);
+        assert_eq!(t.source.key, None);
+        assert_eq!(t.source.identity, "example-org/orchard#42");
+        assert_eq!(t.source.number, Some(42));
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert!(written["source"].get("key").is_none());
+        t.source.key = Some("ABC-123".into());
+        write_ticket(&path, &t).unwrap();
+        let written: Value = read_json(&path).unwrap();
+        assert_eq!(written["source"]["key"], "ABC-123");
+        assert_eq!(read_ticket(&path).unwrap(), t);
     }
 
     #[test]

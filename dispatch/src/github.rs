@@ -418,6 +418,7 @@ impl Issues for Gh {
             labels: issue.labels.into_iter().map(|l| l.name).collect(),
             taken_at_ms: now_ms,
             taken_by: None,
+            key: None,
             pull_requests: Vec::new(),
         })
     }
@@ -446,6 +447,7 @@ impl Issues for FakeIssues {
             labels: vec!["dispatch".into()],
             taken_at_ms: now_ms,
             taken_by: None,
+            key: None,
             pull_requests: Vec::new(),
         })
     }

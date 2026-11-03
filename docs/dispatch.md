@@ -964,7 +964,7 @@ branch_key = '\b([A-Z]+-[0-9]+)\b'   # for {key}: a regular expression on the is
 branch_type = "feat"          # for {type} when the issue has no `type:` label
 
 [source]
-kind = "github" | "task-file" | "manual" | "pull-request"   # pull-request: see "Tickets from pull requests"
+kind = "github" | "task-file" | "manual" | "pull-request"   # manual: see "Tickets typed in"; pull-request: see "Tickets from pull requests"
 repo = "owner/name"           # github: the repository issues come from
 label = "dispatch"            # github, required: the label that marks an issue as handed over
 lane_hints = { "area:backend" = "backend" }   # github: issue labels that suggest an answer to the lanes decision
@@ -1172,6 +1172,7 @@ as written.
 |---|---|
 | `{ticket}` | the ticket id |
 | `{issue.number}`, `{issue.title}`, `{issue.body}`, `{issue.url}` | the source issue |
+| `{issue.key}` | a manual ticket's `--key`, or its ticket id when taken without one; empty for any other source |
 | `{task.text}`, `{task.context}` | the source as a task (title, body) |
 | `{project.root}` | the ticket's tree, or the project root for a pipeline that works in place |
 | `{worktree}`, `{branch}`, `{lane}` | the context's tree, branch and lane (`{branch}` only where a branch is cut: a lane, or the root of a pipeline with a `repo`; `{lane}` only in a lane context) |
@@ -1229,6 +1230,15 @@ records each on the lane; everything after reads the record. A
 same name for every context already cut, and refuses one that would
 rename a branch: close and retake to change the template. A context
 not yet cut takes the new name.
+
+A manual ticket (see "Tickets typed in") has no number and brings its
+key with it. `{key}` is its `--key`, sanitised as above, never a match
+in the title, so the slug is the whole title, and a manual pipeline's
+template may use `{key}` without `branch_key` (one set is allowed and
+unused). `{type}` is `branch_type` only. A template that uses
+`{number}` refuses the take. With no template the name is
+`dispatch/manual-<key>`; with no template, or one that uses `{key}`,
+and no `--key`, it is `dispatch/manual-<ticket id>`.
 
 A ticket from pull requests keeps their branches, and a
 `kind = "pull-request"` pipeline that sets any of the branch keys is
@@ -2598,6 +2608,40 @@ external gate's check (`ready (pr-checks), merge (pr-merged)`), a
 frontend (after backend's base pipeline)`), and a line per held wait;
 the ticket page labels a held attempt with what it waits for.
 
+## Tickets typed in
+
+A project whose pipeline has `[source] kind = "manual"` takes a
+ticket typed on the command line rather than fetched from a tracker:
+
+```
+dispatch take Orchard --title "Export drops the last row" --body "..." --key ABC-123 --lane backend
+dispatch take Orchard --title "Tidy the README" --body-file notes.md
+```
+
+`--title` and exactly one of `--body` and `--body-file` are required;
+`--body-file` is read by the command, never by the runner. `--key` is
+the tracker's key (`ABC-123`): it names the branch through the
+template's `{key}` (see "Branch names"), fills `{issue.key}`, and is
+the ticket's identity, so a second open ticket with the same key in
+the project is refused until the first is closed. Keys compare as the
+branch spells them, so `ABC/1` after `ABC-1` is refused too. A manual
+pipeline's branch templates must use `{key}`, so two tickets never
+share a branch. The key may not be empty or hold a space or a control
+character. Without it the ticket's own
+id is its identity, its key on the page and in `{issue.key}`, and the
+id in its branch name. `--lane` may repeat; each names one of the
+pipeline's lanes and is kept as a `lane:<name>` label, which the
+`lanes` decision takes as its answer when the `lanes` dial is `auto`,
+as it does a GitHub issue's `lane_hints`. With the dial anything else
+the owner is asked, as for any ticket.
+
+A manual ticket has no number and no URL: listings, the project's
+name in Switchboard, session notes and the lanes question name it by
+its key, or by its id without one, never `#0`. The ticket page's row
+shows the key. A supervisor may take one on its own project with
+`--body` only; `--body-file` is refused to it. The control socket's
+`take` stays GitHub-only: a ticket is typed in from a shell.
+
 ## Tickets from pull requests
 
 The other kind of work: someone else's change, which the user tests,
@@ -3448,6 +3492,15 @@ can carry its own question:
 | Two independent mistakes | Both reported; `parse` still reports the first (`check_reports_independent_mistakes_that_parse_stops_at_the_first_of`) |
 | A stage that fails, or a stage name repeated | Reported once; the stages after it are not blamed for what it writes (`a_failed_or_repeated_stage_is_reported_once_and_not_again_by_later_stages`) |
 | Every file in `pipelines/examples/` | No error and no warning (`every_example_in_pipelines_examples_checks_clean`) |
+
+A ticket typed in (`dispatch take <project> --title ...` on a manual
+pipeline, see "Tickets typed in"):
+
+| Case | Expected |
+|---|---|
+| A take with `--key ABC-123 --lane repo` | The record has `number: null`, the key, the key as identity and a `lane:repo` label; the pipeline copy and the queue entry are written; nothing is asked of Switchboard (`a_manual_take_writes_the_ticket_with_its_key_and_no_switchboard`) |
+| The same key taken again | Refused while the first is open, taken once it is closed (same test) |
+| A take with no key on a `{key}` template | Its identity is its ticket id and its branch `dispatch/manual-<id>` (`a_keyless_manual_take_is_known_by_its_own_id_in_its_branch`) |
 
 Then, in order: `implement` with its command gate bound to a commit,
 tested with one lane committing after another lane's checks finished;

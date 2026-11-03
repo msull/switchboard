@@ -456,9 +456,9 @@ impl Runner {
         };
         let (launch, session_cwd) = reviewer_launch(&op, &r.dir, cwd);
         let notes = format!(
-            "Dispatch ticket {} · #{} {} · stage {} attempt {} · round {round_n} reviewer {name}",
+            "Dispatch ticket {} · {} {} · stage {} attempt {} · round {round_n} reviewer {name}",
             t.id,
-            t.source.number.unwrap_or(0),
+            t.source.reference(),
             t.source.title,
             key.0,
             key.1
@@ -1305,9 +1305,9 @@ impl Runner {
         r.response = Some(response);
         r.state = RoundState::Fixing;
         let notes = format!(
-            "Dispatch ticket {} · #{} {} · stage {} attempt {} · round {} implementer",
+            "Dispatch ticket {} · {} {} · stage {} attempt {} · round {} implementer",
             t.id,
-            t.source.number.unwrap_or(0),
+            t.source.reference(),
             t.source.title,
             key.0,
             key.1,
@@ -2524,9 +2524,9 @@ impl Runner {
             return self.message_failed(t, ps, p, key, &reason, now_ms);
         }
         let notes = format!(
-            "Dispatch ticket {} · #{} {} · stage {} attempt {} · message rewriter",
+            "Dispatch ticket {} · {} {} · stage {} attempt {} · message rewriter",
             t.id,
-            t.source.number.unwrap_or(0),
+            t.source.reference(),
             t.source.title,
             key.0,
             key.1

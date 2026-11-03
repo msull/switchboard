@@ -1918,6 +1918,7 @@ mod tests {
                 labels: vec![],
                 taken_at_ms: 0,
                 taken_by: None,
+                key: None,
             },
             pipeline_fingerprint: String::new(),
             pipeline_file: PathBuf::new(),

@@ -621,15 +621,21 @@ impl Runner {
         project: &str,
         pipeline: &Pipeline,
         pipeline_text: &str,
-        source: SourceSnapshot,
+        mut source: SourceSnapshot,
         now_ms: u64,
     ) -> Result<Ticket> {
+        // A manual ticket taken without a key is known by its own id,
+        // drawn first so the id printed is the one its branch names.
+        let id = Ticket::new_id();
+        if source.is_manual() && source.key.is_none() {
+            source.identity.clone_from(&id);
+        }
         // Once per project, not per data directory: another project on
         // the same repository (a trial of the pipeline at another model,
         // say) may hold the same issue at the same time.
         for existing in self.tickets()? {
             if existing.project == project
-                && existing.source.identity == source.identity
+                && same_ticket(&existing.source, &source)
                 && !matches!(existing.state, TicketState::Closed { .. })
             {
                 bail!(
@@ -653,7 +659,6 @@ impl Runner {
         if pipeline.cuts_worktrees() && source.pull_requests.is_empty() {
             crate::branch::names(pipeline, &source)?;
         }
-        let id = Ticket::new_id();
         let dir = self.data.ticket_dir(&id);
         std::fs::create_dir_all(&dir)?;
         let pipeline_file = dir.join("pipeline.toml");
@@ -4455,8 +4460,8 @@ impl Runner {
                 let all: Vec<&str> = p.lanes.iter().map(|l| l.name.as_str()).collect();
                 let notes = lane_input(t, p, None, "notes").map(|(_, n)| n.display().to_string());
                 let question = format!(
-                    "Which lanes does #{} need? Lanes: {}.{}",
-                    t.source.number.unwrap_or(0),
+                    "Which lanes does {} need? Lanes: {}.{}",
+                    t.source.reference(),
                     all.join(", "),
                     notes.map_or(String::new(), |n| format!(" The investigator's notes: {n}"))
                 );
@@ -6374,7 +6379,7 @@ impl Runner {
         }
         let root = primary_tree(t, p).ok_or_else(|| anyhow!("the ticket has no tree yet"))?;
         let space = self.ensure_space(t, ps, p, now_ms)?;
-        let name = format!("#{} {}", t.source.number.unwrap_or(0), t.source.title);
+        let name = format!("{} {}", t.source.reference(), t.source.title);
         let reply = self.send(
             t,
             ps,
@@ -11196,9 +11201,9 @@ fn fresh_session(
 /// The notes line on a session an attempt starts, `suffix` after it.
 fn session_notes(t: &Ticket, stage: &str, n: u32, suffix: &str) -> String {
     format!(
-        "Dispatch ticket {} · #{} {} · stage {stage} attempt {n}{suffix}",
+        "Dispatch ticket {} · {} {} · stage {stage} attempt {n}{suffix}",
         t.id,
-        t.source.number.unwrap_or(0),
+        t.source.reference(),
         t.source.title,
     )
 }
@@ -12058,12 +12063,19 @@ fn authorises_unlaunched_rerun(t: &Ticket, d: &Decision) -> bool {
         .any(|a| &a.stage == stage && &a.context == context && a.n > *n)
 }
 
-/// The lanes the issue's labels suggest, per the source's hints.
+/// The lanes the issue's labels suggest, per the source's hints. A
+/// manual ticket names its lanes itself, as `lane:<name>` labels from
+/// `take --lane`.
 fn lane_hints(p: &Pipeline, labels: &[String]) -> Vec<String> {
     match &p.source {
         crate::pipeline::Source::Github { lane_hints, .. } => labels
             .iter()
             .filter_map(|l| lane_hints.get(l).cloned())
+            .collect(),
+        crate::pipeline::Source::Manual => labels
+            .iter()
+            .filter_map(|l| l.strip_prefix(crate::ticket::MANUAL_LANE_LABEL))
+            .map(str::to_owned)
             .collect(),
         _ => Vec::new(),
     }
@@ -12097,6 +12109,23 @@ fn merge_after_text(p: &Pipeline, chosen: &[&str], lane: &str) -> String {
     )
 }
 
+/// Whether two sources are the same ticket. Manual keys compare as the
+/// branch names them, so `ABC/1` and `ABC-1` cannot both be open and
+/// cut to one branch.
+fn same_ticket(a: &SourceSnapshot, b: &SourceSnapshot) -> bool {
+    match (a.manual_name(), b.manual_name()) {
+        (Some(x), Some(y)) => crate::branch::manual_slug(x) == crate::branch::manual_slug(y),
+        _ => a.identity == b.identity,
+    }
+}
+
+/// `{issue.key}`: a manual ticket's key, or its id when taken without
+/// one, and empty for any other source, as `{issue.url}` is without a
+/// URL.
+fn issue_key(t: &Ticket) -> String {
+    t.source.manual_name().unwrap_or_default().to_owned()
+}
+
 /// The prompt's fields for a ticket in a context.
 pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
     let mut vars = Vars::default();
@@ -12105,6 +12134,7 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
         .set("issue.title", t.source.title.clone())
         .set("issue.body", t.source.body.clone())
         .set("issue.url", t.source.url.clone().unwrap_or_default())
+        .set("issue.key", issue_key(t))
         .set("task.text", t.source.title.clone())
         .set("task.context", t.source.body.clone())
         .set(
@@ -13047,6 +13077,7 @@ network = "deny"
                 labels: vec![],
                 taken_at_ms: 0,
                 taken_by: None,
+                key: None,
             },
             pipeline_fingerprint: String::new(),
             pipeline_file: PathBuf::new(),
@@ -13187,6 +13218,7 @@ gate = { kind = "human", decision = "inspect" }
                 labels: vec![],
                 taken_at_ms: 0,
                 taken_by: None,
+                key: None,
             },
             pipeline_fingerprint: String::new(),
             pipeline_file: PathBuf::new(),
@@ -13612,6 +13644,7 @@ gate = { kind = "human", decision = "each" }
                 taken_at_ms: 0,
                 pull_requests: vec![],
                 taken_by: None,
+                key: None,
             },
             pipeline_fingerprint: String::new(),
             pipeline_file: PathBuf::new(),
@@ -14123,6 +14156,68 @@ prompt = "Write {notes}."
 
     fn field(v: &Vars, key: &str) -> Option<String> {
         v.0.get(key).cloned()
+    }
+
+    /// A ticket typed in with `take --title`, with `key` or without.
+    fn manual_ticket(key: Option<&str>) -> Ticket {
+        let mut t = crate::ticket::blank();
+        t.id = "9f8e7d6c".into();
+        t.source.identity = key.unwrap_or("9f8e7d6c").into();
+        t.source.key = key.map(str::to_owned);
+        t.source.title = "Fix the thing".into();
+        t.source.labels = vec!["lane:B".into()];
+        t
+    }
+
+    #[test]
+    fn a_manual_ticket_hints_the_lanes_it_was_taken_with() {
+        let mut manual = lanes_pipeline();
+        manual.source = crate::pipeline::Source::Manual;
+        let labels = vec!["lane:B".to_owned(), "bug".to_owned(), "lane:A".to_owned()];
+        assert_eq!(lane_hints(&manual, &labels), ["B", "A"]);
+        // A GitHub pipeline reads only its own hints, never `lane:`.
+        assert!(lane_hints(&lanes_pipeline(), &labels).is_empty());
+    }
+
+    #[test]
+    fn issue_key_is_the_key_the_id_or_nothing() {
+        let p = lanes_pipeline();
+        let keyed = manual_ticket(Some("ABC-123"));
+        assert_eq!(
+            field(&vars_for(&keyed, &p, None), "issue.key").as_deref(),
+            Some("ABC-123")
+        );
+        let keyless = manual_ticket(None);
+        assert_eq!(
+            field(&vars_for(&keyless, &p, None), "issue.key").as_deref(),
+            Some("9f8e7d6c")
+        );
+        let mut issue = crate::ticket::blank();
+        issue.source.kind = "github".into();
+        issue.source.number = Some(42);
+        assert_eq!(
+            field(&vars_for(&issue, &p, None), "issue.key").as_deref(),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn session_notes_name_a_manual_ticket_by_its_label_not_hash_zero() {
+        let keyed = manual_ticket(Some("ABC-123"));
+        assert_eq!(
+            session_notes(&keyed, "plan", 1, ""),
+            "Dispatch ticket 9f8e7d6c · ABC-123 Fix the thing · stage plan attempt 1"
+        );
+        let keyless = manual_ticket(None);
+        assert_eq!(
+            session_notes(&keyless, "plan", 2, ""),
+            "Dispatch ticket 9f8e7d6c · 9f8e7d6c Fix the thing · stage plan attempt 2"
+        );
+        let mut issue = crate::ticket::blank();
+        issue.source.kind = "github".into();
+        issue.source.number = Some(42);
+        issue.source.title = "Crash".into();
+        assert!(session_notes(&issue, "plan", 1, "").contains(" · #42 Crash · "));
     }
 
     #[test]

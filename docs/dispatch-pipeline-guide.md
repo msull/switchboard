@@ -236,9 +236,11 @@ merge. It never merges anything itself. While it waits, its decision
 in place of `repo` works in that directory as it is, with no clone and
 no branch per ticket. `[source] kind = "task-file"` with `path` and
 `marker` names the lines of a file that carry the marker as its
-tickets, and `kind = "manual"` a ticket typed on the command line;
-both parse today, and nothing takes a ticket from either yet, so a
-GitHub issue is the only intake. That shape also gives up code review
+tickets, and `kind = "manual"` a ticket typed on the command line with
+`dispatch take <project> --title <text> --body <text> [--key <id>]
+[--lane <name>]...` (see
+[Tickets typed in](dispatch.md#tickets-typed-in)). Nothing takes a
+ticket from a task file yet. That shape also gives up code review
 (step 2) and `without_lane` (step 4), both of which need a clone.
 [Pipeline: PTA](dispatch.md#pipeline-pta) is the worked example.
 

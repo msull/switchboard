@@ -8834,6 +8834,29 @@ mod dispatch_page {
         );
     }
 
+    #[test]
+    fn a_ticket_source_is_its_number_or_else_its_key() {
+        use crate::core::dispatch::ticket_source;
+        let view = |kind: &str, number: Option<u64>, key: Option<&str>| TicketView {
+            kind: kind.into(),
+            number,
+            key: key.map(str::to_owned),
+            ..TicketView::default()
+        };
+        assert_eq!(ticket_source(&view("pull-request", Some(3), None)), "PR #3");
+        assert_eq!(ticket_source(&view("github", Some(104), None)), "#104");
+        assert_eq!(
+            ticket_source(&view("manual", None, Some("ABC-123"))),
+            "ABC-123"
+        );
+        assert_eq!(ticket_source(&view("manual", None, None)), "");
+        assert_eq!(
+            ticket_source(&view("github", Some(104), Some("ABC-123"))),
+            "#104",
+            "a numbered ticket never shows a key"
+        );
+    }
+
     /// A close can take several passes; the ticket stays findable under
     /// Parked meanwhile, and its standing is coloured as needing a look
     /// in the table and the header alike, as is an active ticket with
