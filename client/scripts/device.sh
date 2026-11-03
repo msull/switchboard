@@ -56,5 +56,5 @@ case "${1:-}" in
         xcrun devicectl device process launch --terminate-existing --device "$ID" "$BUNDLE"
         ;;
     devices) xcrun devicectl list devices ;;
-    *) sed -n '2,12p' "$0"; exit 2 ;;
+    *) sed -n '2,14p' "$0"; exit 2 ;;
 esac
