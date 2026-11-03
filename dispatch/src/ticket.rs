@@ -111,7 +111,8 @@ pub struct LaneRecord {
     /// `lanes` decision says which ones the stages use.
     #[serde(default = "yes")]
     pub chosen: bool,
-    /// The lane's setup ran, once, before its first agent.
+    /// The lane's setup ran, once, before the first stage that serves
+    /// the lane or runs in it.
     #[serde(default)]
     pub setup_done: bool,
     /// The commit the lane was cut from, or the base it was last

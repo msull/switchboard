@@ -168,10 +168,16 @@ names it, and it never edits labels.
 
 **`[[lanes]]`** are the places a ticket works. A single repository has
 one lane at `path = "."`. `setup` runs once in each new worktree,
-before the lane's first agent. It buys a tree that is ready to build
-when the agent starts. Without it, the first agent spends its turn
-fetching dependencies, and the gate may fail on a cold cache. Make it
-safe to run twice: a restart that changed it runs it again.
+before the first stage that serves the lane or runs in it, and
+finishes before that stage's `before`, `serve` or agent starts. A
+`root` or `joined` stage sets up every chosen lane, or every lane
+before the `lanes` decision has chosen any, so an investigator in the
+ticket's tree finds each lane installed; name the lane trees in its
+prompt (`{project.root}` plus each lane's `path`). It buys a tree
+that is ready to build when the agent starts. Without it, the first
+agent spends its turn fetching dependencies, and the gate may fail on
+a cold cache. A setup that fails parks the ticket. Make it safe to
+run twice: a restart that changed it runs it again.
 
 **`[operators.<name>]`** are the agents. `kind = "claude"` is Claude
 Code, whose Stop is the signal that an attempt finished. `guidance`
