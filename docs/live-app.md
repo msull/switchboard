@@ -142,12 +142,20 @@ the next build.
 The version in `Cargo.toml` is the one source. Every user-visible change
 adds `changelog.d/<branch>.md` in the same commit (the hook does not
 check this). A release is `./scripts/bump.sh patch|minor|major`, a commit
-"Release X.Y.Z" through the hook, then `./scripts/release.sh`, which tags,
-builds the signed zip with its sha256 and publishes the GitHub release
-with the changelog section as notes; it does not push `main`, so push
-after. Minor when the folded section has an `Added:` heading, patch when
-it has only `Changed:` and `Fixed:`; the owner wants this kept as the
-habit, not written into the scripts.
+"Release X.Y.Z" through the hook on a branch, a pull request that merges
+it to `main` (`main` takes pull requests only; nothing pushes it
+directly, and the merge publishes nothing), then the "Release" workflow,
+run by the owner from the Actions tab or `gh workflow run release`. It
+runs from `main` only, waits for the owner's approval of the `release`
+environment that holds the signing identity and the notarization key,
+and then runs `scripts/release.sh`: build, sign, notarize, tag, publish
+with the changelog section as notes. An agent prepares a release (the
+bump pull request) on the owner's word and never starts the workflow;
+the owner does, when ready. `scripts/release.sh` on a Mac is the
+fallback and does the same without notarization unless the `NOTARY_*`
+variables are set. Minor when the folded section has an `Added:`
+heading, patch when it has only `Changed:` and `Fixed:`; the owner wants
+this kept as the habit, not written into the scripts.
 
 Every Mac running the app offers the release to its owner (daily check,
 same Team ID required, swap helper with rollback). A Mac that is only an

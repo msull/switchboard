@@ -6,10 +6,19 @@
 # changelog's section for that version. The running app finds the
 # release through the GitHub API, checks the zip against the SHA-256
 # file and the bundle against the signing team, and installs it; another
-# Mac installs it by hand with `gh release download`, which sets no
-# quarantine flag, so Gatekeeper asks nothing of a bundle that is signed
-# but not notarized. `--dry-run` builds, signs and zips without tagging
-# or publishing, and leaves the zip under the cargo target directory.
+# Mac installs it by hand with `gh release download`. With NOTARY_KEY_ID,
+# NOTARY_ISSUER_ID and NOTARY_KEY_PATH (an App Store Connect API key)
+# in the environment the zip is notarized and the ticket stapled to the
+# bundle, so a download through a browser or Homebrew opens without a
+# Gatekeeper warning; without them the bundle is signed only, which the
+# in-app updater and `gh release download` accept. `--dry-run` builds,
+# signs and zips without tagging or publishing, and leaves the zip under
+# the cargo target directory.
+#
+# The owner releases through the "Release" workflow (.github/workflows/
+# release.yml), which runs this script on main with the secrets held in
+# the `release` environment; running it from a Mac still works and is
+# the fallback.
 set -eu
 cd "$(dirname "$0")/.."
 DRY=0
@@ -47,6 +56,19 @@ esac
 
 ZIP="$STAGE/Switchboard-$VERSION.zip"
 ditto -c -k --keepParent "$APP" "$ZIP"
+if [ -n "${NOTARY_KEY_ID:-}" ] && [ -n "${NOTARY_ISSUER_ID:-}" ] && [ -n "${NOTARY_KEY_PATH:-}" ]; then
+  # Apple scans the zip; the stapled ticket then goes into the bundle,
+  # so the zip is made again from the stapled bundle. The key never
+  # appears on the command line, only its path.
+  xcrun notarytool submit "$ZIP" --key "$NOTARY_KEY_PATH" --key-id "$NOTARY_KEY_ID" \
+    --issuer "$NOTARY_ISSUER_ID" --wait
+  xcrun stapler staple "$APP"
+  rm -f "$ZIP"
+  ditto -c -k --keepParent "$APP" "$ZIP"
+  echo "Notarized and stapled."
+else
+  echo "warning: not notarized (NOTARY_KEY_ID, NOTARY_ISSUER_ID and NOTARY_KEY_PATH unset); a browser download will be refused by Gatekeeper" >&2
+fi
 (cd "$STAGE" && shasum -a 256 "$(basename "$ZIP")" > "$ZIP.sha256")
 SUM=$(cut -d' ' -f1 "$ZIP.sha256")
 NOTES="$STAGE/notes.md"
