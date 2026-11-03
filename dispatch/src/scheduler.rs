@@ -499,6 +499,10 @@ struct Uncut {
     start: String,
     pr: Option<PullRequestSource>,
     extra: Option<(String, String)>,
+    /// `start` is a commit the lane is pinned to, not a remote's branch:
+    /// read in the clone after the fetch, and the ticket parked naming it
+    /// when the clone does not have it.
+    commit_pin: bool,
 }
 
 /// What the cut does with a branch an earlier ticket left with commits,
@@ -1958,13 +1962,13 @@ impl Runner {
     }
 
     /// Where a lane's base is read: its clone, the remote fetched there,
-    /// and the remote-tracking ref of its base.
+    /// and the remote-tracking ref of its base (or its pinned commit).
     fn lane_base_ref(&self, p: &Pipeline, lane: &Lane) -> (PathBuf, String, String) {
         if lane.repo.is_some() {
             (
                 self.data.lane_repo_dir(&p.project.name, &lane.name),
                 p.lane_remote(lane).to_owned(),
-                format!("{}/{}", p.lane_remote(lane), p.lane_base(lane)),
+                p.lane_start(lane),
             )
         } else {
             (
@@ -3832,6 +3836,7 @@ impl Runner {
                 start: format!("{}/{}", p.project.remote, p.project.base),
                 extra: pr.as_ref().and_then(|pr| extra_remote(p, None, pr)),
                 pr,
+                commit_pin: false,
             });
         }
         for l in lanes {
@@ -3844,12 +3849,15 @@ impl Runner {
                 what: format!("lane {}", lane.name),
                 url: url.clone(),
                 clone: self.data.lane_repo_dir(&p.project.name, &lane.name),
-                start: format!("{remote}/{}", p.lane_base(lane)),
+                start: p.lane_start(lane),
                 remote,
                 dir: tree.join(&lane.path),
                 branch: l.branch.clone(),
                 extra: l.pr.as_ref().and_then(|pr| extra_remote(p, Some(lane), pr)),
                 pr: l.pr.clone(),
+                // A lane under a pull request is cut at the request's
+                // branch, so its `base` is not what it is cut from.
+                commit_pin: l.pr.is_none() && p.lane_pin(lane).is_some(),
             });
         }
         Ok(todo)
@@ -4145,6 +4153,8 @@ impl Runner {
             remote,
             pr,
             extra,
+            start,
+            commit_pin,
             ..
         } = u;
         if let Err(e) = self.git.ensure_clone(url, clone) {
@@ -4167,6 +4177,21 @@ impl Runner {
                 ps,
                 &format!(
                     "{what}: could not fetch {remote} in {}: {e:#}",
+                    clone.display()
+                ),
+                now_ms,
+            )?;
+            return Ok(false);
+        }
+        // A pinned commit comes with the plain fetch when a branch of
+        // the remote holds it; one the clone still cannot read is not
+        // guessed at.
+        if *commit_pin && self.git.rev_parse(clone, start).is_err() {
+            self.park(
+                t,
+                ps,
+                &format!(
+                    "{what}: base {start} is not a branch of {remote} and not a commit in {}",
                     clone.display()
                 ),
                 now_ms,
@@ -4267,10 +4292,120 @@ impl Runner {
                 );
             }
         }
+        // A lane with a repository of its own sits on its branch while
+        // chosen and detached at its base while not, so it can still be
+        // served for testing as the default branch has it. A repo-less
+        // lane is a path in the ticket's one tree and is left alone.
+        // The trees move before the choice is recorded, so a refusal
+        // leaves the lanes as they were and the answer is acted on again
+        // after the park is resumed.
+        for i in 0..t.lanes.len() {
+            let l = &t.lanes[i];
+            if !is_repo_lane(p, l) {
+                continue;
+            }
+            let moved = match (names.contains(&l.name), self.is_detached(l)) {
+                (true, Ok(true)) => self.attach_lane(t, i),
+                (false, Ok(false)) => self.detach_lane(t, p, i),
+                (_, Err(why)) => Err(why),
+                _ => Ok(()),
+            };
+            if let Err(why) = moved {
+                Self::leave_lanes_answer_unacted(t);
+                return self.park(t, ps, &why, now_ms);
+            }
+        }
         for l in &mut t.lanes {
             l.chosen = names.contains(&l.name);
         }
         self.save_ticket(t, now_ms)
+    }
+
+    /// Marks the `lanes` answer unacted so a resume retries the choice.
+    fn leave_lanes_answer_unacted(t: &mut Ticket) {
+        for d in &mut t.decisions {
+            if let DecisionState::Answered { acted, .. } = &mut d.state
+                && d.name == "lanes"
+            {
+                *acted = false;
+            }
+        }
+    }
+
+    /// Every lane with a repository of its own that is off its branch
+    /// put back on it, as a restart across the `lanes` gate needs before
+    /// the lanes are chosen again. `Err` is the first lane git refused,
+    /// with git's message.
+    pub(crate) fn attach_lanes(&mut self, t: &Ticket, p: &Pipeline) -> Result<(), String> {
+        for (i, l) in t.lanes.iter().enumerate() {
+            if is_repo_lane(p, l) && self.is_detached(l)? {
+                self.attach_lane(t, i)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the lane's tree is off its branch.
+    fn is_detached(&self, l: &LaneRecord) -> Result<bool, String> {
+        self.git
+            .branch_head(&l.worktree, &l.branch)
+            .map(|head| head.is_none())
+            .map_err(|e| format!("lane {}: could not read its tree: {e:#}", l.name))
+    }
+
+    /// Lane `i`'s tree checked out on its branch again.
+    fn attach_lane(&mut self, t: &Ticket, i: usize) -> Result<(), String> {
+        let l = &t.lanes[i];
+        self.git
+            .checkout_branch(&l.worktree, &l.branch)
+            .map_err(|e| {
+                format!(
+                    "lane {}: could not check out {} in {}: {e:#}",
+                    l.name,
+                    l.branch,
+                    l.worktree.display()
+                )
+            })?;
+        log::info!("ticket {} lane {}: back on {}", t.id, l.name, l.branch);
+        Ok(())
+    }
+
+    /// Lane `i`'s tree detached at its base as the remote has it now (a
+    /// failed fetch leaves the last one), or at its pinned commit. Its
+    /// branch stays, so the record's `branch` names a ref either way.
+    fn detach_lane(&mut self, t: &Ticket, p: &Pipeline, i: usize) -> Result<(), String> {
+        let l = &t.lanes[i];
+        let Some(lane) = p.lane(&l.name) else {
+            return Ok(());
+        };
+        let (clone, remote, start) = self.lane_base_ref(p, lane);
+        if let Err(e) = self.git.fetch(&clone, &remote) {
+            log::warn!(
+                "ticket {} lane {}: could not fetch {remote}, detaching at the last fetch: {e:#}",
+                t.id,
+                l.name
+            );
+        }
+        let at = |step: &str, e: anyhow::Error| {
+            format!(
+                "lane {}: could not detach {} at {start} ({step}): {e:#}",
+                l.name,
+                l.worktree.display()
+            )
+        };
+        let sha = self
+            .git
+            .rev_parse(&clone, &start)
+            .map_err(|e| at("reading the commit", e))?;
+        self.git
+            .worktree_detached(&clone, &l.worktree, &sha)
+            .map_err(|e| at("checking it out", e))?;
+        log::info!(
+            "ticket {} lane {}: not chosen; detached at {start} ({sha})",
+            t.id,
+            l.name
+        );
+        Ok(())
     }
 
     /// A lane's setup, once, before its first agent; the ticket is
@@ -4316,7 +4451,8 @@ impl Runner {
     /// The setup of each lane the stage needs, before any of its
     /// services or agents starts; the ticket is parked if one fails, so
     /// no `before` or `serve` runs in a lane whose setup has not
-    /// finished. The lanes: each chosen lane the stage serves, each lane
+    /// finished. The lanes: each lane the stage serves (`served_lane`,
+    /// chosen or with a tree of its own), each lane
     /// a context runs in, and for a context with no lane (`root`,
     /// `joined`) every chosen lane, or every cut lane before the lanes
     /// decision has chosen any.
@@ -4341,7 +4477,10 @@ impl Runner {
             .iter()
             .filter(|l| !l.removed)
             .filter(|l| {
-                let serves = l.chosen && serve_lanes.contains(&l.name);
+                // A lane not chosen is served too when it has a tree of
+                // its own (`served_lane`), and is set up there first.
+                let serves = serve_lanes.contains(&l.name)
+                    && crate::services::served_lane(t, p, &l.name).is_some();
                 // A `<lane>@base` context runs in the base tree, not the
                 // lane's worktree, so it sets nothing up there.
                 let runs_in = contexts.iter().any(|(_, cwd, lane)| {
@@ -5072,10 +5211,9 @@ impl Runner {
             let pr = t.source.pull_requests.iter().find(|pr| pr.lane == l.name);
             let base = match pr {
                 Some(pr) if !pr.base.is_empty() => format!("{}/{}", pr.remote, pr.base),
-                _ => p.lane(&l.name).map_or_else(
-                    || p.project.base.clone(),
-                    |lane| format!("{}/{}", p.lane_remote(lane), p.lane_base(lane)),
-                ),
+                _ => p
+                    .lane(&l.name)
+                    .map_or_else(|| p.project.base.clone(), |lane| p.lane_start(lane)),
             };
             let at = |what: &str| format!("ticket {} lane {}: {what}", t.id, l.name);
             if let Some(head) = left_out(self.git.head(cwd), &at("the branch")) {
@@ -6417,6 +6555,8 @@ impl Runner {
         let Some(contexts) = self.contexts_or_park(t, ps, p, stage, now_ms)? else {
             return Ok(());
         };
+        // Each served lane is set up before its service is, chosen or
+        // not; a failure parks the ticket, as an agent's setup does.
         if Self::setup_due(t, stage, &contexts)
             && !self.ensure_stage_setup(t, ps, p, stage, &contexts, now_ms)?
         {
@@ -6869,10 +7009,9 @@ impl Runner {
         let dir = self.attempt_dir(t, &a.stage, n, &a.context)?;
         let notes = dir.join("notes.md");
         let lane_record = lane.and_then(|l| t.lanes.iter().find(|x| x.name == l));
-        let base = lane_record.and_then(|l| p.lane(&l.name)).map_or_else(
-            || p.project.base.clone(),
-            |l| format!("{}/{}", p.lane_remote(l), p.lane_base(l)),
-        );
+        let base = lane_record
+            .and_then(|l| p.lane(&l.name))
+            .map_or_else(|| p.project.base.clone(), |l| p.lane_start(l));
         let mut vars = vars_for(t, p, lane);
         vars.set("notes", notes.display().to_string());
         let mut prompt = match guidance_prelude(&p.operators[&operator].guidance, &vars) {
@@ -10812,6 +10951,13 @@ fn remedy_reason(
     }
 }
 
+/// Whether a lane record is a lane with a repository of its own, whose
+/// tree is its own worktree to move between its branch and a detached
+/// head.
+pub(crate) fn is_repo_lane(p: &Pipeline, l: &LaneRecord) -> bool {
+    !l.removed && p.lane(&l.name).is_some_and(|d| d.repo.is_some())
+}
+
 /// A `lanes` answer's names, comma-separated.
 fn lane_names(answer: &str) -> Vec<String> {
     answer
@@ -12210,10 +12356,10 @@ pub(crate) fn vars_for(t: &Ticket, p: &Pipeline, lane: Option<&str>) -> Vars {
     }
     if let Some(stage) = p.stages.get(t.stage) {
         for lane in &stage.services {
-            let chosen = t.lanes.iter().any(|l| &l.name == lane && l.chosen);
+            let served = crate::services::served_lane(t, p, lane).is_some();
             if let Some(url) = crate::services::lane_url(t, p, &stage.name, lane) {
                 vars.set(format!("services.{lane}"), url);
-            } else if !chosen {
+            } else if !served {
                 vars.set(
                     format!("services.{lane}"),
                     format!("not served (no {lane} lane)"),

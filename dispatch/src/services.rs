@@ -14,7 +14,9 @@ use anyhow::Result;
 use switchboard_control::{self as wire, Body, Made, Reply};
 
 use crate::pipeline::{Pipeline, Process, ServeRef, ServeSpec, Stage};
-use crate::scheduler::{Ask, NO_SUCH_SESSION, Runner, SocketDown, confine_for, env_for};
+use crate::scheduler::{
+    Ask, NO_SUCH_SESSION, Runner, SocketDown, confine_for, env_for, is_repo_lane,
+};
 use crate::ticket::{
     Attempt, AttemptState, Decision, DecisionKind, DecisionState, Forgotten, GateRun, Hold,
     LaneRecord, ProjectState, STUCK, ServiceRecord, ServiceState, Ticket, TicketState,
@@ -279,12 +281,14 @@ impl Runner {
     /// The stage's services, a lane after the lanes its `serve.env`
     /// names, brought one step further each pass. A lane naming another
     /// starts once that one answers, and is restarted when that one is
-    /// served again. A lane the ticket did not choose is not served, and
-    /// one naming it fails. True once every served lane answers; until
-    /// then no agent of the stage launches. A lane that could not be
-    /// served is stopped, then asked about once (`retry` or `park`). A
-    /// lane's processes come up together and go together: one `before`,
-    /// then every launch, and one process failing stops the others.
+    /// served again. A lane the ticket did not choose is served from its
+    /// own tree, detached at its base, when it has a repository of its
+    /// own; a repo-less one is not served, and one naming it fails.
+    /// True once every served lane answers; until then no agent of the
+    /// stage launches. A lane that could not be served is stopped, then
+    /// asked about once (`retry` or `park`). A lane's processes come up
+    /// together and go together: one `before`, then every launch, and
+    /// one process failing stops the others.
     pub(crate) fn ensure_services(
         &mut self,
         t: &mut Ticket,
@@ -302,12 +306,7 @@ impl Runner {
             .serve_order(stage)
             .unwrap_or_else(|_| stage.services.clone());
         for lane in &order {
-            let Some(record) = t
-                .lanes
-                .iter()
-                .find(|l| &l.name == lane && l.chosen)
-                .cloned()
-            else {
+            let Some(record) = served_lane(t, p, lane).cloned() else {
                 continue;
             };
             let Some(spec) = p.lane(lane).and_then(|l| l.serve.clone()) else {
@@ -420,10 +419,10 @@ impl Runner {
 
     /// Whether the lanes a lane's `serve.env` names let it start: a lane
     /// naming another waits for it, its `before` included, and one
-    /// naming a lane the ticket did not cut fails, since nothing will
-    /// ever serve that. True when the lane may go on: it is past
-    /// `Before`, or it was just failed here for an unserved name (the
-    /// caller then sees the failure and stops the lane).
+    /// naming a lane the ticket cannot serve (`served_lane`) fails, since
+    /// nothing will ever serve that. True when the lane may go on: it
+    /// is past `Before`, or it was just failed here for an unserved name
+    /// (the caller then sees the failure and stops the lane).
     fn named_lanes_up(
         &mut self,
         t: &mut Ticket,
@@ -436,9 +435,9 @@ impl Runner {
         if t.services[first].state != ServiceState::Before {
             return Ok(true);
         }
-        if let Some((missing, named)) = unserved_ref(t, spec) {
+        if let Some((missing, named)) = unserved_ref(t, p, spec) {
             let reason = format!(
-                "{} is not served (the ticket did not choose {named})",
+                "{} is not served (the ticket did not choose {named}, which has no tree of its own)",
                 missing.token()
             );
             self.fail_service(t, first, &reason, now_ms)?;
@@ -1520,12 +1519,24 @@ fn stale_pointer(t: &Ticket, p: &Pipeline, i: usize) -> bool {
         .any(|(lane, n)| latest_live(t, p, &rec.stage, lane).map(|s| s.n) != Some(*n))
 }
 
-/// The first field of a process's `env` naming a lane the ticket did
-/// not choose, so nothing will ever serve it, with the lane's name.
-fn unserved_ref(t: &Ticket, spec: &ServeSpec) -> Option<(ServeRef, String)> {
+/// The record of `lane` when the ticket can serve it: a lane it chose,
+/// or one with a repository of its own, which is served from its own
+/// tree detached at its base when not chosen. A repo-less lane not
+/// chosen is a path in the ticket's tree, which holds the chosen work,
+/// so it has no tree to be served from.
+pub(crate) fn served_lane<'a>(t: &'a Ticket, p: &Pipeline, lane: &str) -> Option<&'a LaneRecord> {
+    t.lanes
+        .iter()
+        .find(|l| l.name == lane && (l.chosen || is_repo_lane(p, l)))
+}
+
+/// The first field of a process's `env` naming a lane the ticket cannot
+/// serve (`served_lane`), so nothing will ever serve it, with the lane's
+/// name.
+fn unserved_ref(t: &Ticket, p: &Pipeline, spec: &ServeSpec) -> Option<(ServeRef, String)> {
     spec.refs().into_iter().find_map(|r| {
         let lane = r.lane()?.to_owned();
-        (!t.lanes.iter().any(|l| l.name == lane && l.chosen)).then_some((r, lane))
+        served_lane(t, p, &lane).is_none().then_some((r, lane))
     })
 }
 

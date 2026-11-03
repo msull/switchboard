@@ -976,7 +976,7 @@ name = "..."
 path = "relative/to/tree"     # "." for a single-repo project
 repo = "git@..."              # a repository of its own (a workspace of several): cloned by
                               # Dispatch too, cut as a worktree at path inside the ticket's tree
-base = "main"                 # omitted: the project's
+base = "main"                 # omitted: the project's; on a lane with a repo, "commit:<sha>" pins a commit the lane is cut from and never moved off
 remotes = { github = "git@github.com:..." }   # this lane's mirrors, as the project's
 setup = ["cmd", "args"]       # run once, before the first stage that serves or runs in the lane (a root or joined stage: every chosen lane, or every lane before the lanes decision); a failure parks
 writable = ["~/.cargo"]       # under [policy] confine: extra paths the lane's setup, gates, checks and command reviewers may write
@@ -1701,10 +1701,10 @@ name = "try"
 operator = "tester"
 context = "joined"
 needs = ["my-dev"]
-services = ["frontend", "admin"]   # each started only if its lane was cut; owned by the ticket until `tried` ends
+services = ["frontend", "admin"]   # each served chosen or not (a lane not chosen from its own tree at its base); owned by the ticket until `tried` ends
 before = { frontend = ["npm", "run", "link-env"], admin = ["npm", "run", "link-env"] }
 writes = ["notes"]
-prompt = "my-dev is running backend commit {inputs.deploy.commit}. The frontend: {services.frontend}. The admin frontend: {services.admin}. A lane this ticket did not cut is not served; test it, if at all, against the existing deployment. Try ticket #{issue.number} end to end and report to {notes}."
+prompt = "my-dev is running backend commit {inputs.deploy.commit}. The frontend: {services.frontend}. The admin frontend: {services.admin}. A lane this ticket did not choose is served as its base has it. Try ticket #{issue.number} end to end and report to {notes}."
 
 [[stages]]
 name = "tried"
@@ -1749,11 +1749,22 @@ What this pipeline showed, and what it added to the vocabulary:
   against the backend's `main` as the remote has it, deployed from the
   project's base tree, and the `tried` decision names that commit.
 - **Services are Dispatch's.** A stage's `services` name lanes; each
-  is started only if the ticket cut that lane, and a template field
-  for one that was not renders as `not served (no <lane> lane)`, so a
-  backend-only, frontend-only or admin-only ticket names nothing that
-  does not exist. For each lane that was cut, in order: the `before`
-  command runs as a child of the runner, with its log in the ticket
+  is served whether or not the ticket chose it, since a lane not being
+  worked on is still needed for testing. Every lane with a repository
+  of its own is cut at the start; once the `lanes` decision is
+  answered, a lane not chosen has its tree detached at its base (its
+  remote's branch, or the commit its `base` pins) and is served from
+  there, its branch kept; a lane chosen again later is checked out on
+  its branch again, and a git refusal either way parks the ticket with
+  git's message. A frontend-only ticket's frontend therefore reaches
+  the backend by `{services.backend}` in its `serve.env`, with no
+  companion process. A lane with no repository of its own is a path
+  in the ticket's one tree, which holds the chosen work, so not chosen
+  it is not served, and a template field for it renders as
+  `not served (no <lane> lane)`. Each served lane's `setup` runs once
+  in its own tree before anything of it is served, and a failure parks
+  the ticket with the setup's reason. For each served lane, in order:
+  the `before` command runs as a child of the runner, with its log in the ticket
   directory, and must exit zero (it must also be safe to run again:
   one lost to a runner restart is started again, and a retry or a
   send-back runs it anew); Dispatch allocates a port from the policy's
@@ -3455,7 +3466,13 @@ and one against the real one:
 | The runner restarts while a ticket holds `my-dev` | The hold is read back from the record and the other ticket still waits (`a_hold_survives_a_runner_restart`) |
 | `slots = 1` with a ticket holding `my-dev` at `tried` | Another ticket's tester does not start; `status` counts one running (`a_ticket_holding_a_resource_costs_a_slot_and_status_agrees`) |
 | `try` begins with the frontend chosen | Its `before` runs in the frontend tree; after exit 0 a service session on the first free port, launched as `$SHELL -lc 'exec "$@"' dispatch-service env BROWSER=none PORT=3100 npm start` in that tree; no tester until it answers; the tester is told the URL (`services_start_after_before_on_a_free_port_and_the_tester_is_told_the_url`) |
-| A backend-only ticket at `try` | Nothing is served and the tester reads `not served (no frontend lane)` (`a_lane_not_cut_is_not_served_and_reads_so`) |
+| A backend-only ticket at `try` | The frontend, not chosen, is detached at its base and served once from its own tree; the tester is given its URL (`a_lane_not_chosen_is_served_from_its_own_tree_and_the_tester_is_given_its_url`, `an_unchosen_repo_lane_is_detached_at_its_base_and_keeps_its_branch`) |
+| A backend-only ticket at `try` whose frontend is a path in the tree | Nothing is served and the tester reads `not served (no frontend lane)` (`a_repo_less_lane_not_chosen_is_not_served_and_reads_so`) |
+| A frontend-only ticket of three lanes, the frontend naming the backend and the backend the worker | Each is served once from its own tree, worker, backend, frontend; the frontend's launch carries `PROXY=<the backend's url>` (`a_frontend_only_ticket_reaches_the_backend_by_its_address`) |
+| A lane chosen while detached; a lane git will not detach or check out | It is checked out on its branch; the ticket parks with git's message (`a_lane_chosen_while_detached_is_checked_out_on_its_branch_again`, `a_lane_git_will_not_detach_or_check_out_parks_the_ticket_with_gits_message`) |
+| A served lane not chosen, with a `setup` | It runs once in the lane's tree before its `before`; a failure parks with the setup's reason and nothing is served (`a_served_unchosen_lane_runs_its_setup_before_its_before_once`, `a_served_unchosen_lane_whose_setup_fails_parks_the_ticket_with_the_setup_reason`) |
+| A lane whose `base` is a commit | It is cut from the bare sha, never `origin/<sha>`; a sha the clone cannot read after the fetch parks naming it (`a_commit_pin_is_cut_from_the_sha_and_never_as_remote_slash_sha`, `an_unreadable_pin_parks_naming_it`) |
+| A restart of a ticket with a detached lane; one across the `lanes` gate | The detached lane is not a reset target; across the gate every lane is checked out on its branch first and detached again once the lanes are chosen (`a_ticket_with_a_detached_unchosen_lane_can_be_restarted_to_an_earlier_stage`, `a_restart_across_the_lanes_gate_attaches_every_detached_lane_before_they_are_chosen_again`) |
 | The first port is taken; every port is taken | The next port is used; with none free, a `service` question (`retry`, `park`) and nothing launched (`a_busy_port_is_skipped_and_no_free_port_is_a_question`) |
 | The `before` exits 1 | A `service` question before any tester; `retry` makes record 2, whose `before` runs under its own key (`a_before_that_fails_is_a_question_before_the_tester_and_retry_runs_it_again`) |
 | Two served lanes fail, one's port still taken when `retry` is answered | The confirmed one starts again; the other stays failed with its session, is stopped on, and is asked about once its port binds; never two records of it alive (`a_retry_leaves_a_failed_service_whose_stop_is_not_confirmed_to_its_stop`) |

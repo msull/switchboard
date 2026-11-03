@@ -69,6 +69,10 @@ pub trait Repo: Send {
     fn rename_branch(&mut self, repo: &Path, from: &str, to: &str) -> Result<()>;
     /// `git worktree add <dir> <branch>`: the existing branch at its head.
     fn worktree_checkout(&mut self, repo: &Path, dir: &Path, branch: &str) -> Result<()>;
+    /// `git checkout <branch>` inside the existing tree at `dir`: a lane
+    /// left detached put back on its branch. Git refuses when a local
+    /// change would be overwritten, and so does this.
+    fn checkout_branch(&mut self, dir: &Path, branch: &str) -> Result<()>;
     /// The commit `rev` names in `dir`.
     fn rev_parse(&self, dir: &Path, rev: &str) -> Result<String>;
     /// The merge base of `a` and `b` in `dir`.
@@ -670,6 +674,11 @@ impl Repo for GitCli {
             std::fs::create_dir_all(parent)?;
         }
         output(git_in(repo).args(["worktree", "add"]).arg(dir).arg(branch))?;
+        Ok(())
+    }
+
+    fn checkout_branch(&mut self, dir: &Path, branch: &str) -> Result<()> {
+        output(git_in(dir).args(["checkout", "--quiet", branch]))?;
         Ok(())
     }
 
@@ -1764,6 +1773,16 @@ pub struct FakeRepo {
     pub fail_fetch: Option<String>,
     /// Detached worktrees made or moved: repo, dir, commit.
     pub detached_trees: Vec<(PathBuf, PathBuf, String)>,
+    /// The head a tree had when `worktree_detached` moved it, which
+    /// `checkout_branch` puts back.
+    pub heads_aside: std::collections::BTreeMap<PathBuf, String>,
+    /// Trees put back on a branch by `checkout_branch`: dir, branch.
+    pub checked_out: Vec<(PathBuf, String)>,
+    /// The next `checkout_branch` fails with this, once.
+    pub fail_checkout: Option<String>,
+    /// Revisions `rev_parse` cannot read in any directory, as a commit
+    /// the clone does not have.
+    pub unreadable: Vec<String>,
     /// Worktrees moved: repo, from, to.
     pub moved: Vec<(PathBuf, PathBuf, PathBuf)>,
     /// The `origin` of a tree, for a project the pipeline names by `root`.
@@ -2106,6 +2125,24 @@ impl Repo for FakeRepo {
         self.heads.insert(dir.to_path_buf(), head);
         Ok(())
     }
+    fn checkout_branch(&mut self, dir: &Path, branch: &str) -> Result<()> {
+        if let Some(e) = self.fail_checkout.take() {
+            bail!("{e}");
+        }
+        if self.dirty.iter().any(|d| d == dir) {
+            bail!(
+                "error: your local changes in {} would be overwritten by checkout",
+                dir.display()
+            );
+        }
+        self.detached.retain(|d| d != dir);
+        if let Some(head) = self.heads_aside.remove(dir) {
+            self.heads.insert(dir.to_path_buf(), head);
+        }
+        self.checked_out
+            .push((dir.to_path_buf(), branch.to_owned()));
+        Ok(())
+    }
     fn worktree_track(
         &mut self,
         repo: &Path,
@@ -2268,6 +2305,9 @@ impl Repo for FakeRepo {
         std::fs::create_dir_all(dir)?;
         if !self.detached.iter().any(|d| d == dir) {
             self.detached.push(dir.to_path_buf());
+            if let Some(head) = self.heads.get(dir).cloned() {
+                self.heads_aside.insert(dir.to_path_buf(), head);
+            }
         }
         self.heads.insert(dir.to_path_buf(), commit.to_owned());
         self.detached_trees
@@ -2420,7 +2460,10 @@ impl Repo for FakeRepo {
             leader_started: format!("started {pid}"),
         })
     }
-    fn rev_parse(&self, dir: &Path, _rev: &str) -> Result<String> {
+    fn rev_parse(&self, dir: &Path, rev: &str) -> Result<String> {
+        if self.unreadable.iter().any(|r| r == rev) {
+            bail!("fatal: Needed a single revision");
+        }
         Ok(self
             .bases
             .get(dir)
@@ -2567,6 +2610,9 @@ impl Repo for std::sync::Arc<std::sync::Mutex<FakeRepo>> {
     }
     fn worktree_checkout(&mut self, repo: &Path, dir: &Path, branch: &str) -> Result<()> {
         self.lock().unwrap().worktree_checkout(repo, dir, branch)
+    }
+    fn checkout_branch(&mut self, dir: &Path, branch: &str) -> Result<()> {
+        self.lock().unwrap().checkout_branch(dir, branch)
     }
     fn rev_parse(&self, dir: &Path, rev: &str) -> Result<String> {
         self.lock().unwrap().rev_parse(dir, rev)
@@ -3644,6 +3690,35 @@ mod tests {
         std::fs::remove_dir_all(&wt).unwrap();
         cli.worktree_detached(&repo, &wt, &first).unwrap();
         assert_eq!(cli.head(&wt).unwrap(), first);
+    }
+
+    #[test]
+    fn the_real_git_puts_a_detached_tree_back_on_its_branch_unless_an_edit_is_in_the_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = origin_and_clone(dir.path(), "p");
+        let first = commit(&repo, "f", "1\n", &["-m", "one"]);
+        let second = commit(&repo, "f", "2\n", &["-m", "two"]);
+        let mut cli = GitCli::default();
+        let wt = dir.path().join("wt").join("lane");
+        cli.worktree_add(&repo, &wt, "dispatch/1-x", &second)
+            .unwrap();
+        cli.worktree_detached(&repo, &wt, &first).unwrap();
+        assert_eq!(cli.branch_head(&wt, "dispatch/1-x").unwrap(), None);
+        cli.checkout_branch(&wt, "dispatch/1-x").unwrap();
+        assert_eq!(
+            cli.branch_head(&wt, "dispatch/1-x").unwrap(),
+            Some(second.clone())
+        );
+        // An edit to a file the two commits differ in is refused, and kept.
+        cli.worktree_detached(&repo, &wt, &first).unwrap();
+        std::fs::write(wt.join("f"), "mine\n").unwrap();
+        let err = format!(
+            "{:#}",
+            cli.checkout_branch(&wt, "dispatch/1-x").unwrap_err()
+        );
+        assert!(err.contains("would be overwritten"), "{err}");
+        assert_eq!(cli.head(&wt).unwrap(), first);
+        assert_eq!(std::fs::read_to_string(wt.join("f")).unwrap(), "mine\n");
     }
 
     #[test]
