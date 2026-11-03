@@ -145,13 +145,14 @@ check this). A release is `./scripts/bump.sh patch|minor|major`, a commit
 "Release X.Y.Z" through the hook on a branch, a pull request that merges
 it to `main` (`main` takes pull requests only; nothing pushes it
 directly, and the merge publishes nothing), then the "Release" workflow,
-run by the owner from the Actions tab or `gh workflow run release`. It
+started from the Actions tab or `gh workflow run release`. It
 runs from `main` only, waits for the owner's approval of the `release`
 environment that holds the signing identity and the notarization key,
 and then runs `scripts/release.sh`: build, sign, notarize, tag, publish
 with the changelog section as notes. An agent prepares a release (the
-bump pull request) on the owner's word and never starts the workflow;
-the owner does, when ready. `scripts/release.sh` on a Mac is the
+bump pull request) on the owner's word, and starts the workflow only
+when the owner says to; approving the `release` environment is always
+the owner's. `scripts/release.sh` on a Mac is the
 fallback and does the same without notarization unless the `NOTARY_*`
 variables are set. Minor when the folded section has an `Added:`
 heading, patch when it has only `Changed:` and `Fixed:`; the owner wants
