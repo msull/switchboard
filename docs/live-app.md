@@ -281,7 +281,10 @@ has the recipe. What they leave behind and what goes wrong:
   saved from `main` only.
 - A pre-commit hook run takes about five minutes (fmt, clippy pedantic,
   the workspace tests, the vendored terminal's tests); run commits in
-  the background and keep working. `--no-verify` is never used. The
+  the background and keep working. A commit that stages only files
+  under `client/` runs `swift test` instead, in seconds and with no
+  Rust build, which is what lets headset work go on from a Mac whose
+  `target/` is cold. `--no-verify` is never used. The
   Python-script edits in this repo's history assert each anchor occurs
   exactly once and write only at the end, so a failed assert changes
   nothing.

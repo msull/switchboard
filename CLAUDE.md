@@ -49,7 +49,8 @@ to `main` through a pull request (`main` takes nothing else), then the
 `Cargo.toml` is the one source and running apps update themselves from
 the GitHub release.
 
-The pre-commit hook runs the first four. Enable it with
+The pre-commit hook runs the first four, or `swift test` alone for a
+commit that touches only `client/`. Enable it with
 `git config core.hooksPath .githooks` on a fresh clone. Never commit with
 `--no-verify`. Nothing that reaches GitHub carries tool attribution:
 no `Claude-Session:` trailer, no `Co-Authored-By` for an assistant, no

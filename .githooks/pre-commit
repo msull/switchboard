@@ -5,6 +5,17 @@ set -e
 
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# A commit that touches only the Swift client runs the client's tests
+# and nothing of cargo: the Rust checks would rebuild a workspace the
+# change cannot have affected, and CI runs them on the pull request
+# anyway. Anything outside client/ runs the full set below.
+STAGED=$(git diff --cached --name-only --diff-filter=ACDMR)
+if [ -n "$STAGED" ] && ! printf '%s\n' "$STAGED" | grep -qv '^client/'; then
+    echo "pre-commit: client only; swift test"
+    (cd client && swift test --quiet)
+    exit 0
+fi
+
 # Git runs hooks with GIT_DIR and GIT_INDEX_FILE pointing at the
 # repository being committed. A test that runs git in a fixture directory
 # would act on this repository instead, so none of them reach the tests.
