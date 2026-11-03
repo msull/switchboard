@@ -1636,6 +1636,19 @@ pub fn uncommitted(git: &dyn Repo, tree: Option<&Path>, lanes: &[PathBuf]) -> Re
     Ok(found)
 }
 
+/// Whether `tree` is clean once the lane worktrees in `lanes` (lanes
+/// with a repository of their own, nested in it) are read on their own
+/// terms: each lane must be clean, and so must the tree beside them. A
+/// plain `is_clean` would count a clean nested lane as untracked
+/// content. With no lanes, or with `tree` gone, it is `is_clean`, so a
+/// vanished tree still errors instead of passing as `uncommitted` would.
+pub fn is_clean_beside(git: &dyn Repo, tree: &Path, lanes: &[PathBuf]) -> Result<bool> {
+    if lanes.is_empty() || !tree.exists() {
+        return git.is_clean(tree);
+    }
+    Ok(uncommitted(git, Some(tree), lanes)?.is_empty())
+}
+
 /// Every change in `tree` that is not one of the worktrees in `lanes`
 /// or inside one, as absolute paths. What is inside a nested lane is
 /// that lane's repository's business, not the tree's.
@@ -1828,6 +1841,10 @@ pub struct FakeRepo {
     /// What `changes` reports for a directory, as a test wrote it; a
     /// directory in `dirty` reports `.` besides.
     pub changes: std::collections::BTreeMap<PathBuf, Vec<PathBuf>>,
+    /// Whether a directory with an entry in `changes` is also not
+    /// clean, as `git status` would count it, so a nested lane listed
+    /// there fails the plain check. Off, `is_clean` reads `dirty` alone.
+    pub changes_dirty: bool,
     /// Worktrees removed, in order: repo, dir. A repeated removal of
     /// the same directory is recorded again.
     pub removed: Vec<(PathBuf, PathBuf)>,
@@ -2124,7 +2141,8 @@ impl Repo for FakeRepo {
             .with_context(|| format!("no fake head for {}", dir.display()))
     }
     fn is_clean(&self, dir: &Path) -> Result<bool> {
-        Ok(!self.dirty.iter().any(|d| d == dir))
+        let changed = self.changes_dirty && self.changes.get(dir).is_some_and(|c| !c.is_empty());
+        Ok(!changed && !self.dirty.iter().any(|d| d == dir))
     }
     fn rebase_in_progress(&self, dir: &Path) -> Result<bool> {
         Ok(self.mid_rebase.iter().any(|d| d == dir))
@@ -3801,6 +3819,32 @@ mod tests {
         assert_eq!(
             uncommitted(&cli, Some(&tree), &lanes).unwrap(),
             [lane.join("todo.txt")]
+        );
+    }
+
+    #[test]
+    fn a_tree_is_clean_beside_its_nested_lanes_when_both_are() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tree, lane) = nested(dir.path(), "backend");
+        let cli = GitCli::default();
+        let lanes = [lane.clone()];
+        assert!(is_clean_beside(&cli, &tree, &lanes).unwrap());
+        assert_eq!(
+            is_clean_beside(&cli, &tree, &[]).unwrap(),
+            cli.is_clean(&tree).unwrap(),
+            "with no lanes it is the plain check"
+        );
+        assert!(!is_clean_beside(&cli, &tree, &[]).unwrap());
+        std::fs::write(tree.join("stray.txt"), "x").unwrap();
+        assert!(!is_clean_beside(&cli, &tree, &lanes).unwrap());
+        std::fs::remove_file(tree.join("stray.txt")).unwrap();
+        std::fs::write(lane.join("todo.txt"), "x").unwrap();
+        assert!(!is_clean_beside(&cli, &tree, &lanes).unwrap());
+        std::fs::remove_dir_all(&tree).unwrap();
+        assert!(cli.is_clean(&tree).is_err());
+        assert!(
+            is_clean_beside(&cli, &tree, &lanes).is_err(),
+            "a vanished tree errors as the plain check does"
         );
     }
 

@@ -4510,6 +4510,34 @@ the window is hidden (spike 12, `src/cadence.rs`) is not re-measured;
 the signed bundle's grants are the owner's to check. No record or
 schema change.
 
+## A held joined stage reads its nested lanes (2026-11-02)
+
+A held stage in the joined context could not be answered `proceed` in
+a workspace whose lanes are repositories of their own: the joined
+context's tree is the ticket's tree, a clean lane worktree nested in it
+is untracked content to the outer repository's `git status`, and the
+plain `is_clean` refused it. `git::is_clean_beside` reads each nested
+lane on its own and the tree beside them, as a close's preflight
+(`uncommitted`) does, and falls back to the plain check with no lanes
+or with the tree gone, so a vanished tree still errors. The
+scheduler's `tree_clean` lists, in the root or joined context only, the
+lanes that `removes_lane` names and that sit strictly inside the
+directory; a lane's own context keeps the plain check, since a lane at
+`path = "."` shares its directory with the ticket's tree and another
+lane's work is not its business. Every clean-tree check that can
+receive the ticket's tree (the held `proceed`, an agent stage's command
+gate, a gate's start and poll, the code review's rounds, fixes, checks
+and rewrites, `back_to_checks`) takes it. A lane without a repository
+is a directory of the tree and is never excluded: one at `path = "."`
+would filter every change. The fake repository's `changes_dirty` makes
+its `is_clean` count a seeded `changes` entry, as real git would.
+
+Known gaps: a joined completion records only the root tree's head,
+while `docs/dispatch.md` says a joined result records every lane's;
+how a moved lane head voids such an attempt is not traced. The root
+rebase passes lanes without a repository to `tree_changes` and can hide
+their changes.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

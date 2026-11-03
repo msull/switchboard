@@ -6064,6 +6064,189 @@ fn proceed_is_refused_and_asked_again_until_the_note_and_the_tree_are_right() {
     assert_eq!(build_attempt(&env, &id).state, AttemptState::Complete);
 }
 
+/// A workspace whose `build` is held open for the owner in the joined
+/// context: the ticket's tree holds a lane of a repository of its own
+/// (`backend`) and a lane that is a directory of the tree (`docs`).
+const HELD_JOINED: &str = r#"
+version = 1
+
+[project]
+name = "Orchard"
+repo = "git@example.com:example-org/orchard-workspace.git"
+worktrees = "{worktrees}"
+space = "Dispatch · Orchard"
+
+[source]
+kind = "github"
+repo = "example-org/orchard-workspace"
+label = "dispatch"
+
+[[lanes]]
+name = "backend"
+path = "orchard-backend"
+repo = "git@example.com:example-org/orchard-backend.git"
+base = "main"
+
+[[lanes]]
+name = "docs"
+path = "docs"
+
+[operators.builder]
+kind = "claude"
+
+[[stages]]
+name = "build"
+operator = "builder"
+context = "joined"
+writes = ["notes"]
+prompt = "Build with the owner on {branch}; notes to {notes}."
+gate = { kind = "human", decision = "built", question = "Built as the issue asks?" }
+
+[[stages]]
+name = "inspect"
+context = "joined"
+gate = { kind = "human", decision = "inspect" }
+
+[policy]
+slots = 2
+waiting_on_me = 3
+trust_folders = true
+"#;
+
+/// A joined held build asked, its note written. The fake repository is
+/// seeded so the ticket's tree reports the backend lane as a change
+/// while the lane's own tree is clean, as `git status` shows a nested
+/// repository. Returns the ticket id, the open decision, the ticket's
+/// tree and the backend lane's tree.
+fn joined_held_asked(env: &mut Env) -> (String, Decision, PathBuf, PathBuf) {
+    let text = HELD_JOINED.replace("{worktrees}", &env.worktrees.display().to_string());
+    std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
+    let id = take_orchard(env, 42, &[]);
+    // The fake checks out no files, so the `docs` lane, a directory of
+    // the workspace's checkout, is missing until the test makes it.
+    env.steps_until(&id, "the cut parked on docs", |t, _| {
+        matches!(t.state, TicketState::Parked { .. })
+    });
+    std::fs::create_dir_all(env.worktrees.join(&id).join("docs")).unwrap();
+    let now = env.tick();
+    env.runner.resume(&id, now).unwrap();
+    env.steps_until(&id, "the build session", |t, _| {
+        t.attempts_of("build").any(|a| a.session.is_some())
+    });
+    let t = env.ticket(&id);
+    let tree = t.tree.clone().expect("the ticket's tree");
+    let lane = t
+        .lanes
+        .iter()
+        .find(|l| l.name == "backend")
+        .unwrap()
+        .worktree
+        .clone();
+    assert!(
+        lane.starts_with(&tree),
+        "{} in {}",
+        lane.display(),
+        tree.display()
+    );
+    assert!(lane.is_dir() && tree.join("docs").is_dir());
+    {
+        let mut repo = env.repo.lock().unwrap();
+        repo.changes_dirty = true;
+        repo.changes
+            .insert(tree.clone(), vec![PathBuf::from("orchard-backend")]);
+    }
+    let session = session_of(&t, "build");
+    std::fs::write(artifact_of(&t, "build", "notes"), "# built").unwrap();
+    let now = env.now;
+    env.sb().stop(&session, now);
+    env.step();
+    let d = asked(env, &id, "built");
+    (id, d, tree, lane)
+}
+
+/// `proceed` on a joined held stage whose only change in the ticket's
+/// tree is a clean lane of its own repository: the lane is read on its
+/// own terms, so the attempt completes at the tree's head.
+#[test]
+fn proceed_on_a_joined_stage_reads_a_nested_lane_repository_on_its_own() {
+    let mut env = Env::new();
+    let (id, d, tree, _) = joined_held_asked(&mut env);
+    env.repo
+        .lock()
+        .unwrap()
+        .heads
+        .insert(tree.clone(), "joined0001".into());
+    answer(&mut env, &id, &d, "proceed");
+    env.step();
+    let a = build_attempt(&env, &id);
+    assert_eq!(a.state, AttemptState::Complete, "{a:?}");
+    assert_eq!(a.head.as_deref(), Some("joined0001"));
+}
+
+/// The nested lane with work of its own, or a stray change beside it in
+/// the ticket's tree, still refuses `proceed`.
+#[test]
+fn proceed_on_a_joined_stage_is_refused_for_a_dirty_lane_or_a_change_beside_it() {
+    let mut env = Env::new();
+    let (id, d, tree, lane) = joined_held_asked(&mut env);
+    env.repo.lock().unwrap().dirty.push(lane.clone());
+    answer(&mut env, &id, &d, "proceed");
+    env.step();
+    let again = asked(&env, &id, "built");
+    assert!(
+        again.question.contains("is not clean"),
+        "{}",
+        again.question
+    );
+    assert!(build_attempt(&env, &id).is_open());
+    env.repo.lock().unwrap().dirty.clear();
+    env.repo
+        .lock()
+        .unwrap()
+        .changes
+        .get_mut(&tree)
+        .unwrap()
+        .push(PathBuf::from("stray.txt"));
+    answer(&mut env, &id, &again, "proceed");
+    env.step();
+    let third = asked(&env, &id, "built");
+    assert!(
+        third.question.contains("is not clean"),
+        "{}",
+        third.question
+    );
+    assert!(
+        third.question.contains(&tree.display().to_string()),
+        "{}",
+        third.question
+    );
+    assert!(build_attempt(&env, &id).is_open());
+}
+
+/// A lane without a repository of its own is a directory of the
+/// ticket's tree: a change in it is the tree's, and refuses `proceed`.
+#[test]
+fn proceed_on_a_joined_stage_counts_a_repositoryless_lane_as_the_trees() {
+    let mut env = Env::new();
+    let (id, d, tree, _) = joined_held_asked(&mut env);
+    env.repo
+        .lock()
+        .unwrap()
+        .changes
+        .get_mut(&tree)
+        .unwrap()
+        .push(PathBuf::from("docs/todo.md"));
+    answer(&mut env, &id, &d, "proceed");
+    env.step();
+    let again = asked(&env, &id, "built");
+    assert!(
+        again.question.contains("is not clean"),
+        "{}",
+        again.question
+    );
+    assert!(build_attempt(&env, &id).is_open());
+}
+
 /// The session gone with `proceed` given: the note and the tree are on
 /// disk, so it completes and sends no kill, with nothing left pending.
 #[test]

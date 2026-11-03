@@ -665,10 +665,14 @@ interrupted attempt.
   `proceed`, `relaunch`, `rerun` and `park`. `proceed` is the owner's
   word, so it needs no Stop: it is refused, and asked again with the
   reason first, while the running note does not exist or the tree is
-  not clean; otherwise the head is recorded on the attempt, it
-  completes, every other question on it is withdrawn, the mark comes
-  off and the session is closed, and the next stage starts. Nothing is
-  typed into the session on any of these paths. `rerun` with a note
+  not clean (in the joined context, each lane with a repository of
+  its own nested in the ticket's tree is read on its own terms, so a
+  clean lane does not count as untracked content of the tree, while a
+  lane without one stays part of the tree's status); otherwise the
+  head is recorded on the attempt, it completes, every other question
+  on it is withdrawn, the mark comes off and the session is closed,
+  and the next stage starts. Nothing is typed into the session on any
+  of these paths. `rerun` with a note
   runs the held stage itself again, not the stage before it: the
   attempt is cancelled once its session is confirmed stopped, and the
   next attempt is new, with a new note and the owner's note (and the
