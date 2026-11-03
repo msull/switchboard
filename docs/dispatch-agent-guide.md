@@ -630,9 +630,13 @@ change depends on the key:
   the ticket never ran. If the ticket was parked, or its deploy wrote a
   secret, the restart goes through `deploy` again first, behind a
   `rerun` question; the note waits for the tester.
-- A lane's `setup` runs once per worktree, before the lane's first
-  agent, and again after a restart that changed it: before the next
-  agent or the checks a `check` answer starts.
+- A lane's `setup` runs once per worktree, before the first stage
+  that serves the lane or runs in it (its `before`, `serve` and agent
+  wait for it; a `root` or `joined` stage sets up every chosen lane,
+  or every lane before the `lanes` decision), and again after a
+  restart that changed it: before the next agent, service, or the
+  checks a `check` answer starts. A setup that fails parks the ticket
+  with `lane <name>: setup failed`.
 - A `take` or `dispatch restart` refused with "is a code review stage
   and may not hold" means the live file names a resource in `needs` on
   a code review stage. Remove that stage's `needs` (when the owner

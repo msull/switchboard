@@ -974,7 +974,7 @@ repo = "git@..."              # a repository of its own (a workspace of several)
                               # Dispatch too, cut as a worktree at path inside the ticket's tree
 base = "main"                 # omitted: the project's
 remotes = { github = "git@github.com:..." }   # this lane's mirrors, as the project's
-setup = ["cmd", "args"]       # run once, before the lane's first agent
+setup = ["cmd", "args"]       # run once, before the first stage that serves or runs in the lane (a root or joined stage: every chosen lane, or every lane before the lanes decision); a failure parks
 writable = ["~/.cargo"]       # under [policy] confine: extra paths the lane's setup, gates, checks and command reviewers may write
 merge_after = ["backend"]     # lanes whose pull requests merge first: this lane's merge question waits for them (see "Merge order")
 merge_after_deploy = true     # also wait for the base pipeline on their merge commit: true until it finishes, or a step's name ("Deploy to dev") until it passes
@@ -1045,7 +1045,7 @@ gate = { kind = "command", argv = ["..."], in = "root" | "lane" | "lane:<name>" 
 on_dirty = { nudge = 1 } | "ask"   # an agent stage with a command gate, or a code review stage's implementer: overrides the policy's
 without_lane = "base"         # a gate-only command stage in lane:<name>: when the ticket did not choose the lane, run it on the lane's base from the project's base tree
 services = ["frontend"]       # lanes with a serve, started for this stage if the ticket cut them; needs a [[resources]] entry in needs and [policy] ports
-before = { frontend = ["npm", "run", "link-env"] }   # per served lane: run before its service starts; idempotent; keys among services
+before = { frontend = ["npm", "run", "link-env"] }   # per served lane: run before its service starts, after the lane's setup finished; idempotent; keys among services
 needs = ["resource name"]     # held over each run of consecutive stages that name it, released at its end and retaken at the next; a workflow stage only last in a run; never a code review stage (refused at take and restart)
 reviewers = ["style", "lint"] # present: a code review stage (see "The code review stage"); operators, run at once each round
 implementer = "implementer"   # the claude operator that addresses a round's findings, fresh each round

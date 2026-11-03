@@ -5474,8 +5474,9 @@ fn a_directory_in_the_way_that_is_not_the_worktree_parks_the_ticket() {
 
 // --- a workspace of several repositories: the ticket's tree is the
 // workspace, each lane a worktree of its own repository inside it, the
-// lanes decision chooses where the work runs, and a lane's setup waits
-// for its first agent.
+// lanes decision chooses where the work runs, and a lane's setup runs
+// before the first stage that serves or runs in it: every cut lane's at
+// a root stage before the lanes decision, only the chosen ones after.
 
 const WORKSPACE: &str = r#"
 version = 1
@@ -6620,8 +6621,8 @@ fn a_workspace_ticket_gets_the_workspace_tree_with_every_lane_inside_it() {
             .all(|l| l.branch == "dispatch/42-asset-report-column-missing")
     );
     assert!(
-        t.lanes.iter().all(|l| !l.setup_done),
-        "setups wait for an agent"
+        t.lanes.iter().all(|l| l.setup_done),
+        "the root stage set up every cut lane"
     );
     for name in ["Orchard", "Orchard@backend", "Orchard@frontend"] {
         assert!(env.data.repo_dir(name).exists(), "clone {name}");
@@ -6683,9 +6684,85 @@ fn the_label_hints_choose_the_lanes_and_only_those_get_a_planner() {
         planner.project, sb.projects[0].id,
         "one project, the lane's cwd"
     );
-    // The backend setup ran once, in the lane, before its planner; the
-    // frontend's never did.
+    // Each lane's setup ran once, in the lane, at `investigate`; the
+    // planner ran none again.
+    assert!(t.lanes.iter().all(|l| l.setup_done));
+    let repo = env.repo.lock().unwrap();
+    let ran_in = |dir: &std::path::Path, argv: &[&str]| {
+        repo.ran
+            .iter()
+            .filter(|(d, a)| d == dir && a == argv)
+            .count()
+    };
+    assert_eq!(ran_in(&t.lanes[0].worktree, &["uv", "sync"]), 1);
+    assert_eq!(ran_in(&t.lanes[1].worktree, &["npm", "ci"]), 1);
+}
+
+/// `investigate`, a root stage before the lanes decision, sets up every
+/// cut lane in its own tree before its investigator starts, though no
+/// lane is chosen yet.
+#[test]
+fn a_root_stage_before_the_lanes_decision_sets_up_every_lane_first() {
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    env.repo.lock().unwrap().fail_run = Some("npm: lockfile out of date".into());
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert!(t.lanes.iter().all(|l| !l.chosen), "{t:#?}");
+    // The backend's setup failed first; nothing started after it.
+    assert!(
+        matches!(&t.state, TicketState::Parked { reason } if reason.contains("lane backend: setup failed")),
+        "{:?}",
+        t.state
+    );
+    assert!(t.lanes.iter().all(|l| !l.setup_done));
+    assert!(env.sb().sessions_named("investigator").is_empty());
+    assert!(t.attempts_of("investigate").next().is_none());
+
+    let (mut env, id) = workspace_env(&["area:backend"]);
+    let now = env.tick();
+    env.runner.step_project("Orchard", now).unwrap();
+    let t = env.ticket(&id);
+    assert!(t.lanes.iter().all(|l| !l.chosen && l.setup_done), "{t:#?}");
+    let ran = env.repo.lock().unwrap().ran.clone();
+    assert!(ran.contains(&(
+        t.lanes[0].worktree.clone(),
+        vec!["uv".into(), "sync".into()]
+    )));
+    assert!(ran.contains(&(t.lanes[1].worktree.clone(), vec!["npm".into(), "ci".into()])));
+    assert_eq!(env.sb().sessions_named("investigator").len(), 1);
+}
+
+/// After the lanes decision chose one lane, a root stage sets up that
+/// lane alone.
+#[test]
+fn a_root_stage_after_the_lanes_decision_sets_up_only_the_chosen_lanes() {
+    let investigate = "[[stages]]\nname = \"investigate\"";
+    let lanes =
+        "[[stages]]\nname = \"lanes\"\ngate = { kind = \"human\", decision = \"lanes\" }\n\n";
+    assert!(WORKSPACE.contains(investigate) && WORKSPACE.contains(lanes));
+    let text =
+        WORKSPACE
+            .replacen(lanes, "", 1)
+            .replacen(investigate, &format!("{lanes}{investigate}"), 1);
+    let (mut env, id) = workspace_env_with(&text, &["area:backend"]);
+    for _ in 0..6 {
+        let now = env.tick();
+        env.runner.step_project("Orchard", now).unwrap();
+        if env.ticket(&id).attempts_of("investigate").next().is_some() {
+            break;
+        }
+    }
+    let t = env.ticket(&id);
+    assert_eq!(t.attempts_of("investigate").count(), 1, "{t:#?}");
+    let chosen: Vec<(&str, bool)> = t
+        .lanes
+        .iter()
+        .map(|l| (l.name.as_str(), l.chosen))
+        .collect();
+    assert_eq!(chosen, [("backend", true), ("frontend", false)]);
     assert!(t.lanes[0].setup_done && !t.lanes[1].setup_done);
+    assert_eq!(setups_run(&env, &["npm", "ci"]), 0);
 }
 
 /// The workspace with a third lane, and investigate and plan prompts
@@ -20965,6 +21042,109 @@ fn two_served_env() -> (Env, String) {
     std::fs::write(env.data.pipeline("Orchard"), text).unwrap();
     let id = take_orchard(&mut env, 42, BOTH);
     (env, id)
+}
+
+/// Steps until `done`, asserting on every pass that no service record
+/// of `lane` was made, and no `before` started, while the lane's setup
+/// had not finished.
+fn steps_setup_first(env: &mut Env, id: &str, lane: &str, done: impl Fn(&Ticket) -> bool) {
+    for _ in 0..12 {
+        env.step();
+        let t = env.ticket(id);
+        let set_up = t.lanes.iter().any(|l| l.name == lane && l.setup_done);
+        let serving = !services_of(&t, lane).is_empty() || started(env, &before_key(id, 1)) > 0;
+        assert!(set_up || !serving, "{lane} served before its setup: {t:#?}");
+        if done(&t) {
+            return;
+        }
+    }
+    panic!("never done: {:#?}", env.ticket(id));
+}
+
+/// `try` serves the frontend, whose setup no stage has run yet: it
+/// runs, in the lane, before the `before` and the service, which then
+/// come up as ever.
+#[test]
+fn a_services_stage_runs_the_lanes_setup_before_its_before_and_serve() {
+    let (mut env, id) = back_half_env(BOTH);
+    deploying(&mut env, &id);
+    let t = env.ticket(&id);
+    assert!(!t.lanes[1].setup_done, "{t:#?}");
+    exits(&env, &deploy_key(&id, 1), 0);
+    steps_setup_first(&mut env, &id, "frontend", |t| {
+        !services_of(t, "frontend").is_empty()
+    });
+    frontend_ready(&mut env, &id, 1);
+    let t = env.ticket(&id);
+    assert!(t.lanes.iter().all(|l| l.setup_done));
+    let tree = lane_tree(&env, &id, "frontend");
+    let repo = env.repo.lock().unwrap();
+    let ran: Vec<&Vec<String>> = repo
+        .ran
+        .iter()
+        .filter(|(d, _)| *d == tree)
+        .map(|(_, a)| a)
+        .collect();
+    assert_eq!(ran, [&vec!["npm".to_owned(), "ci".to_owned()]]);
+}
+
+/// The frontend's setup fails at `try`: the ticket parks with the
+/// setup's reason, no service record is made, no `before` starts, and
+/// nothing asks a `service` question.
+#[test]
+fn a_services_stage_whose_lane_setup_fails_parks_before_serving() {
+    let (mut env, id) = back_half_env(BOTH);
+    deploying(&mut env, &id);
+    env.repo.lock().unwrap().fail_run = Some("npm: lockfile out of date".into());
+    exits(&env, &deploy_key(&id, 1), 0);
+    env.steps_until(&id, "the park", |t, _| !t.active());
+    let t = env.ticket(&id);
+    assert!(
+        matches!(&t.state, TicketState::Parked { reason } if reason.contains("lane frontend: setup failed")),
+        "{:?}",
+        t.state
+    );
+    assert!(!t.lanes[1].setup_done);
+    assert!(t.services.is_empty(), "{:#?}", t.services);
+    assert_eq!(started(&env, &before_key(&id, 1)), 0);
+    assert!(service_launches(&env).is_empty());
+    assert!(
+        !t.decisions.iter().any(|d| d.name == "service"),
+        "{:#?}",
+        t.decisions
+    );
+}
+
+/// A restart that changes the frontend's setup while `try` serves it:
+/// the new setup runs before the frontend is served again.
+#[test]
+fn a_restart_that_changes_a_served_lanes_setup_runs_it_before_the_service() {
+    let (mut env, id) = back_half_env(BOTH);
+    deployed(&mut env, &id);
+    served(&mut env, &id);
+    let path = env.data.pipeline("Orchard");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let from = "setup = [\"npm\", \"ci\"]";
+    assert!(text.contains(from));
+    std::fs::write(
+        &path,
+        text.replacen(from, "setup = [\"npm\", \"install\"]", 1),
+    )
+    .unwrap();
+    let records = services_of(&env.ticket(&id), "frontend").len();
+    let t = restart_at(&mut env, &id, None);
+    assert!(t.active(), "{:?}", t.state);
+    assert!(!t.lanes[1].setup_done, "{t:#?}");
+    assert_eq!(setups_run(&env, &["npm", "install"]), 0);
+    env.steps_until(&id, "the frontend served again", |t, _| {
+        let again = services_of(t, "frontend").len() > records;
+        assert!(
+            !again || t.lanes[1].setup_done,
+            "served before its new setup: {t:#?}"
+        );
+        again
+    });
+    assert_eq!(setups_run(&env, &["npm", "install"]), 1);
 }
 
 fn services_of<'a>(t: &'a Ticket, lane: &str) -> Vec<&'a dispatch::ticket::ServiceRecord> {

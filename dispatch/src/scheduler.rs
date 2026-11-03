@@ -4269,7 +4269,10 @@ impl Runner {
     }
 
     /// A lane's setup, once, before its first agent; the ticket is
-    /// parked if it fails.
+    /// parked if it fails. A stage's own lanes are set up earlier, by
+    /// `ensure_stage_setup`; this is the backstop for the paths that
+    /// reach an agent outside a stage tick (a review agent and an
+    /// agent spawn), where no stage setup has run.
     pub(crate) fn ensure_setup(
         &mut self,
         t: &mut Ticket,
@@ -4287,10 +4290,77 @@ impl Runner {
         }
     }
 
+    /// Whether the stage's lane setup should run on this tick: setup
+    /// finishes before the stage serves or runs in a lane. Not while an
+    /// agent of the stage is running, which is watched and never
+    /// interrupted by a setup in its worktree. Nor while every context
+    /// that has not finished waits on an answer and nothing is served:
+    /// the answer's own path runs the setup (`check` fails its checks on
+    /// a setup failure rather than parking).
+    fn setup_due(t: &Ticket, stage: &Stage, contexts: &Contexts) -> bool {
+        let running = contexts
+            .iter()
+            .any(|(ctx, _, _)| latest_attempt(t, &stage.name, ctx).is_some_and(Attempt::is_open));
+        let starting = !stage.services.is_empty()
+            || contexts
+                .iter()
+                .any(|(ctx, _, _)| latest_attempt(t, &stage.name, ctx).is_none());
+        !running && starting
+    }
+
+    /// The setup of each lane the stage needs, before any of its
+    /// services or agents starts; the ticket is parked if one fails, so
+    /// no `before` or `serve` runs in a lane whose setup has not
+    /// finished. The lanes: each chosen lane the stage serves, each lane
+    /// a context runs in, and for a context with no lane (`root`,
+    /// `joined`) every chosen lane, or every cut lane before the lanes
+    /// decision has chosen any.
+    pub(crate) fn ensure_stage_setup(
+        &mut self,
+        t: &mut Ticket,
+        ps: &mut ProjectState,
+        p: &Pipeline,
+        stage: &Stage,
+        contexts: &Contexts,
+        now_ms: u64,
+    ) -> Result<bool> {
+        // Pipeline validation refuses a serve cycle at load, so the
+        // fallback is never taken; it names the same lanes unordered.
+        let serve_lanes = p
+            .serve_order(stage)
+            .unwrap_or_else(|_| stage.services.clone());
+        let any_chosen = t.lanes.iter().any(|l| l.chosen);
+        let rootless = contexts.iter().any(|(_, _, lane)| lane.is_none());
+        let wanted: Vec<String> = t
+            .lanes
+            .iter()
+            .filter(|l| !l.removed)
+            .filter(|l| {
+                let serves = l.chosen && serve_lanes.contains(&l.name);
+                // A `<lane>@base` context runs in the base tree, not the
+                // lane's worktree, so it sets nothing up there.
+                let runs_in = contexts.iter().any(|(_, cwd, lane)| {
+                    lane.as_deref() == Some(l.name.as_str()) && *cwd == l.worktree
+                });
+                let under_root = rootless && (l.chosen || !any_chosen);
+                serves || runs_in || under_root
+            })
+            .map(|l| l.name.clone())
+            .collect();
+        if wanted.is_empty() {
+            return Ok(true);
+        }
+        match self.run_setup_where(t, p, now_ms, |l| wanted.contains(&l.name))? {
+            Some(reason) => {
+                self.park(t, ps, &reason, now_ms)?;
+                Ok(false)
+            }
+            None => Ok(true),
+        }
+    }
+
     /// The setup of each lane at `cwd` not yet run (or changed by a
-    /// restart), each marked done and saved as it passes. The first
-    /// failure stops the rest and is returned as the reason, with that
-    /// lane's setup still pending; the caller decides what it costs.
+    /// restart); `run_setup_where` filtered to that worktree.
     pub(crate) fn run_setup(
         &mut self,
         t: &mut Ticket,
@@ -4298,11 +4368,26 @@ impl Runner {
         cwd: &Path,
         now_ms: u64,
     ) -> Result<Option<String>> {
+        self.run_setup_where(t, p, now_ms, |l| l.worktree == cwd)
+    }
+
+    /// The setup of each lane `keep` accepts and not yet run (or changed
+    /// by a restart), each in its own worktree under its own confine,
+    /// marked done and saved as it passes. The first failure stops the
+    /// rest and is returned as the reason, with that lane's setup still
+    /// pending; the caller decides what it costs.
+    pub(crate) fn run_setup_where(
+        &mut self,
+        t: &mut Ticket,
+        p: &Pipeline,
+        now_ms: u64,
+        keep: impl Fn(&LaneRecord) -> bool,
+    ) -> Result<Option<String>> {
         let pending: Vec<(usize, Vec<String>, String)> = t
             .lanes
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.worktree == cwd && !l.setup_done)
+            .filter(|(_, l)| keep(l) && !l.setup_done)
             .filter_map(|(i, l)| {
                 p.lane(&l.name)
                     .filter(|lane| !lane.setup.is_empty())
@@ -4311,15 +4396,17 @@ impl Runner {
             .collect();
         for (i, setup, branch) in pending {
             let name = t.lanes[i].name.clone();
+            let cwd = t.lanes[i].worktree.clone();
             let env = env_for(t, Some(&name), Some(&branch));
             let ran = match confine_for(t, p, Some(&name), &[], None) {
-                Some(confine) => self
-                    .git
-                    .run_confined(cwd, &setup, &env, &confine)
-                    .map(|header| {
-                        log::info!("ticket {} lane {name}: setup done; {header}", t.id);
-                    }),
-                None => self.git.run(cwd, &setup, &env),
+                Some(confine) => {
+                    self.git
+                        .run_confined(&cwd, &setup, &env, &confine)
+                        .map(|header| {
+                            log::info!("ticket {} lane {name}: setup done; {header}", t.id);
+                        })
+                }
+                None => self.git.run(&cwd, &setup, &env),
             };
             if let Err(e) = ran {
                 let reason = format!("lane {name}: setup failed: {e:#}");
@@ -6307,6 +6394,11 @@ impl Runner {
         let Some(contexts) = self.contexts_or_park(t, ps, p, stage, now_ms)? else {
             return Ok(());
         };
+        if Self::setup_due(t, stage, &contexts)
+            && !self.ensure_stage_setup(t, ps, p, stage, &contexts, now_ms)?
+        {
+            return Ok(());
+        }
         // The stage's services come up before any of its agents starts;
         // an agent already running is watched either way.
         let served = stage.services.is_empty() || self.ensure_services(t, ps, p, stage, now_ms)?;

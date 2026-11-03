@@ -1679,7 +1679,10 @@ holds three) is Dispatch's clone of that repository too, cut as a
 worktree at the lane's path inside the ticket's tree; every lane is
 cut before the first stage, the `lanes` decision only chooses which
 lanes the stages run in (label hints answer it when the dial says
-auto), and a lane's setup runs once before its first agent. A review
+auto), and a lane's setup runs once, finished before the first stage
+that serves the lane or runs in it starts anything there (a root or
+joined stage sets up every chosen lane, or every cut lane before the
+lanes decision; a failure parks). A review
 stage's reviewer may be Claude Code or Codex; the operator's flags go
 over the port with `workflow.start`. What each kind needs is answered
 by `OperatorKind` alone (a Claude Code reviewer runs in the ticket's
