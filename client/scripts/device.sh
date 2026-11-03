@@ -9,8 +9,9 @@
 # The signing team comes from DEVELOPMENT_TEAM, or from the repo's
 # git-ignored .env; the device from SWITCHBOARD_DEVICE (a devicectl
 # identifier), or the first paired headset (the tunnel to it comes up
-# on demand, so "disconnected" in the listing means nothing). The build
-# is Release unless SWITCHBOARD_CONFIGURATION says Debug.
+# on demand, so "disconnected" in the listing means nothing), never a
+# simulator, which devicectl also lists as paired but cannot install
+# to. The build is Release unless SWITCHBOARD_CONFIGURATION says Debug.
 set -eu
 cd "$(dirname "$0")/.."
 if [ -z "${DEVELOPMENT_TEAM:-}" ] && [ -f ../.env ]; then
@@ -31,7 +32,8 @@ device() {
     xcrun devicectl list devices --json-output "$LIST" >/dev/null 2>&1
     python3 -c 'import json, sys
 for d in json.load(open(sys.argv[1]))["result"]["devices"]:
-    if d["hardwareProperties"].get("platform") == "visionOS" and d["connectionProperties"].get("pairingState") == "paired":
+    h = d["hardwareProperties"]
+    if h.get("platform") == "visionOS" and h.get("reality") == "physical" and d["connectionProperties"].get("pairingState") == "paired":
         print(d["identifier"]); break' "$LIST"
     rm -f "$LIST"
 }
@@ -54,5 +56,5 @@ case "${1:-}" in
         xcrun devicectl device process launch --terminate-existing --device "$ID" "$BUNDLE"
         ;;
     devices) xcrun devicectl list devices ;;
-    *) sed -n '2,11p' "$0"; exit 2 ;;
+    *) sed -n '2,12p' "$0"; exit 2 ;;
 esac
