@@ -45,7 +45,8 @@ one `Added:`, `Changed:` or `Fixed:` line (format in
 `./scripts/bump.sh` folds the fragments. A release is
 `./scripts/bump.sh patch|minor|major`, a commit "Release X.Y.Z" merged
 to `main` through a pull request (`main` takes nothing else), then the
-"Release" workflow, which only the owner starts; the version in
+"Release" workflow, which starts only on the owner's word and runs only
+on their approval; the version in
 `Cargo.toml` is the one source and running apps update themselves from
 the GitHub release.
 
