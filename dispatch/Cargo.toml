@@ -21,7 +21,7 @@ log = "0.4"
 env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 switchboard-control = { path = "../control" }
 dispatch-control = { path = "../dispatch-control" }
 toml = "1"
