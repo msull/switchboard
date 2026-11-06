@@ -2555,7 +2555,15 @@ fn tickets_status() -> switchboard::ports::dispatch::Status {
         Status, SupervisorView, TicketView,
     };
     std::fs::create_dir_all("/tmp/switchboard-remote-tests").unwrap();
-    std::fs::write(SHOT_PATH, SHOT_BYTES).unwrap();
+    // Tests share this path and `fs::write` empties the file first, so a
+    // test reading it could see no bytes; a rename is all or nothing.
+    let unique = format!(
+        "{SHOT_PATH}.{}.{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    );
+    std::fs::write(&unique, SHOT_BYTES).unwrap();
+    std::fs::rename(&unique, SHOT_PATH).unwrap();
     let evidence = |rel: &str, path: &str, bytes: u64| EvidenceView {
         path: path.into(),
         rel: rel.into(),
