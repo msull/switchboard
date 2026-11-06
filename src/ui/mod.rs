@@ -48,8 +48,8 @@ use egui::{Key, Modifiers, RichText, Ui};
 use crate::app::{Services, SwitchboardApp};
 use crate::content::ConversationCache;
 use crate::core::{
-    AppAction, AppCore, Composer, PinTarget, ProjectId, RecordId, SessionKind, SetId, SideTab,
-    ThemeMode, UiRequest, View, WindowFrame, WorkflowId,
+    AppAction, AppCore, PinTarget, ProjectId, RecordId, SessionKind, SetId, SideTab, ThemeMode,
+    UiRequest, View, WindowFrame, WorkflowId,
 };
 
 pub use dialogs::{AddProjectDraft, NewSessionDraft};
@@ -432,12 +432,6 @@ pub fn draw(app: &mut SwitchboardApp, ui: &mut Ui) {
         draw_frame(&mut cx, ui);
         cx.actions
     };
-    // Prompts the editors sent this frame go to their panes now that the
-    // app is free to dispatch.
-    let sent: Vec<(RecordId, String)> = std::mem::take(&mut *crate::sync::lock_recover(
-        &state.prompt_boxes.outbox,
-        "outbox (take)",
-    ));
     app.ui_state = state;
     let columns = app.ui_state.working_set_columns;
     if columns != app.core().view_columns() {
@@ -446,13 +440,7 @@ pub fn draw(app: &mut SwitchboardApp, ui: &mut Ui) {
     for action in actions {
         app.dispatch(action);
     }
-    for (id, text) in sent {
-        app.dispatch(AppAction::SendMessage {
-            id,
-            text,
-            from: Composer::Editor,
-        });
-    }
+    app.send_editor_prompts();
 }
 
 fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {

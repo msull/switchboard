@@ -1272,6 +1272,10 @@ impl SwitchboardApp {
 
     fn pump(&mut self, step: &Step) {
         self.serve_pending();
+        if !self.shown.last_visible {
+            crate::ui::prompt_box::service(&self.core, &mut self.ui_state.prompt_boxes);
+        }
+        self.send_editor_prompts();
         // Every `logic` call, not every poll: a button press should land
         // in the pass its wake-up requested.
         for event in self.services.controller.poll() {
@@ -3779,6 +3783,24 @@ impl SwitchboardApp {
     /// host's own recognizer feeds it: the device recognizes, the
     /// editor keeps the document. The reply is the draft as it stands,
     /// so the device need not wait for the event.
+    /// Takes what the editors queued to their panes. The editor has
+    /// already cleared its draft, so a queued prompt must not wait on
+    /// anything that may not come. The length, never the text, is logged.
+    pub fn send_editor_prompts(&mut self) {
+        let sent = std::mem::take(&mut *crate::sync::lock_recover(
+            &self.ui_state.prompt_boxes.outbox,
+            "outbox (take)",
+        ));
+        for (id, text) in sent {
+            log::info!("editor send to {}: {} bytes", id.0, text.len());
+            self.dispatch(AppAction::SendMessage {
+                id,
+                text,
+                from: Composer::Editor,
+            });
+        }
+    }
+
     fn remote_dictation(
         &mut self,
         request: &RemoteRequest,
