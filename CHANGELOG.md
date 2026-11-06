@@ -10,6 +10,12 @@ publishes that section as the release notes. The format follows
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-11-06
+
+### Fixed
+
+- A prompt sent by voice from a device now reaches its session while the host Mac is locked or the window is hidden; before, it vanished from the draft without being delivered.
+
 ## [0.13.0] - 2026-11-06
 
 ### Added

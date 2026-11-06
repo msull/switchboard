@@ -22,13 +22,15 @@ use crate::core::{
 };
 use crate::sync::lock_recover;
 
-/// Prompts sent from editors, waiting for the frame to end so they can
-/// be dispatched with the app borrowed mutably.
+/// Prompts sent from editors, waiting for the app to be free to
+/// dispatch them: the end of a frame, or the next `logic` pass while
+/// the window is hidden and no frame comes.
 pub type Outbox = Arc<Mutex<Vec<(RecordId, String)>>>;
 
 /// Where a session's editor sends: the pane, if it is running. The flag
-/// is refreshed every frame before the editor draws, so a Send into a
-/// dead session fails at once and the prompt stays.
+/// is refreshed by [`service`] and whenever [`ensure_editor`] hands the
+/// editor out, so a Send into a dead session fails at once and the
+/// prompt stays.
 struct PaneSink {
     id: RecordId,
     running: Arc<AtomicBool>,
@@ -181,7 +183,14 @@ pub fn pump(cx: &mut DrawCtx<'_>) -> Option<std::time::Duration> {
         }
     }
     hold_listen(cx);
-    let boxes = &mut cx.state.prompt_boxes;
+    service(core, &mut cx.state.prompt_boxes)
+}
+
+/// The editors' upkeep that cannot wait for a frame. A device dictates
+/// into an editor and an AI pass finishes in one whether or not the
+/// window is drawn, and eframe draws nothing while it is occluded, which
+/// a locked screen makes it.
+pub fn service(core: &AppCore, boxes: &mut PromptBoxes) -> Option<std::time::Duration> {
     boxes.editors.retain(|id, _| core.session(*id).is_some());
     boxes.running.retain(|id, _| core.session(*id).is_some());
     // Every editor's sink learns whether its pane runs, every frame:
@@ -373,6 +382,8 @@ pub fn ensure_editor<'a>(
         .entry(record.id)
         .or_insert_with(|| Arc::new(AtomicBool::new(false)))
         .clone();
+    // A request can reach the editor with no frame since the pane changed.
+    running.store(core.is_running(record.id), Ordering::Relaxed);
     let native = boxes.native;
     let outbox = boxes.outbox.clone();
     let saved = boxes.saved.clone();

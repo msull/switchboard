@@ -263,6 +263,12 @@ has the recipe. What they leave behind and what goes wrong:
 
 ## Rust-side and tooling lessons
 
+- eframe skips `ui` while the root window is occluded or minimized, and a
+  locked screen hides it, so only `logic` runs. Anything a device or a
+  worker can set off must finish there. A spoken "send" from the headset
+  once sat in the editors' outbox, drained only by a frame, after the
+  editor had cleared the draft: the message vanished with no error on a
+  locked Mac, while the Send button, which needs no frame, worked.
 - Keep the per-worktree `target` directory (`.cargo/config.toml` in a
   Dispatch worktree). Cargo names workspace-member artifacts without the
   source path and judges freshness by mtime, so a shared target lets a

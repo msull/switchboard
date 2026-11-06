@@ -1035,6 +1035,74 @@ fn a_draft_is_the_sessions_editor_fed_by_dictation_and_worked_by_its_tools() {
 }
 
 /// A project with a root of its own on disk, for the file reads.
+/// One drawn frame, as the app has while its window is on screen.
+fn drawn_frame(port: &mut Port) {
+    let ctx = egui::Context::default();
+    switchboard::ui::theme::install(&ctx);
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        eframe::App::ui(&mut port.app, ui, &mut frame);
+    });
+    output.textures_delta.clear();
+}
+
+/// eframe calls only `logic` while the window is occluded or minimized,
+/// as it is on a locked Mac, so a device's spoken send has to reach the
+/// pane with no frame drawn after it. Otherwise the editor clears the
+/// draft on the strength of a queued send and the prompt is gone.
+#[test]
+fn a_spoken_send_reaches_the_pane_while_the_window_is_hidden() {
+    spoken_send_while_hidden(true);
+}
+
+/// The same for an editor first made while hidden, which no frame has
+/// ever told that its pane is running.
+#[test]
+fn a_spoken_send_reaches_the_pane_from_an_editor_made_while_hidden() {
+    spoken_send_while_hidden(false);
+}
+
+fn spoken_send_while_hidden(drawn_before: bool) {
+    let mut port = port();
+    let (_, _, session) = seed(&mut port, "");
+    running(&mut port, &session, "\u{276f} ");
+    let token = pair(&mut port, "ABCD2345", Scope::Control, "Vision Pro");
+    let t = Some(token.as_str());
+    let (status, reply) = get(&mut port, &format!("/api/v1/sessions/{session}/draft"), t);
+    assert_eq!(status, 200, "{reply}");
+    // The window was last drawn with the editor already open; now it is
+    // hidden, and the words and the command arrive.
+    if drawn_before {
+        drawn_frame(&mut port);
+    }
+    let mut settings = port.app.core().settings().voice.clone();
+    settings.trigger = "Computer".into();
+    port.app.dispatch(AppAction::SetVoiceSettings(settings));
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &format!("/api/v1/sessions/{session}/dictation"),
+        t,
+        r#"{"session":7,"events":[
+            {"sequence":1,"kind":"started"},
+            {"sequence":2,"kind":"voice_started","utterance":1},
+            {"sequence":3,"kind":"final","utterance":1,"text":"Fix the test."},
+            {"sequence":4,"kind":"voice_started","utterance":2},
+            {"sequence":5,"kind":"final","utterance":2,"text":"Computer, send."},
+            {"sequence":6,"kind":"stopped"}]}"#,
+    );
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["draft"]["text"], "", "the command took it");
+
+    let ctx = egui::Context::default();
+    let mut frame = eframe::Frame::_new_kittest();
+    eframe::App::logic(&mut port.app, &ctx, &mut frame);
+    eframe::App::logic(&mut port.app, &ctx, &mut frame);
+    let written = port.host.state().written.clone();
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert_eq!(written[0].1, "Fix the test.");
+}
+
 fn project_with_root(port: &mut Port, space: &str, root: &std::path::Path) -> String {
     let reply = control(
         port,
@@ -2487,7 +2555,15 @@ fn tickets_status() -> switchboard::ports::dispatch::Status {
         Status, SupervisorView, TicketView,
     };
     std::fs::create_dir_all("/tmp/switchboard-remote-tests").unwrap();
-    std::fs::write(SHOT_PATH, SHOT_BYTES).unwrap();
+    // Tests share this path and `fs::write` empties the file first, so a
+    // test reading it could see no bytes; a rename is all or nothing.
+    let unique = format!(
+        "{SHOT_PATH}.{}.{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    );
+    std::fs::write(&unique, SHOT_BYTES).unwrap();
+    std::fs::rename(&unique, SHOT_PATH).unwrap();
     let evidence = |rel: &str, path: &str, bytes: u64| EvidenceView {
         path: path.into(),
         rel: rel.into(),
