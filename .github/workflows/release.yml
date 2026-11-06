@@ -2,9 +2,9 @@ name: Release
 
 # Publishes the version committed on main as a GitHub release: the
 # signed, notarized bundle and its SHA-256, under the tag v<version>.
-# Nothing releases on its own. The owner runs this by hand from the
-# Actions tab or `gh workflow run release`, after the "Release X.Y.Z"
-# bump commit has merged, and the `release` environment holds the
+# Nothing releases on its own. It is started by hand, on the owner's
+# word, from the Actions tab or `gh workflow run release`, after the
+# "Release X.Y.Z" bump commit has merged, and the `release` environment holds the
 # signing secrets behind the owner's approval and a main-only branch
 # policy, so a run from any other ref never sees them. Everything after
 # the keychain is scripts/release.sh, the same path as a release from a
