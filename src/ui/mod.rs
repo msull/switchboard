@@ -270,7 +270,9 @@ pub struct UiState {
     pub in_popout: Option<RecordId>,
     /// The conversation each window (the main window is `None`) drew
     /// last frame and this frame, so a session just opened, or come
-    /// back to, starts scrolled to its end.
+    /// back to, starts scrolled to its end. A frame showing only the
+    /// loading line drew no conversation, so the jump waits for the
+    /// first frame that has one.
     pub conversation_was: HashMap<Option<RecordId>, RecordId>,
     pub conversation_now: HashMap<Option<RecordId>, RecordId>,
     /// Each session window's frame as last seen and since when, so a

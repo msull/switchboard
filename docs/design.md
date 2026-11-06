@@ -4630,11 +4630,59 @@ Known gaps:
 - Captions and trust results may land one cycle late.
 - A write queued at quit may be lost with its notice and draft, which are not
   durable.
-- Transcript parse and `turn_block` layout stay on the frame.
+- `turn_block` layout stays on the frame. The transcript read and parse
+  moved off it with the section below.
 - A write queued before a restart of its session (kill, then spawn under the
   same host id) can outlive the pane it was meant for: `kill` and `spawn`
   run on the frame and do not wait for the write lane, so the text lands in
   the new process or fails against a dead pane.
+
+## Session views open at the end of the current conversation (2026-11-06)
+
+Coming back to a session showed the copy read before leaving, at a
+place that had little to do with the end of it, and the area went blank
+when the owner scrolled before the load finished. The rule: a session
+always opens at its end, and goes up only when the owner scrolls up.
+Nothing is saved or restored, so this needs no record field and no saved
+place.
+
+The rule in "Following /clear" above, "each window remembers which
+conversation it drew last frame", now counts only a frame that drew a conversation. A frame with
+only the loading line leaves the record out, so the jump to the end
+waits for the first frame that has one, however long the read takes.
+
+Coming to a session starts a refresh at once: a stat, and a read only
+if the file changed; the two-second tick stays as the safety net. The
+read runs on a thread of its own and the frame drains the answer, one
+reader per session at a time (`ConversationCache::begin_read`). An
+answer for a resume handle the session has since left (a `/clear`, a
+discard) is dropped and the current file read. While a read runs the
+cached copy stays on screen with "Updating…" on its header line; with
+no copy yet, "Loading the conversation…" and the pane snapshot sit in
+the conversation's own scroll area, so a wheel event always lands on
+it. A session in its own window is refreshed whatever the main window
+shows, since its page says it is loading until that happens.
+
+Each session has its own scroll id, so an offset and a stuck flag no
+longer travel from one conversation to the next. A jump to the end
+removes the area's stored scroll state before drawing, and discards
+that pass, so the next is the one painted. A scroll offset past the end
+is not a way to get there in egui 0.37: with stored bounds, egui takes
+it for an overscroll, leaves it unclamped and springs it back over many
+frames with the turns far above the view, and at `1.0e9` it also lays
+the turns out where `f32` holds only multiples of 64, so the height it
+measures is wrong. A fresh state is stuck to the end and lands there
+exactly, so the view then follows new content until the user scrolls.
+
+A message sent by any route (the message box, a working-set card, the
+editor's outbox) makes every window forget it drew that session, so each
+one jumps on the next frame that draws the conversation, even from
+scrolled up; the reply is followed until
+the user scrolls up, after which new content does not pull them back.
+
+Known gap: laying out every turn of a very long conversation on every
+frame is untouched. If a session stalls with the read off the frame
+thread, a virtualised turn list is the follow-up.
 
 ## Open questions
 

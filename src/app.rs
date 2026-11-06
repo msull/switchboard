@@ -246,6 +246,8 @@ pub struct SwitchboardApp {
     /// under an older value may not show that change, and a pane it omits
     /// would read as gone, so it is dropped rather than applied.
     host_gen: u64,
+    /// Transcripts being read on threads of their own.
+    conversation_reads: ConversationReads,
     /// What the update threads answer, each one an action for the
     /// next frame.
     update_results: UpdateResults,
@@ -388,6 +390,30 @@ impl Default for DiffReads {
     }
 }
 
+/// What a transcript read's thread answers. `modified` was taken before
+/// the read, so a file that grew during it is read again on the next
+/// refresh.
+struct ConversationDone {
+    id: RecordId,
+    handle: ResumeHandle,
+    modified: Option<SystemTime>,
+    result: Result<crate::ports::transcript::Conversation, String>,
+}
+
+/// The threads reading transcripts: each sends one answer, and the
+/// cache's `is_reading` says which are not yet drained.
+struct ConversationReads {
+    tx: std::sync::mpsc::Sender<ConversationDone>,
+    rx: std::sync::mpsc::Receiver<ConversationDone>,
+}
+
+impl Default for ConversationReads {
+    fn default() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self { tx, rx }
+    }
+}
+
 /// Turn an adapter failure into the notice the user sees; the log keeps
 /// the same line. `what` names the attempt, e.g. "kill s-1".
 fn failed<E: std::fmt::Display, W: Into<String>>(
@@ -451,6 +477,7 @@ impl SwitchboardApp {
             diff_reads: DiffReads::default(),
             host_work,
             host_gen: 0,
+            conversation_reads: ConversationReads::default(),
             update_results: UpdateResults::default(),
             pending_update: None,
         }
@@ -539,7 +566,23 @@ impl SwitchboardApp {
         if self.record_actions {
             self.dispatched.push(action.clone());
         }
+        // Every route that sends a message reaches the end of it: forget
+        // that any window drew the session, so each one that draws its
+        // conversation next opens it afresh, at the end.
+        if let AppAction::SendMessage { id, .. } = &action {
+            self.ui_state
+                .conversation_now
+                .retain(|_, shown| shown != id);
+        }
+        let view_before = self.core.view();
         self.dispatch_inner(action);
+        // Coming to a session is when its copy has to be right, not up
+        // to one caption interval later.
+        if let View::Session(id) = self.core.view()
+            && view_before != View::Session(id)
+        {
+            self.refresh_conversation(id);
+        }
         self.diff_pass();
         self.sweep_watches();
     }
@@ -1144,10 +1187,10 @@ impl SwitchboardApp {
     }
 
     /// The conversation shown in the session view, re-read only when the
-    /// transcript file changed. Reading is synchronous: transcripts are
-    /// usually well under a megabyte and parse in a few milliseconds,
-    /// while a long session of several megabytes costs tens of
-    /// milliseconds once per change, which one frame absorbs.
+    /// transcript file changed. The stat stays on the frame; the read
+    /// runs on a thread of its own, since a long session's transcript
+    /// takes longer than a frame to parse, and `drain_conversations`
+    /// takes the answer.
     fn refresh_conversation(&mut self, id: RecordId) {
         let Some(handle) = self.core.session(id).and_then(|s| {
             matches!(s.kind, SessionKind::Agent(_))
@@ -1160,7 +1203,74 @@ impl SwitchboardApp {
         if self.conversations.is_current(id, &handle, modified) {
             return;
         }
-        match self.services.transcripts.read(&handle) {
+        if !self.conversations.begin_read(id) {
+            return;
+        }
+        // An `Arc` clone is a second handle to the same reader, which the
+        // thread owns while it runs.
+        let reader = Arc::clone(&self.services.transcripts);
+        let tx = self.conversation_reads.tx.clone();
+        std::thread::spawn(move || {
+            // A panic still answers, or the session would count as being
+            // read for the life of the app and never be read again.
+            // `AssertUnwindSafe` says the borrowed handle is fine to use
+            // after a panic: the closure only reads it.
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reader.read(&handle)))
+                    .unwrap_or_else(|_| Err("the transcript read panicked".to_owned()));
+            let _ = tx.send(ConversationDone {
+                id,
+                handle,
+                modified,
+                result,
+            });
+        });
+    }
+
+    /// Transcripts whose threads answered since the last frame.
+    fn drain_conversations(&mut self) {
+        let done: Vec<ConversationDone> = self.conversation_reads.rx.try_iter().collect();
+        for answer in done {
+            self.land_conversation(answer);
+        }
+    }
+
+    /// Wait for the transcript reads still out, for callers with no frame
+    /// loop to drain them. A landing can start another read, so this
+    /// looks at the cache each time round.
+    fn await_conversations(&mut self) {
+        while self.conversations.any_reading() {
+            match self
+                .conversation_reads
+                .rx
+                .recv_timeout(Duration::from_secs(10))
+            {
+                Ok(answer) => self.land_conversation(answer),
+                Err(e) => {
+                    log::warn!("a transcript read did not answer: {e}");
+                    return;
+                }
+            }
+        }
+    }
+
+    /// One read's answer. The record's handle may have moved during the
+    /// read (a `/clear`, a discard), and then the answer is of a file the
+    /// session has left: it is dropped and the current one read.
+    fn land_conversation(&mut self, done: ConversationDone) {
+        let ConversationDone {
+            id,
+            handle,
+            modified,
+            result,
+        } = done;
+        self.conversations.finish_read(id);
+        let current = self.core.session(id).and_then(|s| s.resume.as_ref());
+        if current != Some(&handle) {
+            self.refresh_conversation(id);
+            return;
+        }
+        match result {
             Ok(conversation) => {
                 file_refs::keep_only(&mut self.ui_state.file_links, id, Some(&conversation));
                 self.conversations
@@ -1278,6 +1388,18 @@ impl SwitchboardApp {
     fn refresh_captions(&mut self, batch: &mut Vec<Capture>) {
         let view = self.core.view();
         if let View::Session(id) = view {
+            self.refresh_conversation(id);
+        }
+        // A session in its own window is on screen whatever the main
+        // window shows, and its page says it is loading until this reads.
+        let popped: Vec<RecordId> = self
+            .core
+            .settings()
+            .popouts
+            .iter()
+            .map(|p| p.session)
+            .collect();
+        for id in popped {
             self.refresh_conversation(id);
         }
         let mut ids: Vec<RecordId> = match view {
@@ -1400,6 +1522,7 @@ impl SwitchboardApp {
         self.poll_configs();
         self.poll_panes();
         self.settle_host();
+        self.await_conversations();
     }
 
     fn pump(&mut self, step: &Step) {
@@ -1661,6 +1784,7 @@ impl eframe::App for SwitchboardApp {
         self.flush_refusals();
         self.drain_diffs();
         let host_answered = self.drain_host_work();
+        self.drain_conversations();
         let answered: Vec<AppAction> = self.update_results.rx.try_iter().collect();
         for action in answered {
             self.dispatch(action);
@@ -1687,6 +1811,10 @@ impl eframe::App for SwitchboardApp {
                 self.badge = Some(waiting);
             }
         }
+        // After the pump, whose tick can start a read.
+        if self.conversations.any_reading() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
         crate::ui::popout::raise(
             ctx,
             &self.core.settings().popouts,
@@ -1703,6 +1831,11 @@ impl eframe::App for SwitchboardApp {
             ui.ctx().request_repaint();
         }
         crate::ui::draw(self, ui);
+        // A click drawn just now can have started a read, after this
+        // frame's `logic` looked.
+        if self.conversations.any_reading() {
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
+        }
     }
 
     /// Quitting saves where the windows are, even ones that moved in the

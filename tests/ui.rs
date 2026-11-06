@@ -32,7 +32,8 @@ use switchboard::ports::events::{EventKind, SessionEvent};
 use switchboard::ports::host::{HostId, HostStatus, Liveness};
 use switchboard::ports::store::Store;
 use switchboard::ports::transcript::{
-    Activity as TranscriptActivity, ActivityKind, Conversation, ToolDetail, Turn, Usage,
+    Activity as TranscriptActivity, ActivityKind, Conversation, ToolDetail, TranscriptReader, Turn,
+    Usage,
 };
 use switchboard::ui::working_set;
 
@@ -3147,6 +3148,317 @@ fn polling_reads_the_transcript_into_the_ui_state() {
     harness.run_steps(2);
     harness.get_by_label("The crate is called switchboard.");
     assert!(harness.query_by_label_contains("/clear to save").is_none());
+}
+
+/// `count` turns, `prompt n` and `answer n`, far taller than the harness
+/// of [`long_session`].
+fn long_conversation(count: usize) -> Conversation {
+    Conversation {
+        turns: (1..=count)
+            .map(|n| Turn {
+                n,
+                user: format!("prompt {n}"),
+                final_text: format!("answer {n}"),
+                ..Turn::default()
+            })
+            .collect(),
+        ..Conversation::default()
+    }
+}
+
+/// A running agent session reading `transcripts`, not yet shown, with the
+/// plain message box, in a window short enough that the turns scroll.
+fn long_session(
+    transcripts: &FakeTranscripts,
+) -> (Harness<'static, SwitchboardApp>, Seeded, RecordId) {
+    let services = Services {
+        transcripts: Arc::new(transcripts.clone()),
+        ..fakes::services()
+    };
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(1200.0, 900.0))
+        .build_eframe(move |cc| {
+            switchboard::ui::theme::install(&cc.egui_ctx);
+            test_app(services)
+        });
+    let ids = seed(harness.state_mut());
+    plain_message_box(&mut harness);
+    let id = seed_claude(&mut harness, &ids);
+    (harness, ids, id)
+}
+
+/// Whether the answer of turn `n` is on screen in the conversation: a
+/// label scrolled away keeps its node, at a rect outside the area, which
+/// runs from the meta line down to the message box.
+fn answer_in_view(harness: &Harness<'static, SwitchboardApp>, n: usize) -> bool {
+    let top = harness.get_by_label_contains(" turns").rect().bottom();
+    let bottom = harness.get_by_label("Message").rect().top();
+    harness
+        .query_by_label(&format!("answer {n}"))
+        .is_some_and(|node| node.rect().bottom() > top && node.rect().top() < bottom)
+}
+
+/// The session's pane as running again, after a poll of the fake host,
+/// which lists none, marked it gone: the message box takes input only
+/// while it runs.
+fn mark_running(harness: &mut Harness<'static, SwitchboardApp>, id: RecordId) {
+    let core = harness.state_mut().core_mut_for_seeding();
+    let workspaces = core.workspaces().to_vec();
+    core.seed(
+        workspaces,
+        vec![HostStatus {
+            id: HostId(id.host_name()),
+            liveness: Liveness::Running {
+                pid: 43,
+                command: "claude".into(),
+            },
+            cwd: None,
+            last_activity: None,
+            title: None,
+        }],
+    );
+    harness.run_steps(2);
+}
+
+/// Roll the wheel up over the conversation, by more than a screen.
+fn scroll_up(harness: &mut Harness<'static, SwitchboardApp>) {
+    let over = harness.get_by_label("Message").rect().center_top();
+    harness.event(egui::Event::PointerMoved(over - egui::vec2(0.0, 100.0)));
+    harness.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 1000.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    harness.run_steps(SCROLLED);
+}
+
+/// Open the session and wait for its transcript.
+fn open_at_end(harness: &mut Harness<'static, SwitchboardApp>, id: RecordId, last: usize) {
+    harness.state_mut().dispatch(AppAction::ShowSession(id));
+    harness.state_mut().poll_now();
+    harness.run_steps(2);
+    assert!(answer_in_view(harness, last), "opens at the end");
+    assert!(!answer_in_view(harness, 1), "not at the start");
+}
+
+#[test]
+fn returning_to_a_session_whose_transcript_changed_while_away_shows_the_new_end() {
+    let transcripts = FakeTranscripts::with(long_conversation(30));
+    let (mut harness, ids, id) = long_session(&transcripts);
+    open_at_end(&mut harness, id, 30);
+    harness.state_mut().dispatch(AppAction::ShowBoard(ids.beta));
+    harness.run_steps(2);
+    transcripts.hold();
+    transcripts.set(Some(long_conversation(31)));
+    // Only a return, no poll: coming back is what starts the read.
+    harness.state_mut().dispatch(AppAction::ShowSession(id));
+    harness.run_steps(2);
+    harness.get_by_label("Updating…");
+    assert!(answer_in_view(&harness, 30), "the old copy stays up");
+    assert!(harness.query_by_label("answer 31").is_none());
+    transcripts.release();
+    harness.state_mut().poll_now();
+    harness.run_steps(2);
+    assert!(answer_in_view(&harness, 31), "the new end");
+    assert!(!answer_in_view(&harness, 1));
+    assert!(harness.query_by_label("Updating…").is_none());
+}
+
+#[test]
+fn the_first_frame_after_a_return_is_already_at_the_end() {
+    let transcripts = FakeTranscripts::with(long_conversation(30));
+    let (mut harness, ids, id) = long_session(&transcripts);
+    open_at_end(&mut harness, id, 30);
+    harness.state_mut().dispatch(AppAction::ShowBoard(ids.beta));
+    harness.run_steps(2);
+    harness.state_mut().dispatch(AppAction::ShowSession(id));
+    // One frame only: a jump measured far from the origin would leave
+    // this one with every turn below the view and the area blank.
+    harness.run_steps(1);
+    assert!(answer_in_view(&harness, 30), "not blank, and at the end");
+    assert!(!answer_in_view(&harness, 1));
+    // And it stays stuck, so a wheel now is a scroll from the end.
+    transcripts.set(Some(long_conversation(31)));
+    harness.state_mut().poll_now();
+    harness.run_steps(2);
+    assert!(answer_in_view(&harness, 31), "follows what arrives");
+}
+
+#[test]
+fn an_unchanged_transcript_is_not_read_again_on_return() {
+    let transcripts = FakeTranscripts::with(long_conversation(30));
+    let (mut harness, ids, id) = long_session(&transcripts);
+    open_at_end(&mut harness, id, 30);
+    harness.state_mut().dispatch(AppAction::ShowBoard(ids.beta));
+    harness.run_steps(2);
+    harness.state_mut().dispatch(AppAction::ShowSession(id));
+    harness.run_steps(2);
+    assert!(!harness.state().conversations.is_reading(id));
+    assert!(harness.query_by_label("Updating…").is_none());
+    assert!(answer_in_view(&harness, 30));
+}
+
+#[test]
+fn a_conversation_that_arrives_after_the_first_frame_opens_at_its_end() {
+    let transcripts = FakeTranscripts::with(long_conversation(30));
+    transcripts.hold();
+    let (mut harness, _, id) = long_session(&transcripts);
+    harness.state_mut().dispatch(AppAction::ShowSession(id));
+    // A snapshot taller than the view, so the wheel below has something
+    // to move and unsticks the area.
+    harness
+        .state_mut()
+        .ui_state
+        .snapshots
+        .insert(id, "a line of output\n".repeat(200));
+    harness.run_steps(2);
+    harness.get_by_label("Loading the conversation…");
+    assert!(harness.query_by_label_contains("runs in Ghostty").is_none());
+    // Scrolling the loading view does not cost the jump to the end.
+    scroll_up(&mut harness);
+    transcripts.release();
+    harness.state_mut().poll_now();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_label("Loading the conversation…")
+            .is_none()
+    );
+    assert!(answer_in_view(&harness, 30), "the end");
+    assert!(!answer_in_view(&harness, 1));
+}
+
+#[test]
+fn a_session_with_a_failed_read_keeps_the_pointer_and_says_why() {
+    let transcripts = FakeTranscripts::default();
+    let (mut harness, _, id) = long_session(&transcripts);
+    harness.state_mut().dispatch(AppAction::ShowSession(id));
+    harness.state_mut().poll_now();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_label("Loading the conversation…")
+            .is_none()
+    );
+    harness.get_by_label_contains("runs in Ghostty");
+    harness.get_by_label_contains("no transcript");
+}
+
+#[test]
+fn scrolling_during_a_load_is_kept() {
+    let transcripts = FakeTranscripts::with(long_conversation(30));
+    let (mut harness, ids, id) = long_session(&transcripts);
+    open_at_end(&mut harness, id, 30);
+    harness.state_mut().dispatch(AppAction::ShowBoard(ids.beta));
+    harness.run_steps(2);
+    transcripts.hold();
+    transcripts.set(Some(long_conversation(32)));
+    harness.state_mut().dispatch(AppAction::ShowSession(id));
+    harness.run_steps(2);
+    harness.get_by_label("Updating…");
+    assert!(answer_in_view(&harness, 30));
+    scroll_up(&mut harness);
+    assert!(!answer_in_view(&harness, 30), "scrolled away from the end");
+    transcripts.release();
+    harness.state_mut().poll_now();
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Updating…").is_none(), "landed");
+    assert!(!answer_in_view(&harness, 32), "not pulled back to the end");
+}
+
+#[test]
+fn each_session_keeps_its_own_scroll() {
+    let transcripts = FakeTranscripts::with(long_conversation(30));
+    let (mut harness, ids, a) = long_session(&transcripts);
+    open_at_end(&mut harness, a, 30);
+    scroll_up(&mut harness);
+    assert!(!answer_in_view(&harness, 30), "A is off its end");
+    let count = |harness: &Harness<'static, SwitchboardApp>| {
+        harness
+            .ctx
+            .data(egui::util::IdTypeMap::count::<egui::scroll_area::State>)
+    };
+    let before = count(&harness);
+    let b = seed_claude(&mut harness, &ids);
+    open_at_end(&mut harness, b, 30);
+    // B's message box and B's conversation: a shared conversation area
+    // would add only the first.
+    assert_eq!(count(&harness), before + 2, "B has an area of its own");
+    open_at_end(&mut harness, a, 30);
+    assert_eq!(count(&harness), before + 2, "A's is still the one it had");
+}
+
+#[test]
+fn sending_goes_to_the_end_and_follows_the_reply() {
+    let transcripts = FakeTranscripts::with(long_conversation(30));
+    let (mut harness, _, id) = long_session(&transcripts);
+    open_at_end(&mut harness, id, 30);
+    scroll_up(&mut harness);
+    assert!(!answer_in_view(&harness, 30), "scrolled up");
+    mark_running(&mut harness, id);
+    type_into(&mut harness, "Message", "go on");
+    harness.get_by_role_and_label(Role::Button, "Send").click();
+    harness.run_steps(2);
+    assert!(actions(&harness).iter().any(|a| matches!(
+        a,
+        AppAction::SendMessage { text, .. } if text == "go on"
+    )));
+    assert!(answer_in_view(&harness, 30), "at the end after the send");
+    transcripts.set(Some(long_conversation(31)));
+    harness.state_mut().poll_now();
+    harness.run_steps(2);
+    assert!(answer_in_view(&harness, 31), "follows the reply");
+    scroll_up(&mut harness);
+    transcripts.set(Some(long_conversation(32)));
+    harness.state_mut().poll_now();
+    harness.run_steps(2);
+    assert!(!answer_in_view(&harness, 32), "scrolled up stays up");
+}
+
+#[test]
+fn a_read_answering_for_a_handle_the_session_left_is_dropped() {
+    let transcripts = FakeTranscripts::with(long_conversation(3));
+    transcripts.hold();
+    let (mut harness, _, id) = long_session(&transcripts);
+    harness.state_mut().dispatch(AppAction::ShowSession(id));
+    assert!(harness.state().conversations.is_reading(id));
+    // A `/clear` moves the handle while the old file is being read.
+    let moved = ResumeHandle::ClaudeCode {
+        session_id: uuid::Uuid::new_v4(),
+        transcript: Some(PathBuf::from("/nowhere/y.jsonl")),
+    };
+    let core = harness.state_mut().core_mut_for_seeding();
+    let mut workspaces = core.workspaces().to_vec();
+    let session = workspaces
+        .iter_mut()
+        .flat_map(|w| w.sessions.iter_mut())
+        .find(|s| s.id == id)
+        .unwrap();
+    let old = session.resume.replace(moved.clone()).unwrap();
+    core.seed(workspaces, Vec::new());
+    transcripts.release();
+    harness.state_mut().poll_now();
+    let app = harness.state();
+    let modified = transcripts.version(&moved).and_then(|v| v.modified);
+    assert!(
+        app.conversations.is_current(id, &moved, modified),
+        "read again"
+    );
+    assert!(!app.conversations.is_current(id, &old, modified));
+    assert!(!app.conversations.is_reading(id));
+}
+
+#[test]
+fn a_session_in_its_own_window_is_read_whatever_the_main_window_shows() {
+    let transcripts = FakeTranscripts::with(long_conversation(3));
+    let (mut harness, _, id) = long_session(&transcripts);
+    harness.state_mut().dispatch(AppAction::PopOut(id));
+    let app = harness.state_mut();
+    app.core_mut_for_seeding().seed_view(View::Dispatch);
+    app.poll_now();
+    assert!(app.conversations.contains(id));
 }
 
 #[test]

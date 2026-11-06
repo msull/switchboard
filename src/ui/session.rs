@@ -612,20 +612,21 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
         jump_to_turn,
         ..
     } = &mut *cx.state;
-    // Just opened in this window: the end is what the user came for.
     let window = *in_popout;
-    let opened = conversation_was.get(&window) != Some(&record.id);
     let (nudge, jump) = if window.is_none() && cx.core.view() == View::Session(record.id) {
         (super::stick_delta(ui, cx.core.stick()), jump_to_turn.take())
     } else {
         (None, None)
     };
-    conversation_now.insert(window, record.id);
     let snapshot = snapshots.get(&record.id);
     let Some(conversation) = conversations.get(record.id) else {
-        no_conversation(ui, conversations.error(record.id), snapshot);
+        no_conversation(ui, record, conversations.error(record.id), snapshot);
         return;
     };
+    // Just opened in this window, or a message just sent (which forgets
+    // the session was drawn): the end is what the user came for.
+    let opened = conversation_was.get(&window) != Some(&record.id);
+    conversation_now.insert(window, record.id);
     conversation_view(
         ui,
         &record.name,
@@ -634,6 +635,7 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
             expand: expand_activity,
             expand_applied,
             opened,
+            updating: conversations.is_reading(record.id),
             nudge,
             jump,
         },
@@ -687,9 +689,19 @@ fn conversation_or_pane(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecor
     }
 }
 
-/// What shows when the transcript cannot be read: the pointer to the
-/// terminal, why, and the pane snapshot.
-fn no_conversation(ui: &mut Ui, error: Option<&str>, snapshot: Option<&String>) {
+/// What shows with no conversation to draw: the loading view while a
+/// first read is due, or, when the transcript cannot be read or there is
+/// none to read, the pointer to the terminal, why, and the pane snapshot.
+fn no_conversation(
+    ui: &mut Ui,
+    record: &SessionRecord,
+    error: Option<&str>,
+    snapshot: Option<&String>,
+) {
+    if error.is_none() && record.resume.is_some() {
+        loading_conversation(ui, record.id, snapshot);
+        return;
+    }
     let p = theme::palette(ui);
     ui.label(
         RichText::new("This session runs in Ghostty. Use Open in terminal to bring its window up.")
@@ -703,6 +715,23 @@ fn no_conversation(ui: &mut Ui, error: Option<&str>, snapshot: Option<&String>) 
             .auto_shrink([false, false])
             .show(ui, |ui| code_block(ui, text));
     }
+}
+
+/// What shows while a session's first read runs: the conversation's own
+/// scroll area, there from the first frame so a wheel event always lands
+/// on it, holding a line that says so and the pane snapshot.
+fn loading_conversation(ui: &mut Ui, record: RecordId, snapshot: Option<&String>) {
+    let p = theme::palette(ui);
+    egui::ScrollArea::vertical()
+        .id_salt(conversation_salt(record))
+        .auto_shrink([false, false])
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            ui.label(RichText::new("Loading the conversation…").color(p.n700));
+            if let Some(text) = snapshot {
+                code_block(ui, text);
+            }
+        });
 }
 
 /// Rows the message box shows before it scrolls.
@@ -853,10 +882,35 @@ pub fn jump_message(cx: &mut DrawCtx<'_>, id: RecordId, back: bool) {
     cx.state.jump_to_turn = Some(next);
 }
 
+/// The salt of a session's conversation area, whether it holds the
+/// conversation or the loading line. One per session: a shared one would
+/// carry its offset and its stuck flag from one conversation to the next.
+fn conversation_salt(record: RecordId) -> (&'static str, RecordId) {
+    ("conversation", record)
+}
+
+/// Send the session's conversation area to its end, from before it is
+/// drawn: a fresh scroll state sticks to the end, and the pass is
+/// discarded so the next is the one painted. An offset past the end does
+/// not work in egui 0.37; docs/design.md ("Session views open at the end
+/// of the current conversation") has the account.
+fn jump_to_end(ui: &Ui, record: RecordId) {
+    // `ScrollArea::id_salt` makes an `IdSalt` of what it is given first, so
+    // the stored state's id goes through one here as well.
+    let id = ui.make_persistent_id(egui::IdSalt::new(conversation_salt(record)));
+    ui.ctx()
+        .data_mut(|d| d.remove::<egui::scroll_area::State>(id));
+    ui.ctx()
+        .request_discard("the conversation jumped to its end");
+}
+
 struct Toggles<'a> {
     /// The first frame of this conversation in its window: scroll to
     /// the end, whatever the scroll of the one shown before.
     opened: bool,
+    /// A read of this transcript is running, so the copy shown may be
+    /// behind the file.
+    updating: bool,
     /// How far the controller's stick scrolls the conversation this
     /// frame, in the main window only: the controller has no window.
     nudge: Option<egui::Vec2>,
@@ -886,6 +940,7 @@ fn conversation_view(
         expand,
         expand_applied,
         opened,
+        updating,
         nudge,
         jump,
     } = toggles;
@@ -906,19 +961,23 @@ fn conversation_view(
                  changes only Switchboard's name for the session",
                 );
         }
+        if updating {
+            ui.label(theme::meta_text(ui, "·"));
+            ui.label(theme::meta_text(ui, "Updating…"));
+        }
     });
     ui.add_space(2.0);
     // Push the toggle into every section only on the frame it changes,
     // so single sections can still be opened and closed by hand.
     let open = (*expand_applied != Some(*expand)).then_some(*expand);
     *expand_applied = Some(*expand);
-    let mut scroll = egui::ScrollArea::vertical()
+    if opened || jump == Some(conversation.turns.len()) {
+        jump_to_end(ui, prose.record);
+    }
+    let scroll = egui::ScrollArea::vertical()
+        .id_salt(conversation_salt(prose.record))
         .auto_shrink([false, false])
         .stick_to_bottom(true);
-    if opened || jump == Some(conversation.turns.len()) {
-        // Larger than any conversation; egui clamps it to the end.
-        scroll = scroll.vertical_scroll_offset(1.0e9);
-    }
     scroll.show(ui, |ui| {
         if let Some(delta) = nudge {
             ui.scroll_with_delta(delta);
