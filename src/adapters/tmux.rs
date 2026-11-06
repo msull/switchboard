@@ -251,6 +251,16 @@ impl TmuxHost {
         pasted.map(drop)
     }
 
+    /// A line's text without its Enter: one paste when it has a line
+    /// break, typed keys when it does not.
+    fn send_text(&self, id: &HostId, text: &str) -> io::Result<()> {
+        if text.contains(['\n', '\r']) {
+            self.paste(id, text)
+        } else {
+            self.write(id, text.as_bytes())
+        }
+    }
+
     fn pipe_to(&self, id: &HostId, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -385,11 +395,7 @@ impl ProcessHost for TmuxHost {
         // Enter must follow the paste's closing marker, or a TUI reads it
         // as part of the paste; the thread below starts only once the text
         // has gone out, which orders it after.
-        if text.contains(['\n', '\r']) {
-            self.paste(id, text)?;
-        } else {
-            self.write(id, text.as_bytes())?;
-        }
+        self.send_text(id, text)?;
         // The handle is a socket name and two paths, so the thread gets
         // its own copy and the UI thread never waits on the pause.
         let host = self.clone();
@@ -401,6 +407,12 @@ impl ProcessHost for TmuxHost {
             }
         });
         Ok(())
+    }
+
+    fn send_line(&self, id: &HostId, text: &str) -> io::Result<()> {
+        self.send_text(id, text)?;
+        std::thread::sleep(ENTER_DELAY);
+        self.write(id, b"\r")
     }
 
     fn kill(&self, id: &HostId) -> io::Result<()> {
@@ -1107,6 +1119,20 @@ mod tests {
         let (id, out) = raw_cat(&s, "escapes", dir.path(), true);
         s.host.write_line(&id, "a\r\nb\x1b[201~c\rd").unwrap();
         expect_bytes(&s, &out, b"\x1b[200~a\nb[201~c\nd\x1b[201~\r");
+        s.host.kill(&id).unwrap();
+    }
+
+    /// Two sends back to back keep their order, each with its own Enter;
+    /// with a detached Enter the second text could land before the first
+    /// `\r`.
+    #[test]
+    fn two_send_lines_arrive_as_two_lines_in_order() {
+        let Some(s) = server() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let (id, out) = raw_cat(&s, "order", dir.path(), false);
+        s.host.send_line(&id, "first").unwrap();
+        s.host.send_line(&id, "second").unwrap();
+        expect_bytes(&s, &out, b"first\rsecond\r");
         s.host.kill(&id).unwrap();
     }
 

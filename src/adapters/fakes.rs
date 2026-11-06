@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::app::Services;
 use crate::core::{
@@ -146,6 +146,9 @@ pub struct FakeHostState {
     pub keys: Vec<(HostId, Vec<u8>)>,
     /// The next `snapshot` panics, once: a read that blows up.
     pub panic_snapshot: bool,
+    /// How long `list`, `snapshot` and each `write` take: a slow tmux.
+    /// A line is two writes, so it takes twice this.
+    pub delay: Duration,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -154,6 +157,12 @@ pub struct FakeHost(pub Arc<Mutex<FakeHostState>>);
 impl FakeHost {
     pub fn state(&self) -> std::sync::MutexGuard<'_, FakeHostState> {
         self.0.lock().expect("fake host lock")
+    }
+
+    /// Sleeps outside the lock, so a test can read the state meanwhile.
+    fn take_time(&self) {
+        let delay = self.state().delay;
+        std::thread::sleep(delay);
     }
 }
 
@@ -165,6 +174,7 @@ impl ProcessHost for FakeHost {
         })
     }
     fn list(&self) -> std::io::Result<Vec<HostStatus>> {
+        self.take_time();
         Ok(self.state().statuses.clone())
     }
     fn spawn(&self, spec: &SpawnSpec) -> std::io::Result<()> {
@@ -180,6 +190,7 @@ impl ProcessHost for FakeHost {
             .ok_or_else(|| std::io::Error::other("no such session"))
     }
     fn snapshot(&self, id: &HostId, _lines: Option<usize>) -> std::io::Result<String> {
+        self.take_time();
         // Taken in its own statement so the guard is dropped before the
         // panic, which would otherwise poison the fake for the test.
         let boom = std::mem::take(&mut self.state().panic_snapshot);
@@ -187,6 +198,7 @@ impl ProcessHost for FakeHost {
         Ok(self.state().snapshots.get(id).cloned().unwrap_or_default())
     }
     fn write(&self, id: &HostId, bytes: &[u8]) -> std::io::Result<()> {
+        self.take_time();
         if let Some(e) = &self.state().fail_write {
             return Err(std::io::Error::other(e.clone()));
         }

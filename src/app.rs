@@ -36,13 +36,14 @@ use crate::core::{
     SessionKind, SessionRecord, SetsResolved, SpaceId, View, WorkflowId, aws_view, file_refs,
     resolve_sets, token_hash,
 };
+use crate::hostwork::{Capture, Done, HostWork, PaneWrite, Purpose, WriteKind};
 use crate::ports::agent::AgentLauncher;
 use crate::ports::artifacts::ArtifactFinder;
 use crate::ports::control::{OpLine, Operations};
 use crate::ports::controller::Controller;
 use crate::ports::dispatch::{Body, BuildId, DispatchPort, Reply, Status};
 use crate::ports::events::EventSource;
-use crate::ports::host::{HostId, ProcessHost, SpawnSpec};
+use crate::ports::host::{HostId, HostStatus, ProcessHost, SpawnSpec};
 use crate::ports::opener::Opener;
 use crate::ports::project_config::ProjectConfigReader;
 use crate::ports::remote::{Advertisement, Advertiser, Listen, PairedDevice, RemoteStore, Scope};
@@ -239,6 +240,12 @@ pub struct SwitchboardApp {
     policy_epoch: u64,
     /// File diffs being read on threads of their own.
     diff_reads: DiffReads,
+    /// Host polls and pane writes on their worker threads.
+    host_work: HostWork,
+    /// Moves whenever the frame changes the host itself. A list asked for
+    /// under an older value may not show that change, and a pane it omits
+    /// would read as gone, so it is dropped rather than applied.
+    host_gen: u64,
     /// What the update threads answer, each one an action for the
     /// next frame.
     update_results: UpdateResults,
@@ -402,6 +409,7 @@ impl SwitchboardApp {
         // `take` moves the boxed port out and leaves `None`, so the
         // worker owns the only handle to it.
         let dispatch_port = DispatchWorker::new(services.dispatch.take());
+        let host_work = HostWork::new(&services.host);
         Self {
             core: AppCore::new(),
             services,
@@ -441,6 +449,8 @@ impl SwitchboardApp {
             last_watch_sweep: None,
             policy_epoch: 0,
             diff_reads: DiffReads::default(),
+            host_work,
+            host_gen: 0,
             update_results: UpdateResults::default(),
             pending_update: None,
         }
@@ -467,7 +477,12 @@ impl SwitchboardApp {
         });
         self.cadence = Some(Cadence::started(Instant::now()));
         self.poll_events();
-        self.poll_host();
+        // On this thread, before the first frame: `rearm_discoveries`
+        // reads the running sessions the list reconciles.
+        match self.services.host.list() {
+            Ok(list) => self.host_listed(list),
+            Err(e) => log::warn!("host list failed: {e}"),
+        }
         self.rearm_discoveries();
     }
 
@@ -607,18 +622,14 @@ impl SwitchboardApp {
         }
     }
 
-    /// Type a message from one of the owner's boxes and settle that box's
-    /// draft by the outcome. The box keeps its draft until the pane has
-    /// the text, so a dead session or a failed write leaves it to resend.
-    fn send_message(
-        &mut self,
-        id: RecordId,
-        host: &HostId,
-        text: String,
-        from: Composer,
-    ) -> Option<AppAction> {
-        let result = self.services.host.write_line(host, &text);
-        match (from, result.is_ok()) {
+    /// Settle a box's draft by how its message's write went. The box
+    /// keeps its draft until the pane has the text, so a dead session or
+    /// a failed write leaves it to resend.
+    fn settle_message(&mut self, id: RecordId, text: String, from: Composer, sent: bool) {
+        if from == Composer::Line {
+            self.ui_state.sending.remove(&id);
+        }
+        match (from, sent) {
             // Only while the draft is still this message: the owner may
             // have typed on since it was sent.
             (Composer::Line, true) => {
@@ -633,7 +644,6 @@ impl SwitchboardApp {
                 self.ui_state.primed.insert(id, text);
             }
         }
-        failed(result, || format!("send a message to {}", host.0))
     }
 
     /// The persistence effects; only a workspace save reports back.
@@ -783,10 +793,13 @@ impl SwitchboardApp {
                 host,
                 title,
                 cwd,
-            } => Some(AppAction::Attached {
-                id,
-                result: self.attach(&host, &title, &cwd),
-            }),
+            } => {
+                self.host_gen += 1;
+                Some(AppAction::Attached {
+                    id,
+                    result: self.attach(&host, &title, &cwd),
+                })
+            }
             Effect::SendInput { .. }
             | Effect::SendMessage { .. }
             | Effect::SendAnswer { .. }
@@ -807,7 +820,12 @@ impl SwitchboardApp {
                 project,
                 result: s.project_config.write_text(&root, &text),
             }),
-            Effect::Kill(host) => failed(s.host.kill(&host), || format!("kill {}", host.0)),
+            Effect::Kill(host) => {
+                self.host_gen += 1;
+                failed(self.services.host.kill(&host), || {
+                    format!("kill {}", host.0)
+                })
+            }
             Effect::Forget(_)
             | Effect::RemoveLog(_)
             | Effect::LogOperation { .. }
@@ -840,26 +858,51 @@ impl SwitchboardApp {
         }
     }
 
-    /// The writes into a pane, kept out of `run_effect` for its length.
+    /// The writes into a pane go to the write lane in the order they ran;
+    /// `drain_host_work` reports each one's outcome.
     fn run_pane_write(&mut self, effect: Effect) -> Option<AppAction> {
-        let host_port = &self.services.host;
-        match effect {
-            Effect::SendInput { host, text } => failed(host_port.write_line(&host, &text), || {
-                format!("send input to {}", host.0)
-            }),
+        let write = match effect {
+            Effect::SendInput { host, text } => PaneWrite {
+                what: format!("send input to {}", host.0),
+                host,
+                kind: WriteKind::Line(text),
+            },
             Effect::SendMessage {
                 id,
                 host,
                 text,
                 from,
-            } => self.send_message(id, &host, text, from),
-            Effect::SendAnswer { host, text } => failed(host_port.write_line(&host, &text), || {
-                format!("send an answer to {}", host.0)
-            }),
-            Effect::SendKeys { host, bytes } => failed(host_port.write(&host, &bytes), || {
-                format!("send keys to {}", host.0)
-            }),
+            } => {
+                if from == Composer::Line {
+                    self.ui_state.sending.insert(id);
+                }
+                PaneWrite {
+                    what: format!("send a message to {}", host.0),
+                    host,
+                    kind: WriteKind::Message { id, text, from },
+                }
+            }
+            Effect::SendAnswer { host, text } => PaneWrite {
+                what: format!("send an answer to {}", host.0),
+                host,
+                kind: WriteKind::Line(text),
+            },
+            Effect::SendKeys { host, bytes } => PaneWrite {
+                what: format!("send keys to {}", host.0),
+                host,
+                kind: WriteKind::Keys(bytes),
+            },
             _ => unreachable!("not a pane write"),
+        };
+        match self.host_work.write(write) {
+            Ok(()) => None,
+            // The lane is gone, so no `Done` will ever settle it.
+            Err(write) => {
+                if let WriteKind::Message { id, text, from } = write.kind {
+                    self.settle_message(id, text, from, false);
+                }
+                failed(Err("the write lane has ended"), || write.what)
+            }
         }
     }
 
@@ -973,13 +1016,84 @@ impl SwitchboardApp {
         }
     }
 
+    /// Ask the read lane for a list; `drain_host_work` applies it.
     fn poll_host(&mut self) {
-        match self.services.host.list() {
-            Ok(list) => {
-                log::debug!("host lists {} pane(s)", list.len());
-                self.dispatch(AppAction::HostListed(list));
+        self.host_work.list(self.host_gen);
+    }
+
+    fn host_listed(&mut self, list: Vec<HostStatus>) {
+        log::debug!("host lists {} pane(s)", list.len());
+        self.dispatch(AppAction::HostListed(list));
+    }
+
+    /// What the host workers answered since the last pass, each result
+    /// applied as the frame would have applied it. Whether there was any.
+    fn drain_host_work(&mut self) -> bool {
+        let mut any = false;
+        while let Some(done) = self.host_work.try_done() {
+            self.apply_host_done(done);
+            any = true;
+        }
+        any
+    }
+
+    /// Wait for every outstanding host job and apply its result. For
+    /// tests and `poll_now`, which have no frame loop to drain for them;
+    /// `logic` must never call it, or a slow tmux stalls the frame again.
+    pub fn settle_host(&mut self) {
+        while let Some(done) = self.host_work.wait_done() {
+            self.apply_host_done(done);
+        }
+    }
+
+    fn apply_host_done(&mut self, done: Done) {
+        match done {
+            Done::Listed { generation, result } => match result {
+                Ok(_) if generation != self.host_gen => {
+                    log::debug!("dropping a host list older than the last host change");
+                }
+                Ok(list) => self.host_listed(list),
+                Err(e) => log::warn!("host list failed: {e}"),
+            },
+            Done::Captured(panes) => {
+                for (capture, text) in panes {
+                    if let Ok(text) = text {
+                        self.apply_capture(&capture, text);
+                    }
+                }
             }
-            Err(e) => log::warn!("host list failed: {e}"),
+            Done::Wrote { write, result } => self.drain_wrote(write, result),
+        }
+    }
+
+    /// Settle a finished pane write: its message's draft, then a notice if
+    /// it failed.
+    fn drain_wrote(&mut self, write: PaneWrite, result: Result<(), String>) {
+        if let WriteKind::Message { id, text, from } = write.kind {
+            self.settle_message(id, text, from, result.is_ok());
+        }
+        if let Some(action) = failed(result, || write.what) {
+            self.dispatch(action);
+        }
+    }
+
+    fn apply_capture(&mut self, capture: &Capture, text: String) {
+        let id = capture.id;
+        match capture.purpose {
+            Purpose::Trust => {
+                let seen = text.contains(TRUST_PROMPT_MARK);
+                if seen != self.core.at_trust_prompt(id) {
+                    self.dispatch(AppAction::PromptSeen { id, seen });
+                }
+            }
+            Purpose::Caption { snapshot } => {
+                if let Some(last) = caption_of(&text) {
+                    self.ui_state.captions.insert(id, last);
+                }
+                if snapshot {
+                    self.ui_state.snapshots.insert(id, text);
+                }
+            }
         }
     }
 
@@ -1079,6 +1193,7 @@ impl SwitchboardApp {
         // Only the fresh token: never one a launcher or a respawn carried.
         spec.env.retain(|(k, _)| k != RECORD_TOKEN_ENV);
         spec.env.push((RECORD_TOKEN_ENV.to_owned(), token));
+        self.host_gen += 1;
         let result = self.services.host.spawn(&spec).map_err(|e| e.to_string());
         if let Err(e) = &result {
             log::error!("spawn {} failed: {e}", spec.id.0);
@@ -1140,7 +1255,7 @@ impl SwitchboardApp {
     /// Claude Code asks whether to trust a folder before any hook can
     /// run, so a pane that has reported nothing is read for that
     /// question and the core told when it appears or goes away.
-    fn check_trust_prompts(&mut self) {
+    fn check_trust_prompts(&self, batch: &mut Vec<Capture>) {
         let candidates: Vec<RecordId> = self
             .core
             .all_sessions_sorted()
@@ -1149,22 +1264,18 @@ impl SwitchboardApp {
             .filter(|s| s.activity == Activity::Unknown && self.core.is_running(s.id))
             .map(|s| s.id)
             .collect();
-        for id in candidates {
-            let host = HostId(id.host_name());
-            let Ok(text) = self.services.host.snapshot(&host, Some(TRUST_PROMPT_LINES)) else {
-                continue;
-            };
-            let seen = text.contains(TRUST_PROMPT_MARK);
-            if seen != self.core.at_trust_prompt(id) {
-                self.dispatch(AppAction::PromptSeen { id, seen });
-            }
-        }
+        batch.extend(candidates.into_iter().map(|id| Capture {
+            id,
+            host: HostId(id.host_name()),
+            lines: Some(TRUST_PROMPT_LINES),
+            purpose: Purpose::Trust,
+        }));
     }
 
     /// Captions for cards on screen and the snapshot for the open session.
     /// Agent cards excerpt the transcript rather than the pane, so their
     /// conversations are kept fresh too (a stat each; a read on change).
-    fn refresh_captions(&mut self) {
+    fn refresh_captions(&mut self, batch: &mut Vec<Capture>) {
         let view = self.core.view();
         if let View::Session(id) = view {
             self.refresh_conversation(id);
@@ -1248,14 +1359,27 @@ impl SwitchboardApp {
                 continue;
             }
             let lines = if wants_snapshot { Some(60) } else { Some(3) };
-            if let Ok(text) = self.services.host.snapshot(&host, lines) {
-                if wants_snapshot {
-                    self.ui_state.snapshots.insert(id, text.clone());
-                }
-                if let Some(last) = caption_of(&text) {
-                    self.ui_state.captions.insert(id, last);
-                }
-            }
+            batch.push(Capture {
+                id,
+                host,
+                lines,
+                purpose: Purpose::Caption {
+                    snapshot: wants_snapshot,
+                },
+            });
+        }
+    }
+
+    /// The panes one caption cycle reads, as one batch for the read lane.
+    /// A cycle that finds the last batch still out reads no panes, so a
+    /// slow tmux cannot pile them up; the transcripts and logs that
+    /// `refresh_captions` reads itself still refresh.
+    fn poll_panes(&mut self) {
+        let mut batch = Vec::new();
+        self.refresh_captions(&mut batch);
+        self.check_trust_prompts(&mut batch);
+        if !batch.is_empty() {
+            self.host_work.capture(batch);
         }
     }
 
@@ -1265,12 +1389,17 @@ impl SwitchboardApp {
     pub fn poll_now(&mut self) {
         self.cadence = Some(self.cadence.unwrap_or_default().host_polled(Instant::now()));
         self.last_caption = Some(Instant::now());
+        // A job already out would be taken for this poll's; settling
+        // around each step also gives the later steps the list's result,
+        // as the callers of this expect.
+        self.settle_host();
         self.poll_events();
         self.poll_host();
+        self.settle_host();
         self.poll_discoveries();
         self.poll_configs();
-        self.refresh_captions();
-        self.check_trust_prompts();
+        self.poll_panes();
+        self.settle_host();
     }
 
     fn pump(&mut self, step: &Step) {
@@ -1302,8 +1431,7 @@ impl SwitchboardApp {
             .is_none_or(|t| t.elapsed() >= CAPTION_INTERVAL)
         {
             self.last_caption = Some(Instant::now());
-            self.refresh_captions();
-            self.check_trust_prompts();
+            self.poll_panes();
         }
         if self
             .last_config
@@ -1512,6 +1640,7 @@ impl eframe::App for SwitchboardApp {
     /// (the control port, hook wakes, polls, the tick's own re-arm, the
     /// window raises they ask for) lives here rather than in `ui`.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.host_work.wake(ctx);
         // `take` swaps in `false` and returns the old value, so the flag
         // means "since the previous `logic`".
         let visible = std::mem::take(&mut self.shown.ui_ran);
@@ -1531,6 +1660,7 @@ impl eframe::App for SwitchboardApp {
         }
         self.flush_refusals();
         self.drain_diffs();
+        let host_answered = self.drain_host_work();
         let answered: Vec<AppAction> = self.update_results.rx.try_iter().collect();
         for action in answered {
             self.dispatch(action);
@@ -1548,9 +1678,10 @@ impl eframe::App for SwitchboardApp {
             self.pump(&step);
             ctx.request_repaint_after(step.next_in);
             let waiting = self.core.waiting_count();
-            // A hidden pass that neither ticks nor lists the host has no new
-            // waiting count; a trailing host poll changes it, so it counts.
-            if (step.tick || step.events || step.host_poll) && self.badge != Some(waiting) {
+            // A hidden pass that neither ticks nor hears from the host has
+            // no new waiting count; a list answered since the last pass
+            // changes it, so it counts.
+            if (step.tick || step.events || host_answered) && self.badge != Some(waiting) {
                 crate::adapters::dock::set_waiting_badge(waiting);
                 self.services.controller.set_waiting(waiting);
                 self.badge = Some(waiting);
@@ -4966,6 +5097,166 @@ mod tests {
         masked.sort();
         masked.dedup();
         assert_eq!(masked, ["p-2", "s-1"]);
+    }
+
+    /// An app on `host` with one running shell session, whose pane the
+    /// host lists.
+    fn app_with_a_pane(
+        host: &fakes::FakeHost,
+    ) -> (SwitchboardApp, crate::core::RecordId, ProjectId) {
+        let mut services = fakes::services();
+        services.host = std::sync::Arc::new(host.clone());
+        let mut app = SwitchboardApp::with_services(services);
+        let project = Project {
+            id: ProjectId::new(),
+            name: "p".into(),
+            root: PathBuf::from("/work/p"),
+            tags: Vec::new(),
+            notes: String::new(),
+            pinned: Vec::new(),
+            env: ProjectEnv::default(),
+            env_sets: Vec::new(),
+            shown: Vec::new(),
+            created: SystemTime::UNIX_EPOCH,
+            last_active: SystemTime::UNIX_EPOCH,
+            space: SpaceId::DEFAULT,
+            op: None,
+        };
+        let pid = project.id;
+        app.core_mut_for_seeding()
+            .seed(vec![Workspace::new(project)], Vec::new());
+        app.dispatch(AppAction::Control {
+            op: "op-1".into(),
+            action: ControlAction::NewSession {
+                project: pid,
+                name: "tester".into(),
+                kind: SessionKind::Shell,
+                cwd: "/work/p".into(),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: String::new(),
+                env: BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            },
+        });
+        let id = app.core.workspace(pid).unwrap().sessions[0].id;
+        host.state().statuses = vec![running(id)];
+        app.poll_now();
+        assert!(app.core.is_running(id));
+        (app, id, pid)
+    }
+
+    fn running(id: crate::core::RecordId) -> crate::ports::host::HostStatus {
+        crate::ports::host::HostStatus {
+            id: crate::ports::host::HostId(id.host_name()),
+            liveness: crate::ports::host::Liveness::Running {
+                pid: 1,
+                command: "sh".into(),
+            },
+            cwd: None,
+            last_activity: None,
+            title: None,
+        }
+    }
+
+    /// A poll on a host that takes its time costs the frame nothing, and
+    /// what it read still arrives.
+    #[test]
+    fn polls_on_a_slow_host_leave_the_frame_at_once() {
+        let host = fakes::FakeHost::default();
+        let (mut app, id, _) = app_with_a_pane(&host);
+        host.state().snapshots.insert(
+            crate::ports::host::HostId(id.host_name()),
+            "the last line".into(),
+        );
+        host.state().delay = Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        app.poll_host();
+        app.poll_panes();
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "{:?}",
+            started.elapsed()
+        );
+        app.settle_host();
+        assert_eq!(app.ui_state.captions[&id], "the last line");
+    }
+
+    /// A slow poll is not queued behind itself.
+    #[test]
+    fn a_list_still_out_takes_the_place_of_the_next_poll() {
+        let host = fakes::FakeHost::default();
+        let (mut app, _, _) = app_with_a_pane(&host);
+        host.state().delay = Duration::from_millis(50);
+        app.record_actions = true;
+        app.poll_host();
+        app.poll_host();
+        app.settle_host();
+        let lists = app
+            .dispatched
+            .iter()
+            .filter(|a| matches!(a, AppAction::HostListed(_)))
+            .count();
+        assert_eq!(lists, 1);
+    }
+
+    /// A list asked for before a spawn does not show the new pane, and
+    /// applying it would mark that pane gone. It is dropped; the next
+    /// poll lists the pane.
+    #[test]
+    fn a_list_from_before_a_spawn_is_dropped() {
+        let host = fakes::FakeHost::default();
+        let (mut app, id, pid) = app_with_a_pane(&host);
+        app.dispatch(AppAction::Control {
+            op: "op-2".into(),
+            action: ControlAction::NewSession {
+                project: pid,
+                name: "second".into(),
+                kind: SessionKind::Shell,
+                cwd: "/work/p".into(),
+                launch: Launch::Shell,
+                prompt: None,
+                notes: String::new(),
+                env: BTreeMap::new(),
+                env_sets: Vec::new(),
+                replaces: None,
+            },
+        });
+        let second = app
+            .core
+            .workspace(pid)
+            .unwrap()
+            .sessions
+            .iter()
+            .map(|s| s.id)
+            .find(|s| *s != id)
+            .unwrap();
+        app.settle_host();
+        app.record_actions = true;
+        host.state().delay = Duration::from_millis(50);
+        host.state().statuses = vec![running(id)];
+        app.poll_host();
+        let spec = crate::ports::host::SpawnSpec {
+            id: crate::ports::host::HostId(second.host_name()),
+            cwd: PathBuf::from("/work/p"),
+            command: None,
+            env: Vec::new(),
+            scrollback: None,
+        };
+        app.spawn(second, spec);
+        app.settle_host();
+        assert!(
+            !app.dispatched
+                .iter()
+                .any(|a| matches!(a, AppAction::HostListed(_))),
+            "{:?}",
+            app.dispatched
+        );
+        host.state().statuses = vec![running(id), running(second)];
+        app.poll_host();
+        app.settle_host();
+        assert!(app.core.is_running(second));
     }
 
     /// Every spawn, a resume as much as the first, carries the

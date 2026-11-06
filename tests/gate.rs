@@ -16,6 +16,7 @@
 //! cargo test --locked --test gate -- --ignored codex_launches_bind_distinct_ids --nocapture
 //! cargo test --locked --test gate -- --ignored multi_paragraph_send_submits_once --nocapture
 //! cargo test --locked --test gate -- --ignored a_structured_answer_arrives_as_the_next_prompt --nocapture
+//! cargo test --locked --test gate -- --ignored tmux_call_timings --nocapture
 //! ```
 //!
 //! Interactive `claude` shows a trust dialog for a directory it has not
@@ -58,7 +59,7 @@ use switchboard::core::{
 };
 use switchboard::ports::agent::{AgentLaunch, AgentLauncher};
 use switchboard::ports::events::{EventKind, EventSource, SessionEvent};
-use switchboard::ports::host::{HostId, HostStatus, Liveness, ProcessHost};
+use switchboard::ports::host::{HostId, HostStatus, Liveness, ProcessHost, SpawnSpec};
 use switchboard::ports::store::{Loaded, Store};
 use uuid::Uuid;
 
@@ -1539,4 +1540,59 @@ fn autostart_service_starts_and_agent_does_not() {
     );
     assert_eq!(gate.list().len(), 1);
     assert!(app.core().notices().iter().all(|n| !n.is_error));
+}
+
+/// Measures: what each tmux call the frame used to wait on costs, per
+/// call, at 1, 10 and 30 sessions, for the numbers `docs/design.md` and a
+/// pull request quote. It asserts nothing and spends nothing. A multi-line
+/// `write_line` times `load-buffer` plus `paste-buffer`, since its Enter
+/// follows on a thread of its own.
+#[test]
+#[ignore = "a measurement: prints timings, asserts nothing"]
+fn tmux_call_timings() {
+    const ROUNDS: u32 = 20;
+    let Some(gate) = Gate::new() else { return };
+    let dir = gate.tmp.path().to_path_buf();
+    let mut panes = Vec::new();
+    for sessions in [1_usize, 10, 30] {
+        while panes.len() < sessions {
+            let id = HostId(format!("timing-{}", panes.len()));
+            gate.host
+                .spawn(&SpawnSpec {
+                    id: id.clone(),
+                    cwd: dir.clone(),
+                    command: Some(vec!["/bin/cat".into()]),
+                    env: Vec::new(),
+                    scrollback: None,
+                })
+                .expect("spawn a pane");
+            panes.push(id);
+        }
+        let pane = &panes[0];
+        let time = |name: &str, call: &dyn Fn()| {
+            let started = Instant::now();
+            for _ in 0..ROUNDS {
+                call();
+            }
+            println!(
+                "{sessions:>2} sessions  {name:<26} {:?} per call",
+                started.elapsed() / ROUNDS
+            );
+        };
+        time("list-panes", &|| {
+            gate.host.list().expect("list");
+        });
+        time("capture-pane, 3 lines", &|| {
+            gate.host.snapshot(pane, Some(3)).expect("capture");
+        });
+        time("capture-pane, 60 lines", &|| {
+            gate.host.snapshot(pane, Some(60)).expect("capture");
+        });
+        time("send-keys -H, short line", &|| {
+            gate.host.write(pane, b"a short line\r").expect("keys");
+        });
+        time("load-buffer + paste-buffer", &|| {
+            gate.host.write_line(pane, "one\ntwo").expect("paste");
+        });
+    }
 }

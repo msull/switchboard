@@ -86,7 +86,8 @@ fn call(port: &mut Port, request: Request) -> Reply {
 }
 
 /// Send `request` from a client thread and run `turn` on the app until
-/// the reply arrives, failing after five seconds.
+/// the reply arrives, failing after five seconds. Whatever the request
+/// queued for a pane has reached it on return.
 fn call_with(
     port: &mut Port,
     request: Request,
@@ -103,6 +104,7 @@ fn call_with(
         turn(&mut port.app);
         std::thread::sleep(Duration::from_millis(2));
     }
+    port.app.settle_host();
     client.join().expect("client thread")
 }
 

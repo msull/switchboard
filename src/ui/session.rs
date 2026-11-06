@@ -723,6 +723,7 @@ fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
             .map(|f| f.path().to_path_buf())
             .collect()
     });
+    let sending = cx.state.sending.contains(&record.id);
     let draft = cx.state.input_drafts.entry(record.id).or_default();
     for path in dropped {
         append_path(draft, &path);
@@ -799,7 +800,7 @@ fn message_box(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
     // The draft stays in the box until the pane has this message, and
     // only this Send clears it. A delivery or any other write leaves it
     // alone.
-    if send && !draft.trim().is_empty() {
+    if send && !sending && !draft.trim().is_empty() {
         let text = draft.clone();
         cx.dispatch(AppAction::SendMessage {
             id: record.id,

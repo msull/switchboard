@@ -242,6 +242,10 @@ pub struct UiState {
     /// Messages being composed, one per session, so switching away and
     /// back does not lose a half-written prompt.
     pub input_drafts: HashMap<RecordId, String>,
+    /// Sessions with a message from their box on its way to the pane.
+    /// The draft stays in the box until the pane has it, so Send is inert
+    /// meanwhile: a second press would send the same text twice.
+    pub sending: HashSet<RecordId>,
     /// Answers being typed to a session's text ask, with the time of
     /// the ask each was typed for; apart from `input_drafts`, which a
     /// send the owner makes clears.
@@ -375,6 +379,7 @@ impl Default for UiState {
             delete_set: None,
             space_editor: None,
             input_drafts: HashMap::new(),
+            sending: HashSet::new(),
             ask_drafts: HashMap::new(),
             primed: HashMap::new(),
             terminals: HashMap::new(),

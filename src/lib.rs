@@ -8,6 +8,8 @@
 //!   the process, one module per port.
 //! - `adapters`: real implementations, plus fakes for tests.
 //! - `app`: owns core and adapters; runs effects; drains workers.
+//! - `hostwork`: the worker threads the app runs host polls and pane
+//!   writes on, off the frame.
 //! - `content`: what the app read from outside and keeps between
 //!   frames, with its version (parsed transcripts); shared by the views.
 //! - `sync`: locks that outlive a panic on another thread.
@@ -22,6 +24,7 @@ pub mod app;
 pub mod cadence;
 pub mod content;
 pub mod core;
+pub mod hostwork;
 pub mod ports;
 pub mod script;
 pub mod sync;
