@@ -1,1 +1,0 @@
-Added: `dispatch take <project> --title <text> (--body <text> | --body-file <path>) [--key <id>] [--lane <name>]...` takes a ticket typed on the command line for a project whose pipeline has `[source] kind = "manual"`; `--key` names the branch through the template's `{key}` and shows on the ticket's row, and a manual pipeline's branch templates must use `{key}`.

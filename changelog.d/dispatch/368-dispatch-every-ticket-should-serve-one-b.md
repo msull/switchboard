@@ -1,1 +1,0 @@
-Added: A lane the ticket did not choose is now served for testing from its own tree, detached at its base, when a stage lists it in services, so a frontend-only ticket can use {services.backend}; a lane with its own repository may pin its base to a commit written `commit:<sha>`.

@@ -1,1 +1,0 @@
-Fixed: A held stage in the joined context can be answered proceed when the project's lanes are separate repositories; the lane trees are checked on their own instead of showing as untracked in the ticket's tree.
