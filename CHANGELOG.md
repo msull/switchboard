@@ -10,6 +10,18 @@ publishes that section as the release notes. The format follows
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-06
+
+### Added
+
+- `dispatch take <project> --title <text> (--body <text> | --body-file <path>) [--key <id>] [--lane <name>]...` takes a ticket typed on the command line for a project whose pipeline has `[source] kind = "manual"`; `--key` names the branch through the template's `{key}` and shows on the ticket's row, and a manual pipeline's branch templates must use `{key}`.
+- A lane the ticket did not choose is now served for testing from its own tree, detached at its base, when a stage lists it in services, so a frontend-only ticket can use {services.backend}; a lane with its own repository may pin its base to a commit written `commit:<sha>`.
+
+### Fixed
+
+- A held stage in the joined context can be answered proceed when the project's lanes are separate repositories; the lane trees are checked on their own instead of showing as untracked in the ticket's tree.
+- A lane's setup now finishes before the stage that serves the lane or runs in it starts, and the investigator's root stage sets up every lane first; a setup that fails parks the ticket.
+
 ## [0.12.1] - 2026-11-02
 
 ### Changed
