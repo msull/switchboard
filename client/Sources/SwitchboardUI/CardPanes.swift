@@ -450,12 +450,31 @@ public enum DiffMarks {
     }
 }
 
+/// How the side panes sit beside a card window.
+enum SidePaneLayout {
+    /// Degrees each pane turns in toward the viewer.
+    static let tilt: Double = 30
+    /// The card window's default height, which the panes' sizes are drawn for.
+    static let designHeight: CGFloat = 900
+
+    /// A pane's size for a window `height` tall: its height follows the
+    /// window's and its width follows its height, so it keeps its shape.
+    /// Held between a third and one and a half of its drawn size.
+    static func size(width: CGFloat, height: CGFloat, windowHeight: CGFloat) -> CGSize {
+        let scale = windowHeight > 0 ? min(max(windowHeight / designHeight, 0.35), 1.5) : 1
+        return CGSize(width: (width * scale).rounded(), height: (height * scale).rounded())
+    }
+}
+
 extension View {
     /// A pane kept beside the window on `edge` while `shown`, moving with
-    /// it. Only the headset has ornaments; elsewhere there is no pane.
+    /// it and turned in toward the viewer like a side panel, hinged on the
+    /// edge next to the window. Only the headset has ornaments; elsewhere
+    /// there is no pane.
     @ViewBuilder
     func sidePane(_ edge: HorizontalEdge, shown: Bool, @ViewBuilder content: () -> some View) -> some View {
         #if os(visionOS)
+        let inner: UnitPoint3D = edge == .leading ? .trailing : .leading
         ornament(
             visibility: shown ? .visible : .hidden,
             attachmentAnchor: .scene(edge == .leading ? .leading : .trailing),
@@ -463,6 +482,16 @@ extension View {
         ) {
             content()
                 .glassBackgroundEffect()
+                // A true turn in depth: the `axis:` form only draws a
+                // perspective on the flat plane, which barely shows and
+                // reads either way. With z toward the viewer and y down, a
+                // positive turn about y brings the left edge forward, so
+                // the left pane turns positive and the right one negative.
+                .rotation3DEffect(
+                    Rotation3D(
+                        angle: .degrees(edge == .leading ? SidePaneLayout.tilt : -SidePaneLayout.tilt),
+                        axis: .y),
+                    anchor: inner)
                 .padding(edge == .leading ? .trailing : .leading, 12)
         }
         #else

@@ -50,6 +50,15 @@ final class EditsTests: XCTestCase {
         XCTAssertNil(big.body.hunks)
     }
 
+    func testASidePaneScalesWithTheWindowsHeightAndKeepsItsShape() {
+        XCTAssertEqual(SidePaneLayout.size(width: 360, height: 640, windowHeight: 900), CGSize(width: 360, height: 640))
+        XCTAssertEqual(SidePaneLayout.size(width: 360, height: 640, windowHeight: 450), CGSize(width: 180, height: 320))
+        // Before the window is measured, and past the limits.
+        XCTAssertEqual(SidePaneLayout.size(width: 360, height: 640, windowHeight: 0), CGSize(width: 360, height: 640))
+        XCTAssertEqual(SidePaneLayout.size(width: 400, height: 600, windowHeight: 90), CGSize(width: 140, height: 210))
+        XCTAssertEqual(SidePaneLayout.size(width: 400, height: 600, windowHeight: 9000), CGSize(width: 600, height: 900))
+    }
+
     func testMarksOffACharacterBoundaryOrPastTheEndAreLeftUnmarked() {
         // "é" is two bytes, so byte 1 is inside it.
         let text = "é ab"

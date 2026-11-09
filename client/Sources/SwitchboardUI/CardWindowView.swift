@@ -20,6 +20,8 @@ public struct CardWindowView: View {
     @State private var filesOpen = false
     @State private var slotOpen = false
     @State private var slot: SidePane?
+    /// The window's height, which the side panes scale with.
+    @State private var windowHeight: CGFloat = 0
 
     /// In a board tile rather than a window of its own: the window
     /// registry and the launch log are left alone, and the header
@@ -89,16 +91,20 @@ public struct CardWindowView: View {
             if !embedded { LaunchLog.note("card \(request.id) phase \(phase)") }
         }
         .onChange(of: mode) { _, new in model.setMode(new, for: request.id) }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { windowHeight = $0 }
         .sidePane(.leading, shown: panes && filesOpen) {
             if panes && filesOpen, let item {
+                let size = SidePaneLayout.size(width: 360, height: 640, windowHeight: windowHeight)
                 EditedFilesPane(model: model, ref: item.ref, project: item.session.project)
-                    .frame(width: 360, height: 640)
+                    .frame(width: size.width, height: size.height)
             }
         }
         .sidePane(.trailing, shown: panes && slotOpen) {
             if panes && slotOpen, let item {
+                let size = SidePaneLayout.size(
+                    width: slot == nil ? 380 : 540, height: slot == nil ? 560 : 860, windowHeight: windowHeight)
                 SideSlotPane(model: model, owner: item.ref, project: item.session.project, content: $slot)
-                    .frame(width: slot == nil ? 380 : 540, height: slot == nil ? 560 : 860)
+                    .frame(width: size.width, height: size.height)
             }
         }
     }
