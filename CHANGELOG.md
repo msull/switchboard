@@ -10,6 +10,22 @@ publishes that section as the release notes. The format follows
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-09
+
+### Added
+
+- a Send button on the keys panel's top row, and the panel is slightly narrower.
+- on the headset, a card window of its own has side panes that move with it: on the left the files the session edited, with the lines added and removed since the branch split from the default branch (or since the session started) and a diff window for each; on the right a slot for a document the session wrote or a second session to work beside it. The panes turn in toward you and scale with the window, each card keeps its panes, angle and sizes (set in a new Card settings sheet), and the header's rarer buttons move behind a ⋯ menu, with the keys panel button beside the message box. The host serves the list and the diffs at `sessions/{id}/files` and `sessions/{id}/diff/{base}/{path}`.
+
+### Changed
+
+- a chunk dictated from a device that ends in the spoken send, such as "fix the test computer send", now sends its words without the phrase; the trigger anywhere else in a chunk is still dictation.
+
+### Fixed
+
+- on the headset, one microphone serves every window, so the keys panel can stop dictation started in a card; a spoken send now stops dictation, as the Send button does.
+- on the headset, a failed read no longer empties an open conversation, and a conversation that was cleared comes back on the next change without changing tabs.
+
 ## [0.13.1] - 2026-11-06
 
 ### Fixed
