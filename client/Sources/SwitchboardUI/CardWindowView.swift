@@ -15,6 +15,11 @@ public struct CardWindowView: View {
     @State private var screenScale = ScreenScale.initial
     @Environment(\.openWindow) private var openWindow
     @Environment(\.scenePhase) private var scenePhase
+    /// The side panes, window state: the files on the left, the slot on
+    /// the right and what it holds.
+    @State private var filesOpen = false
+    @State private var slotOpen = false
+    @State private var slot: SidePane?
 
     /// In a board tile rather than a window of its own: the window
     /// registry and the launch log are left alone, and the header
@@ -84,6 +89,36 @@ public struct CardWindowView: View {
             if !embedded { LaunchLog.note("card \(request.id) phase \(phase)") }
         }
         .onChange(of: mode) { _, new in model.setMode(new, for: request.id) }
+        .sidePane(.leading, shown: panes && filesOpen) {
+            if panes && filesOpen, let item {
+                EditedFilesPane(model: model, ref: item.ref, project: item.session.project)
+                    .frame(width: 360, height: 640)
+            }
+        }
+        .sidePane(.trailing, shown: panes && slotOpen) {
+            if panes && slotOpen, let item {
+                SideSlotPane(model: model, owner: item.ref, project: item.session.project, content: $slot)
+                    .frame(width: slot == nil ? 380 : 540, height: slot == nil ? 560 : 860)
+            }
+        }
+    }
+
+    /// Side panes go with a card window of its own, never a board tile.
+    private var panes: Bool { !embedded }
+
+    private func paneButton(_ symbol: String, open: Binding<Bool>, label: String, help: String) -> some View {
+        Button {
+            open.wrappedValue.toggle()
+        } label: {
+            Image(systemName: symbol)
+                .font(.caption)
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.circle)
+        .controlSize(.mini)
+        .tint(open.wrappedValue ? .accentColor : nil)
+        .accessibilityLabel(label)
+        .help(help)
     }
 
 
@@ -104,6 +139,12 @@ public struct CardWindowView: View {
                 EmptyView()
             } else {
             PinToBoardMenu(model: model, item: .session(request.ref), name: item?.session.name ?? "Board")
+            if item?.session.kind == .claude {
+                paneButton("sidebar.left", open: $filesOpen, label: "Files",
+                           help: "The files this session edited, beside the card")
+            }
+            paneButton("sidebar.right", open: $slotOpen, label: "Side pane",
+                       help: "A document or another session, beside the card")
             // Icon only, and small: a tall narrow card has no room for
             // a word here.
             Button {

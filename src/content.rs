@@ -31,6 +31,7 @@ use crate::adapters::scrollback;
 use crate::core::file_refs;
 use crate::core::model::{EnvSet, EnvVar, ProjectEnv};
 use crate::core::{ProjectId, RecordId, ResumeHandle, resolve_sets};
+use crate::ports::changes::{BaseKind, DiffBody, FileDiff, FileStatus, LineKind, WorkingChanges};
 use crate::ports::host::{HostId, ProcessHost};
 use crate::ports::secrets::SecretStore;
 use crate::ports::transcript::{
@@ -89,6 +90,11 @@ pub enum ContentKey {
     /// Text from Dispatch's tickets, by the ticket (`None` for the
     /// list) and the part: masked on the worker, never watched.
     TicketText(Option<String>, TicketPart),
+    /// One file's diff for a session's edited files: the session, the
+    /// base the files list named, and the path under the project root.
+    /// Read once per request, never watched: a device re-reads it when
+    /// the files list moves.
+    Diff(RecordId, String, PathBuf),
 }
 
 /// Which of a ticket's texts a [`ContentKey::TicketText`] read is.
@@ -114,6 +120,7 @@ impl ContentKey {
             Self::RunOutput(..) => "run_output",
             Self::File(..) => "file",
             Self::TicketText(..) => "ticket",
+            Self::Diff(..) => "diff",
         }
     }
 
@@ -125,6 +132,7 @@ impl ContentKey {
             Self::Screen(id) | Self::Conversation(id) => id.0.to_string(),
             Self::RunOutput(id, n) => format!("{}/{n}", id.0),
             Self::File(project, path) => format!("{}/{}", project.0, path.display()),
+            Self::Diff(id, base, path) => format!("{}/{base}/{}", id.0, path.display()),
             Self::TicketText(ticket, part) => {
                 let ticket = ticket.as_deref().unwrap_or("");
                 match part {
@@ -161,7 +169,10 @@ impl ContentKey {
     #[must_use]
     pub fn record(&self) -> Option<RecordId> {
         match self {
-            Self::Screen(id) | Self::Conversation(id) | Self::RunOutput(id, _) => Some(*id),
+            Self::Screen(id)
+            | Self::Conversation(id)
+            | Self::RunOutput(id, _)
+            | Self::Diff(id, ..) => Some(*id),
             Self::File(..) | Self::TicketText(..) => None,
         }
     }
@@ -352,6 +363,13 @@ pub enum Source {
     /// A view the frame already holds, to be masked whole: a ticket's
     /// text, as the reply carries it.
     Json(serde_json::Value),
+    /// One file of a project against a base: the root, the base's
+    /// commit, and the path under the root.
+    Diff {
+        root: PathBuf,
+        base: String,
+        relative: PathBuf,
+    },
 }
 
 /// Where a page is anchored. A page anchored at its start runs
@@ -388,6 +406,11 @@ pub enum ContentView {
     },
     /// A file whole.
     Whole,
+    /// The files a session's tool calls wrote, with their line counts
+    /// against the checkout's base.
+    Files,
+    /// One file's diff against a base, as hunks.
+    Diff,
 }
 
 /// One read for the worker: what to read, what names the policy to
@@ -488,6 +511,7 @@ impl ContentWorker {
         host: Arc<dyn ProcessHost>,
         transcripts: Arc<dyn TranscriptReader>,
         secrets: Arc<dyn SecretStore>,
+        working: Arc<dyn WorkingChanges>,
         observed: Sender<Observed>,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
@@ -500,7 +524,7 @@ impl ContentWorker {
             std::thread::Builder::new()
                 .name("switchboard-content".into())
                 .spawn(move || {
-                    let mut cache = Cache::new(secrets);
+                    let mut cache = Cache::new(secrets, working);
                     let every = || *lock_recover(&poll, "content poll");
                     let mut next_poll = Instant::now() + every();
                     while !stop.load(Ordering::SeqCst) {
@@ -580,6 +604,7 @@ impl Drop for ContentWorker {
 /// poll.
 struct Cache {
     secrets: Arc<dyn SecretStore>,
+    working: Arc<dyn WorkingChanges>,
     policies: HashMap<u64, (Policy, Instant)>,
     transcripts: HashMap<RecordId, ParsedEntry>,
     files: HashMap<ContentKey, FileEntry>,
@@ -587,9 +612,10 @@ struct Cache {
 }
 
 impl Cache {
-    fn new(secrets: Arc<dyn SecretStore>) -> Self {
+    fn new(secrets: Arc<dyn SecretStore>, working: Arc<dyn WorkingChanges>) -> Self {
         Self {
             secrets,
+            working,
             policies: HashMap::new(),
             transcripts: HashMap::new(),
             files: HashMap::new(),
@@ -621,6 +647,9 @@ struct ParsedEntry {
     policy: u64,
     conversation: Conversation,
     links: Links,
+    /// The edited-files view of this version of the transcript, made on
+    /// its first read: git is asked again only when the agent wrote.
+    files: Option<serde_json::Value>,
     touched: Instant,
 }
 
@@ -781,6 +810,7 @@ impl Cache {
                     policy: policy.fingerprint,
                     conversation,
                     links,
+                    files: None,
                     touched: Instant::now(),
                 },
             );
@@ -790,6 +820,70 @@ impl Cache {
         let mut h = DefaultHasher::new();
         (handle.provider_id(), version).hash(&mut h);
         Ok((h.finish(), &entry.conversation, &entry.links))
+    }
+
+    /// The files `record`'s session wrote under the project root, newest
+    /// first, with their counts against the checkout's base, made once
+    /// per version of the transcript. A checkout git cannot read lists
+    /// the files without counts or a base.
+    #[allow(clippy::too_many_arguments)]
+    fn edited_files(
+        &mut self,
+        transcripts: &dyn TranscriptReader,
+        record: RecordId,
+        handle: &ResumeHandle,
+        root: &std::path::Path,
+        cwd: &std::path::Path,
+        policy: &Policy,
+    ) -> Result<(u64, serde_json::Value), ContentError> {
+        let (version, _, _) = self.conversation(transcripts, record, handle, root, cwd, policy)?;
+        let Some(entry) = self.transcripts.get(&record) else {
+            return Err(ContentError::Failed(
+                "the transcript was not kept".to_owned(),
+            ));
+        };
+        if let Some(body) = &entry.files {
+            return Ok((version, body.clone()));
+        }
+        let body = files_body(&*self.working, &entry.conversation, root, cwd);
+        if let Some(entry) = self.transcripts.get_mut(&record) {
+            entry.files = Some(body.clone());
+        }
+        Ok((version, body))
+    }
+
+    /// One file's diff against `base`, masked line by line. A masked
+    /// line loses its word marks, which name bytes of the unmasked text.
+    fn diff(
+        &mut self,
+        root: &std::path::Path,
+        base: &str,
+        relative: &std::path::Path,
+        policy: &Policy,
+    ) -> Result<(u64, serde_json::Value), ContentError> {
+        let path = root.join(relative);
+        let dir = path
+            .parent()
+            .filter(|d| d.is_dir())
+            .unwrap_or(root)
+            .to_path_buf();
+        let top = self
+            .working
+            .work_base(&dir, None)
+            .map_err(ContentError::Failed)?
+            .top;
+        let in_repo = canonical(&path)
+            .strip_prefix(canonical(&top))
+            .map(std::path::Path::to_path_buf)
+            .map_err(|_| ContentError::Failed("the file is not in a repository".to_owned()))?;
+        let diff = self
+            .working
+            .work_diff(&top, base, &in_repo.to_string_lossy())
+            .map_err(ContentError::Failed)?;
+        let body = diff_body(&diff, &|s| policy.mask(s));
+        let mut h = DefaultHasher::new();
+        body.to_string().hash(&mut h);
+        Ok((h.finish(), body))
     }
 
     /// The masked file under `key`: the walk and the stat every time,
@@ -910,6 +1004,22 @@ fn observe(
                 let redacted = policy.mask(&text);
                 (h.finish(), tail_body(&redacted, lines))
             }),
+        (Source::Transcript { handle, root, cwd }, ContentView::Files) => cache.edited_files(
+            transcripts,
+            job.key.record().unwrap_or(RecordId(uuid::Uuid::nil())),
+            handle,
+            root,
+            cwd,
+            &policy,
+        ),
+        (
+            Source::Diff {
+                root,
+                base,
+                relative,
+            },
+            ContentView::Diff,
+        ) => cache.diff(root, base, relative, &policy),
         (Source::Transcript { handle, root, cwd }, view) => cache
             .conversation(
                 transcripts,
@@ -957,6 +1067,126 @@ fn observe(
         result,
         reply: job.reply.clone(),
     }
+}
+
+/// `path` with its links resolved, so paths from a transcript, a
+/// session's directory and git compare. A file that is gone is
+/// resolved through its directory.
+fn canonical(path: &std::path::Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(path) {
+        return c;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) => canonical(dir).join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// The files list on the wire: each file the session wrote under the
+/// project root, newest first, with its counts against the base of the
+/// checkout the session works in. A file in no repository, or in
+/// another one, has no counts.
+fn files_body(
+    working: &dyn WorkingChanges,
+    conversation: &Conversation,
+    root: &std::path::Path,
+    cwd: &std::path::Path,
+) -> serde_json::Value {
+    let root = canonical(root);
+    let written: Vec<(String, PathBuf)> = file_refs::written_files(conversation, cwd)
+        .into_iter()
+        .filter_map(|p| {
+            let c = canonical(&p);
+            let under = c.strip_prefix(&root).ok()?.to_string_lossy().into_owned();
+            Some((under, c))
+        })
+        .collect();
+    let base = working.work_base(cwd, conversation.start).ok();
+    let top = base.as_ref().map(|b| canonical(&b.top));
+    let mut stats = HashMap::new();
+    if let (Some(base), Some(top)) = (&base, &top) {
+        let in_top: Vec<String> = written
+            .iter()
+            .filter_map(|(_, c)| Some(c.strip_prefix(top).ok()?.to_string_lossy().into_owned()))
+            .collect();
+        if let Ok(found) = working.work_stats(&base.top, &base.sha, &in_top) {
+            for f in found {
+                stats.insert(top.join(&f.path), f);
+            }
+        }
+    }
+    let files: Vec<serde_json::Value> = written
+        .iter()
+        .map(|(under, c)| {
+            let stat = stats.get(c);
+            serde_json::json!({
+                "path": under,
+                "in_repo": top.as_ref().is_some_and(|t| c.starts_with(t)),
+                "changed": stat.is_some(),
+                "added": stat.map_or(0, |s| s.added),
+                "removed": stat.map_or(0, |s| s.removed),
+                "binary": stat.is_some_and(|s| s.binary),
+            })
+        })
+        .collect();
+    let base = base.map(|b| match b.kind {
+        BaseKind::Branch(onto) => serde_json::json!({"sha": b.sha, "kind": "branch", "onto": onto}),
+        BaseKind::Session => serde_json::json!({"sha": b.sha, "kind": "session"}),
+    });
+    serde_json::json!({ "base": base, "files": files })
+}
+
+/// A file's diff on the wire, each line's text masked.
+fn diff_body(diff: &FileDiff, mask: &dyn Fn(&str) -> String) -> serde_json::Value {
+    let status = match diff.status {
+        FileStatus::Modified => "modified",
+        FileStatus::Added => "added",
+        FileStatus::Deleted => "deleted",
+        FileStatus::Renamed => "renamed",
+    };
+    let body = match &diff.body {
+        DiffBody::Hunks(hunks) => {
+            let hunks: Vec<serde_json::Value> = hunks
+                .iter()
+                .map(|h| {
+                    let lines: Vec<serde_json::Value> = h
+                        .lines
+                        .iter()
+                        .map(|l| {
+                            let text = mask(&l.text);
+                            let marks: Vec<[usize; 2]> = if text == l.text {
+                                l.marks.iter().map(|m| [m.start, m.end]).collect()
+                            } else {
+                                Vec::new()
+                            };
+                            let kind = match l.kind {
+                                LineKind::Context => "context",
+                                LineKind::Added => "added",
+                                LineKind::Removed => "removed",
+                            };
+                            serde_json::json!({
+                                "kind": kind,
+                                "old": l.old_no,
+                                "new": l.new_no,
+                                "text": text,
+                                "marks": marks,
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "old_start": h.old_start,
+                        "new_start": h.new_start,
+                        "lines": lines,
+                    })
+                })
+                .collect();
+            serde_json::json!({ "kind": "hunks", "hunks": hunks })
+        }
+        DiffBody::Binary => serde_json::json!({ "kind": "binary" }),
+        DiffBody::TooLarge { lines } => serde_json::json!({ "kind": "too_large", "lines": lines }),
+        DiffBody::Empty => serde_json::json!({ "kind": "empty" }),
+    };
+    serde_json::json!({ "status": status, "body": body })
 }
 
 /// The last `lines` of a masked text, cut from the top to the byte cap.
@@ -1789,6 +2019,7 @@ mod tests {
             Arc::new(host.clone()),
             Arc::new(crate::adapters::fakes::FakeTranscripts::default()),
             Arc::new(crate::adapters::fakes::FakeSecrets::default()),
+            Arc::new(crate::adapters::fakes::FakeWorking::default()),
             tx,
             Arc::new(|| {}),
         );

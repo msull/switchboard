@@ -1177,6 +1177,28 @@ public actor ServerConnection {
         return .unanswered(lastError ?? "no answer")
     }
 
+    /// The files a session wrote, with their counts against the base.
+    public func readEditedFiles(_ session: String) async throws -> EditedFilesBody {
+        guard let api else { throw RemoteError.transport("not connected") }
+        do {
+            return try await api.editedFiles(session).body
+        } catch RemoteError.refused(let status, let code, let message) {
+            if status == 401 { handle(.refused(status: status, code: code, message: message)) }
+            throw RemoteError.refused(status: status, code: code, message: message)
+        }
+    }
+
+    /// One file's diff against a base the files list named.
+    public func readDiff(_ session: String, base: String, path: String) async throws -> FileDiffBody {
+        guard let api else { throw RemoteError.transport("not connected") }
+        do {
+            return try await api.diff(session, base: base, path: path).body
+        } catch RemoteError.refused(let status, let code, let message) {
+            if status == 401 { handle(.refused(status: status, code: code, message: message)) }
+            throw RemoteError.refused(status: status, code: code, message: message)
+        }
+    }
+
     /// One file of a ticket by its key: text, or an image as bytes.
     public func readTicketFile(_ ticket: String, key: String) async throws -> TicketFileBody {
         guard let api else { throw RemoteError.transport("not connected") }

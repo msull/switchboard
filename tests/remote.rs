@@ -20,7 +20,7 @@ use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use switchboard::SwitchboardApp;
 use switchboard::adapters::fakes::{
     self, FakeAdvertiser, FakeDispatch, FakeHost, FakeOperations, FakeRemoteStore, FakeSecrets,
-    FakeTranscripts, MemoryStore,
+    FakeTranscripts, FakeWorking, MemoryStore,
 };
 use switchboard::adapters::remote::{
     self, MAX_UNAUTHENTICATED, MAX_UNAUTHENTICATED_PER_SOURCE, pinned_client,
@@ -109,6 +109,17 @@ fn port_built(
     remote: FakeRemoteStore,
     dispatch: FakeDispatch,
 ) -> Port {
+    port_working(host, secrets, remote, dispatch, FakeWorking::default())
+}
+
+/// A port whose working copy reads as `working` says.
+fn port_working(
+    host: FakeHost,
+    secrets: FakeSecrets,
+    remote: FakeRemoteStore,
+    dispatch: FakeDispatch,
+    working: FakeWorking,
+) -> Port {
     let advertiser = FakeAdvertiser::default();
     let transcripts = FakeTranscripts::default();
     let services = Services {
@@ -119,6 +130,7 @@ fn port_built(
         operations: Box::new(FakeOperations::default()),
         transcripts: Arc::new(transcripts.clone()),
         dispatch: Some(Box::new(dispatch)),
+        working: Arc::new(working),
         ..fakes::services()
     };
     let mut app = SwitchboardApp::with_services(services);
@@ -4043,6 +4055,170 @@ fn a_conversation_pages_by_turn_and_its_last_response_shares_the_revision() {
         let (status, reply) = get(&mut port, &format!("/api/v1/sessions/{shell}/{route}"), t);
         assert_eq!(status, 400, "{route}");
         assert_eq!(code(&reply), "no_conversation", "{route}");
+    }
+}
+
+/// One tool call that writes `path`, failed or not.
+fn writes(name: &str, path: &str, error: bool) -> switchboard::ports::transcript::Activity {
+    switchboard::ports::transcript::Activity {
+        kind: switchboard::ports::transcript::ActivityKind::Tool,
+        line: format!("{name} {path}"),
+        at: None,
+        error,
+        detail: Some(switchboard::ports::transcript::ToolDetail {
+            name: name.into(),
+            input: String::new(),
+            result: String::new(),
+            path: Some(PathBuf::from(path)),
+        }),
+        text: None,
+    }
+}
+
+/// A working copy on a branch at `/tmp` where `src/a.rs` changed, its
+/// diff naming a secret.
+fn edited_working() -> FakeWorking {
+    use switchboard::ports::changes::{DiffBody, DiffLine, FileDiff, FileStat, Hunk, LineKind};
+    let mut working = FakeWorking::at(std::path::Path::new("/tmp"), "abc123");
+    working.stats = vec![FileStat {
+        path: "src/a.rs".into(),
+        added: 3,
+        removed: 1,
+        ..FileStat::default()
+    }];
+    let line = |kind, text: &str| DiffLine {
+        kind,
+        text: text.into(),
+        marks: std::iter::once(0..3).collect(),
+        ..DiffLine::default()
+    };
+    working.diffs.insert(
+        "src/a.rs".into(),
+        FileDiff {
+            body: DiffBody::Hunks(vec![Hunk {
+                old_start: 1,
+                new_start: 1,
+                lines: vec![
+                    line(LineKind::Removed, "let t = 1;"),
+                    line(LineKind::Added, "let t = \"tok-5e3cr3t\";"),
+                ],
+            }]),
+            ..FileDiff::default()
+        },
+    );
+    working
+}
+
+/// A conversation that wrote a file under `/tmp`, one outside it, and
+/// one whose write failed.
+fn edited_conversation() -> Conversation {
+    Conversation {
+        turns: vec![
+            Turn {
+                n: 1,
+                activity: vec![
+                    writes("Write", "/tmp/src/a.rs", false),
+                    writes("Write", "/elsewhere/x.rs", false),
+                ],
+                ..Turn::default()
+            },
+            Turn {
+                n: 2,
+                activity: vec![
+                    writes("Edit", "/tmp/notes.md", false),
+                    writes("Edit", "/tmp/b.rs", true),
+                ],
+                ..Turn::default()
+            },
+        ],
+        ..Conversation::default()
+    }
+}
+
+/// The files a session wrote under the project root come newest first
+/// with their counts against the branch point, a failed write and a
+/// file outside the root left out; one file's diff comes as hunks,
+/// masked; a base or path that is not one is refused.
+#[test]
+fn a_sessions_edited_files_list_with_counts_and_each_reads_as_a_masked_diff() {
+    let working = edited_working();
+    let mut port = port_working(
+        FakeHost::default(),
+        FakeSecrets::default(),
+        FakeRemoteStore::default(),
+        FakeDispatch::default(),
+        working,
+    );
+    port.transcripts.set(Some(edited_conversation()));
+    let (_, project, session) = seed(&mut port, "");
+    let pid = switchboard::core::ProjectId(uuid::Uuid::parse_str(&project).unwrap());
+    port.secrets.state().insert(
+        switchboard::core::SecretScope::Project(pid).account("API_TOKEN"),
+        "tok-5e3cr3t".into(),
+    );
+    port.app.dispatch(AppAction::SetProjectEnv(
+        pid,
+        switchboard::core::ProjectEnv {
+            vars: vec![switchboard::core::EnvVar {
+                name: "API_TOKEN".into(),
+                value: String::new(),
+                secret: true,
+            }],
+            ..Default::default()
+        },
+    ));
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    launched(&mut port, &session);
+
+    let (status, files) = get(&mut port, &format!("/api/v1/sessions/{session}/files"), t);
+    assert_eq!(status, 200, "{files}");
+    let body = &files["body"];
+    assert_eq!(body["base"]["sha"], "abc123");
+    assert_eq!(body["base"]["kind"], "branch");
+    assert_eq!(body["base"]["onto"], "origin/main");
+    let listed: Vec<(&str, bool, u64, u64)> = body["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["path"].as_str().unwrap(),
+                f["changed"].as_bool().unwrap(),
+                f["added"].as_u64().unwrap(),
+                f["removed"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        vec![("notes.md", false, 0, 0), ("src/a.rs", true, 3, 1)]
+    );
+
+    let (status, diff) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/diff/abc123/src/a.rs"),
+        t,
+    );
+    assert_eq!(status, 200, "{diff}");
+    assert_eq!(diff["body"]["status"], "modified");
+    let lines = &diff["body"]["body"]["hunks"][0]["lines"];
+    assert_eq!(lines[0]["kind"], "removed");
+    assert_eq!(lines[0]["marks"], serde_json::json!([[0, 3]]));
+    assert_eq!(lines[1]["text"], "let t = \"<API_TOKEN>\";");
+    assert_eq!(
+        lines[1]["marks"],
+        serde_json::json!([]),
+        "a masked line's marks named the unmasked bytes"
+    );
+
+    for route in [
+        "diff/zz/src/a.rs",
+        "diff/abc123/../etc/passwd",
+        "diff/abc123",
+    ] {
+        let (status, reply) = get(&mut port, &format!("/api/v1/sessions/{session}/{route}"), t);
+        assert!(status == 400 || status == 404, "{route}: {status} {reply}");
     }
 }
 

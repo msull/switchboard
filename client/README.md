@@ -184,6 +184,18 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   listed in the main window in place of the hosts' working sets and
   kept in the presentation state, so a board closed and opened again,
   or the app relaunched, shows the same tiles in the same order; the
+  side panes of a card window of its own (`CardPanes.swift`, never on
+  a board tile): ornaments on its left and right edges that move with
+  it, opened from two buttons in its header and kept as window state;
+  on the left `EditedFilesPane`, the files the session wrote with
+  their lines added and removed against the branch point (the host's
+  `session.files`, read every few seconds while open), a tap opening
+  the file and a button the diff in a `DiffWindowView` (one per
+  `DiffWindowRequest`, removed lines red and added green, the words
+  that changed marked by `DiffMarks`); on the right `SideSlotPane`, a
+  slot that offers the Markdown files the session wrote and every
+  other session, and holds the one chosen as an embedded file window
+  or card; the
   presentation model (`ViewMode`, `CardWindowRequest`, `CardStanding`,
   `BrowseMode`, `FocusCursor`) and `PresentationState` in a JSON file
   in the app's container: the layout (list, grid, or one session in

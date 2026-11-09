@@ -53,6 +53,15 @@ struct SwitchboardVisionApp: App {
         }
         .defaultSize(width: 720, height: 640)
         .restorationBehavior(.disabled)
+        // A diff window per request: one file a session edited, against
+        // its branch point, opened from a card's files pane.
+        WindowGroup(for: DiffWindowRequest.self) { $request in
+            if let request {
+                DiffWindowView(model: model, request: request)
+            }
+        }
+        .defaultSize(width: 820, height: 700)
+        .restorationBehavior(.disabled)
         // A board window per board: the tiles of sessions and files
         // the user pinned, in their saved arrangement.
         WindowGroup("Board", for: BoardWindowRequest.self) { $request in

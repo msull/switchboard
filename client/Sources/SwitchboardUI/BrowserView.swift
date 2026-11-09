@@ -503,6 +503,16 @@ public final class BrowserModel {
         }
     }
 
+    /// The files a session wrote, with their counts against the base.
+    public func readEditedFiles(_ ref: SessionRef) async throws -> EditedFilesBody {
+        try await manager.readEditedFiles(ref)
+    }
+
+    /// One file's diff against a base the files list named.
+    public func readDiff(_ ref: SessionRef, base: String, path: String) async throws -> FileDiffBody {
+        try await manager.readDiff(ref, base: base, path: path)
+    }
+
     /// One file of a ticket by its key.
     public func readTicketFile(_ ref: TicketRef, key: String) async throws -> TicketFileBody {
         try await manager.readTicketFile(ref, key: key)

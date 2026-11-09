@@ -615,6 +615,18 @@ public actor ConnectionManager {
         await connections[ref.serverID]?.closeTicket(ref.ticketID) ?? .unanswered("no host")
     }
 
+    /// The files a session wrote, with their counts against the base.
+    public func readEditedFiles(_ ref: SessionRef) async throws -> EditedFilesBody {
+        guard let connection = connections[ref.serverID] else { throw RemoteError.transport("no host") }
+        return try await connection.readEditedFiles(ref.recordID)
+    }
+
+    /// One file's diff against a base the files list named.
+    public func readDiff(_ ref: SessionRef, base: String, path: String) async throws -> FileDiffBody {
+        guard let connection = connections[ref.serverID] else { throw RemoteError.transport("no host") }
+        return try await connection.readDiff(ref.recordID, base: base, path: path)
+    }
+
     /// One file of a ticket by its key.
     public func readTicketFile(_ ref: TicketRef, key: String) async throws -> TicketFileBody {
         guard let connection = connections[ref.serverID] else { throw RemoteError.transport("no host") }

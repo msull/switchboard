@@ -2,3 +2,4 @@ Changed: a chunk dictated from a device that ends in the spoken send, such as "f
 Fixed: on the headset, one microphone serves every window, so the keys panel can stop dictation started in a card; a spoken send now stops dictation, as the Send button does.
 Added: a Send button on the keys panel's top row, and the panel is slightly narrower.
 Fixed: on the headset, a failed read no longer empties an open conversation, and a conversation that was cleared comes back on the next change without changing tabs.
+Added: on the headset, a card window of its own has side panes that move with it: on the left the files the session edited, with the lines added and removed since the branch split from the default branch (or since the session started) and a diff window for each; on the right a slot for a document the session wrote or a second session to work beside it. The host serves the list and the diffs at `sessions/{id}/files` and `sessions/{id}/diff/{base}/{path}`.

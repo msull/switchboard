@@ -83,6 +83,9 @@ pub struct Services {
     /// An `Arc` rather than a `Box`: the page hands a clone to the thread
     /// that reads git while `Services` stays borrowed by the frame.
     pub changes: std::sync::Arc<dyn crate::ports::changes::BranchChanges>,
+    /// A working copy against its base, for the files a session edited,
+    /// read on the content worker.
+    pub working: std::sync::Arc<dyn crate::ports::changes::WorkingChanges>,
     pub artifacts: Box<dyn ArtifactFinder>,
     /// The hand controller (a nunchuk over serial); a fake in tests.
     pub controller: Box<dyn Controller>,
@@ -1950,8 +1953,9 @@ impl SwitchboardApp {
                     lines: RUN_LINES_CAP,
                 },
                 ContentKey::File(..) => ContentView::Whole,
-                // Ticket text is read once per request, never watched.
-                ContentKey::TicketText(..) => continue,
+                // Ticket text and a diff are read once per request,
+                // never watched.
+                ContentKey::TicketText(..) | ContentKey::Diff(..) => continue,
             };
             if let Ok(job) = self.content_job(&key, view, None) {
                 jobs.push(job);
@@ -2038,6 +2042,15 @@ impl SwitchboardApp {
                 };
                 Source::Log(scrollback_dir(&self.services.store.data_dir()).join(&run.log))
             }
+            ContentKey::Diff(_, base, relative) => Source::Diff {
+                root: self
+                    .core
+                    .workspace(record.project)
+                    .map(|w| w.project.root.clone())
+                    .unwrap_or_default(),
+                base: base.clone(),
+                relative: relative.clone(),
+            },
             // A file is handled above, and ticket text has no record.
             ContentKey::File(..) | ContentKey::TicketText(..) => unreachable!("no record"),
         };
@@ -2190,6 +2203,13 @@ impl SwitchboardApp {
                 },
             ),
             [_, _, "last-response"] => (ContentKey::Conversation(id), ContentView::LastResponse),
+            [_, _, "files"] => (ContentKey::Conversation(id), ContentView::Files),
+            [_, _, "diff", base, path @ ..] => match Self::diff_params(base, path) {
+                Ok((base, relative)) => (ContentKey::Diff(id, base, relative), ContentView::Diff),
+                Err(reason) => {
+                    return Served::Now(self.refuse(request, 400, "bad_request", reason, true));
+                }
+            },
             [_, _, "conversation", n] => match n.parse::<usize>() {
                 Ok(n) if n >= 1 => (ContentKey::Conversation(id), ContentView::Turn { n }),
                 _ => {
@@ -2247,6 +2267,23 @@ impl SwitchboardApp {
             }
         };
         self.remote_content(request, &key, view, reply)
+    }
+
+    /// A diff's base, a commit as the files list named it, and its
+    /// path, a file under the project root with no `.` or `..` component.
+    fn diff_params(base: &str, path: &[&str]) -> Result<(String, PathBuf), &'static str> {
+        if !(4..=64).contains(&base.len()) || !base.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("base is a commit, as the files list names it");
+        }
+        let relative = PathBuf::from(path.join("/"));
+        let clean = relative.components().next().is_some()
+            && relative
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if !clean {
+            return Err("the path is relative to the project root, with no . or .. component");
+        }
+        Ok((base.to_owned(), relative))
     }
 
     /// Where a page is anchored, from `from` (a turn number or `last`)
@@ -3253,6 +3290,7 @@ impl SwitchboardApp {
                 Arc::clone(&self.services.host),
                 Arc::clone(&self.services.transcripts),
                 Arc::clone(&self.services.secrets),
+                Arc::clone(&self.services.working),
                 tx,
                 wake,
             ));
@@ -3383,7 +3421,12 @@ impl SwitchboardApp {
             }
             (
                 "GET",
-                ["sessions", _, "screen" | "conversation" | "last-response"]
+                [
+                    "sessions",
+                    _,
+                    "screen" | "conversation" | "last-response" | "files",
+                ]
+                | ["sessions", _, "diff", _, _, ..]
                 | ["sessions", _, "conversation", _]
                 | ["sessions", _, "runs", _, "output"]
                 | ["projects", _, "files", _, ..],

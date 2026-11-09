@@ -9,7 +9,8 @@ use std::process::Command;
 
 use super::diff::{self, DIFF_LINE_CAP};
 use crate::ports::changes::{
-    BranchChanges, Changes, Commit, DiffBody, FileDiff, FileStat, FileStatus,
+    BaseKind, BranchChanges, Changes, Commit, DiffBody, FileDiff, FileStat, FileStatus, WorkBase,
+    WorkingChanges,
 };
 
 /// How a path differs from the index and HEAD.
@@ -205,6 +206,198 @@ impl BranchChanges for GitChanges {
         if out.len() > DIFF_MAX_BYTES {
             return Ok(FileDiff {
                 status: FileStatus::Modified,
+                body: DiffBody::TooLarge {
+                    lines: out.lines().count(),
+                },
+            });
+        }
+        Ok(diff::parse(&out, DIFF_LINE_CAP))
+    }
+}
+
+/// git's empty tree: the base of a repository with no commit before the
+/// session, against which every file reads as added.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// The branch a pull request from this checkout would target:
+/// `origin`'s default, else the first of the usual names that exists.
+fn default_branch(dir: &Path) -> Option<String> {
+    if let Some(name) = git(
+        dir,
+        &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+    ) {
+        let name = name.trim();
+        if !name.is_empty() {
+            return Some(name.to_owned());
+        }
+    }
+    ["origin/main", "origin/master", "main", "master"]
+        .into_iter()
+        .find(|name| {
+            git(
+                dir,
+                &["rev-parse", "--verify", "-q", &format!("{name}^{{commit}}")],
+            )
+            .is_some()
+        })
+        .map(str::to_owned)
+}
+
+/// The paths of `paths` git does not track and does not ignore.
+fn untracked(top: &Path, paths: &[String]) -> Result<Vec<String>, String> {
+    let mut args = vec![
+        "--literal-pathspecs",
+        "ls-files",
+        "-z",
+        "--others",
+        "--exclude-standard",
+        "--",
+    ];
+    args.extend(paths.iter().map(String::as_str));
+    Ok(git_or_why(top, &args)?
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+impl WorkingChanges for GitChanges {
+    fn work_base(
+        &self,
+        dir: &Path,
+        since: Option<std::time::SystemTime>,
+    ) -> Result<WorkBase, String> {
+        let top = PathBuf::from(git_or_why(dir, &["rev-parse", "--show-toplevel"])?.trim());
+        let current = git(dir, &["branch", "--show-current"]).unwrap_or_default();
+        let current = current.trim();
+        if let Some(onto) = default_branch(dir) {
+            let short = onto.strip_prefix("origin/").unwrap_or(&onto);
+            if !current.is_empty()
+                && current != short
+                && let Some(sha) = git(dir, &["merge-base", "HEAD", &onto])
+            {
+                return Ok(WorkBase {
+                    sha: sha.trim().to_owned(),
+                    kind: BaseKind::Branch(onto),
+                    top,
+                });
+            }
+        }
+        let sha = match since
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+        {
+            Some(secs) => git(
+                dir,
+                &["rev-list", "-1", &format!("--before={secs}"), "HEAD"],
+            )
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| EMPTY_TREE.to_owned()),
+            None => git(dir, &["rev-parse", "HEAD"])
+                .map_or_else(|| EMPTY_TREE.to_owned(), |s| s.trim().to_owned()),
+        };
+        Ok(WorkBase {
+            sha,
+            kind: BaseKind::Session,
+            top,
+        })
+    }
+
+    fn work_stats(
+        &self,
+        top: &Path,
+        base: &str,
+        paths: &[String],
+    ) -> Result<Vec<FileStat>, String> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut args = vec![
+            "--literal-pathspecs",
+            "-c",
+            "core.quotepath=off",
+            "diff",
+            "--numstat",
+            "-z",
+            "--no-ext-diff",
+            "--no-textconv",
+            base,
+            "--",
+        ];
+        args.extend(paths.iter().map(String::as_str));
+        let mut files = parse_numstat(&git_or_why(top, &args)?);
+        for path in untracked(top, paths)? {
+            let bytes = std::fs::read(top.join(&path)).unwrap_or_default();
+            let binary = bytes.contains(&0);
+            let lines = if binary {
+                0
+            } else {
+                let text = String::from_utf8_lossy(&bytes);
+                u32::try_from(text.lines().count()).unwrap_or(u32::MAX)
+            };
+            files.push(FileStat {
+                path,
+                added: lines,
+                removed: 0,
+                old_path: None,
+                binary,
+            });
+        }
+        Ok(files)
+    }
+
+    fn work_diff(&self, top: &Path, base: &str, path: &str) -> Result<FileDiff, String> {
+        let unified = format!("--unified={DIFF_LINE_CAP}");
+        let new = !untracked(top, &[path.to_owned()])?.is_empty();
+        let out = if new {
+            // `--no-index` exits 1 when the files differ, which they do.
+            let out = without_git_env(&mut Command::new("git"))
+                .arg("-C")
+                .arg(top)
+                .args([
+                    "diff",
+                    "--no-index",
+                    "--no-color",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    &unified,
+                    "--",
+                    "/dev/null",
+                    path,
+                ])
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .output()
+                .map_err(|e| format!("git: {e}"))?;
+            if out.status.code() != Some(1) && !out.status.success() {
+                return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
+            }
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        } else {
+            git_or_why(
+                top,
+                &[
+                    "--literal-pathspecs",
+                    "-c",
+                    "core.quotepath=off",
+                    "diff",
+                    "--no-color",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    &unified,
+                    base,
+                    "--",
+                    path,
+                ],
+            )?
+        };
+        if out.len() > DIFF_MAX_BYTES {
+            return Ok(FileDiff {
+                status: if new {
+                    FileStatus::Added
+                } else {
+                    FileStatus::Modified
+                },
                 body: DiffBody::TooLarge {
                     lines: out.lines().count(),
                 },
@@ -470,6 +663,74 @@ mod tests {
             GitChanges
                 .diff(root, "nope", "work", "m.txt", None)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn reads_a_working_copy_against_its_branch_point_or_the_session_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let commit = "git -c user.name=t -c user.email=t@t commit -q";
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        std::fs::write(root.join("same.txt"), "same\n").unwrap();
+        sh(
+            root,
+            &format!("git init -q -b main . && git add . && {commit} -m base"),
+        );
+        sh(root, "git checkout -q -b work");
+        std::fs::write(root.join("a.txt"), "one\nthree\nfour\n").unwrap();
+        sh(root, &format!("git add . && {commit} -m committed"));
+        std::fs::write(root.join("b.txt"), "b\nmore\n").unwrap();
+        std::fs::write(root.join("new.txt"), "x\ny\nz\n").unwrap();
+
+        let base = GitChanges.work_base(&root.join("."), None).unwrap();
+        assert_eq!(base.kind, BaseKind::Branch("main".into()));
+        assert_eq!(
+            std::fs::canonicalize(&base.top).unwrap(),
+            std::fs::canonicalize(root).unwrap()
+        );
+        let main = git(root, &["rev-parse", "main"]).unwrap();
+        assert_eq!(base.sha, main.trim());
+
+        let paths: Vec<String> = ["a.txt", "b.txt", "new.txt", "same.txt"]
+            .map(String::from)
+            .to_vec();
+        let stats = GitChanges.work_stats(root, &base.sha, &paths).unwrap();
+        let counts: Vec<(&str, u32, u32)> = stats
+            .iter()
+            .map(|f| (f.path.as_str(), f.added, f.removed))
+            .collect();
+        // Committed and uncommitted edits both count; an unchanged file
+        // is left out; a new file counts whole.
+        assert_eq!(
+            counts,
+            vec![("a.txt", 2, 1), ("b.txt", 1, 0), ("new.txt", 3, 0)]
+        );
+
+        let new = GitChanges.work_diff(root, &base.sha, "new.txt").unwrap();
+        assert_eq!(new.status, FileStatus::Added);
+        let DiffBody::Hunks(h) = &new.body else {
+            panic!("{new:?}")
+        };
+        assert_eq!(h[0].lines.len(), 3);
+        let a = GitChanges.work_diff(root, &base.sha, "a.txt").unwrap();
+        assert_eq!(a.status, FileStatus::Modified);
+        assert!(matches!(a.body, DiffBody::Hunks(_)));
+
+        // On the default branch itself the session's start is the base.
+        sh(root, "git stash -q -u && git checkout -q main");
+        let head = git(root, &["rev-parse", "HEAD"]).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        let session = GitChanges.work_base(root, Some(later)).unwrap();
+        assert_eq!(
+            (session.kind, session.sha.as_str()),
+            (BaseKind::Session, head.trim())
+        );
+        let before = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        assert_eq!(
+            GitChanges.work_base(root, Some(before)).unwrap().sha,
+            EMPTY_TREE
         );
     }
 

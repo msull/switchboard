@@ -238,6 +238,60 @@ pub fn link(text: &str, find: impl FnMut(&FileRef) -> Option<PathBuf>) -> Linked
     }
 }
 
+/// Tools whose input names the file they change; Bash counts when the
+/// reader found a redirection target in the command.
+const WRITING_TOOLS: [&str; 5] = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"];
+
+/// The files the conversation's file-writing tool calls name, newest
+/// first, each once, a relative path taken under `cwd`. A call that
+/// failed changed nothing, so it names nothing.
+#[must_use]
+pub fn written_files(conversation: &Conversation, cwd: &std::path::Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for turn in conversation.turns.iter().rev() {
+        for activity in turn.activity.iter().rev() {
+            let Some(detail) = &activity.detail else {
+                continue;
+            };
+            if activity.error || !WRITING_TOOLS.contains(&detail.name.as_str()) {
+                continue;
+            }
+            let Some(path) = detail
+                .path
+                .clone()
+                .or_else(|| file_path_in(&detail.input).map(PathBuf::from))
+            else {
+                continue;
+            };
+            let path = if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            };
+            if !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// The `file_path` of a tool's input. The input is JSON, but capped, so
+/// a scan for the key stands in when it no longer parses.
+fn file_path_in(input: &str) -> Option<String> {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(input)
+        && let Some(p) = v.get("file_path").and_then(|p| p.as_str())
+    {
+        return Some(p.to_owned());
+    }
+    let key = "\"file_path\":";
+    let start = input.find(key)? + key.len();
+    let rest = input[start..].trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +410,72 @@ mod tests {
             prose_texts(&c).collect::<Vec<_>>(),
             vec!["excerpt", "whole", "answer"]
         );
+    }
+
+    fn tool(name: &str, path: Option<&str>, input: &str, error: bool) -> Activity {
+        Activity {
+            kind: ActivityKind::Tool,
+            line: name.into(),
+            at: None,
+            error,
+            detail: Some(crate::ports::transcript::ToolDetail {
+                name: name.into(),
+                input: input.into(),
+                result: String::new(),
+                path: path.map(PathBuf::from),
+            }),
+            text: None,
+        }
+    }
+
+    #[test]
+    fn written_files_lists_newest_first_once_and_skips_failed_calls() {
+        let conversation = Conversation {
+            turns: vec![
+                Turn {
+                    n: 1,
+                    activity: vec![
+                        tool("Write", Some("/p/a.md"), "", false),
+                        tool("Write", Some("docs/b.md"), "", false),
+                    ],
+                    ..Turn::default()
+                },
+                Turn {
+                    n: 2,
+                    activity: vec![
+                        tool("Write", Some("/p/c.rs"), "", false),
+                        tool("Read", Some("/p/d.md"), "", false),
+                        tool("Write", None, "{\"file_path\": \"/p/e.md\"}", false),
+                        tool("Edit", Some("/p/a.md"), "", false),
+                        tool("Edit", Some("/p/f.rs"), "", true),
+                    ],
+                    ..Turn::default()
+                },
+            ],
+            ..Conversation::default()
+        };
+        assert_eq!(
+            written_files(&conversation, std::path::Path::new("/w")),
+            vec![
+                PathBuf::from("/p/a.md"),
+                PathBuf::from("/p/e.md"),
+                PathBuf::from("/p/c.rs"),
+                PathBuf::from("/w/docs/b.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn file_path_is_read_from_json_or_scanned_from_a_cut_input() {
+        assert_eq!(
+            file_path_in("{\"file_path\": \"/p/plan.md\", \"content\": \"x\"}").as_deref(),
+            Some("/p/plan.md")
+        );
+        assert_eq!(
+            file_path_in("{\n  \"file_path\": \"/p/plan.md\",\n  \"content\": \"cut off")
+                .as_deref(),
+            Some("/p/plan.md")
+        );
+        assert_eq!(file_path_in("{\"command\": \"ls\"}"), None);
     }
 }
