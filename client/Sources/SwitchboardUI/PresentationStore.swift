@@ -98,7 +98,7 @@ public struct PresentationState: Codable, Equatable, Sendable {
 /// well depends on where the window stands in the room.
 public struct PaneSettings: Codable, Equatable, Sendable {
     /// Degrees each pane turns in toward the viewer.
-    public var tilt: Double = 30
+    public var tilt: Double = 20
     /// Each side's size against what the window's height gives it.
     public var leading: Double = 1
     public var trailing: Double = 1

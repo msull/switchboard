@@ -85,7 +85,7 @@ final class EditsTests: XCTestCase {
 
         // Reset puts the angle and sizes back and leaves the panes open.
         panes.resetLayout()
-        XCTAssertEqual(panes.tilt, 30)
+        XCTAssertEqual(panes.tilt, 20)
         XCTAssertEqual(panes.trailing, 1)
         XCTAssertTrue(panes.slotOpen)
     }
