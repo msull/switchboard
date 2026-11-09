@@ -134,7 +134,10 @@ public struct FileWindowView: View {
             }
         } else {
             ScrollViewReader { proxy in
-                ScrollView([.vertical, .horizontal]) {
+                // Up and down only: a lazy stack that also scrolls sideways
+                // is never told the window's width and wraps every line
+                // narrow. Lines fill the width and only a longer one wraps.
+                ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         let lines = file.text.split(separator: "\n", omittingEmptySubsequences: false)
                         ForEach(Array(lines.enumerated()), id: \.offset) { i, line in
@@ -146,6 +149,7 @@ public struct FileWindowView: View {
                                 Text(String(line))
                                     .font(.system(size: 14, design: .monospaced))
                                     .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             .padding(.vertical, 1)
                             .background(marked == i + 1 ? Color.accentColor.opacity(0.18) : Color.clear)

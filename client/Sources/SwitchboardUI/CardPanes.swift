@@ -406,7 +406,9 @@ public struct DiffWindowView: View {
         case "empty":
             note(diff.status == "renamed" ? "Renamed, with no line changed." : "No line changed.")
         default:
-            ScrollView([.vertical, .horizontal]) {
+            // Up and down only, as the file window: a lazy stack that also
+            // scrolls sideways wraps every line narrow.
+            ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array((diff.body.hunks ?? []).enumerated()), id: \.offset) { i, hunk in
                         if i > 0 {
@@ -449,6 +451,7 @@ private struct DiffLineRow: View {
                 .foregroundStyle(tint == .clear ? Color.secondary : tint)
             Text(DiffMarks.attributed(line.text, marks: line.marks, tint: tint))
                 .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .font(.system(size: 14, design: .monospaced))
         .padding(.vertical, 1)
