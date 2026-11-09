@@ -95,11 +95,14 @@ public struct CardWindowView: View {
         .onChange(of: paneSettings.filesOpen) { savePanes() }
         .onChange(of: paneSettings.slotOpen) { savePanes() }
         .onChange(of: paneSettings.slot) { savePanes() }
+        .onChange(of: paneSettings.hideUnchanged) { savePanes() }
         .sidePane(.leading, shown: panes && paneSettings.filesOpen, tilt: paneSettings.tilt) {
             if panes && paneSettings.filesOpen, let item {
                 let size = SidePaneLayout.size(
                     width: 360, height: 640, windowHeight: windowHeight, factor: paneSettings.leading)
-                EditedFilesPane(model: model, ref: item.ref, project: item.session.project)
+                EditedFilesPane(
+                    model: model, ref: item.ref, project: item.session.project,
+                    hideUnchanged: $paneSettings.hideUnchanged)
                     .frame(width: size.width, height: size.height)
             }
         }

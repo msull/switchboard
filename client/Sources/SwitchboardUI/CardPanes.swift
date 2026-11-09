@@ -24,6 +24,8 @@ struct EditedFilesPane: View {
     @Bindable var model: BrowserModel
     let ref: SessionRef
     let project: String
+    /// Files that no longer differ from the base are left off the list.
+    @Binding var hideUnchanged: Bool
     @State private var body_: EditedFilesBody?
     @State private var failure: String?
     @Environment(\.openWindow) private var openWindow
@@ -34,20 +36,28 @@ struct EditedFilesPane: View {
                 Label("Files", systemImage: "doc.on.doc").font(.headline)
                 Spacer()
                 if let files = body_?.files, !files.isEmpty {
-                    Text(totals(files)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    Text(totals(Self.shown(files, hideUnchanged: hideUnchanged)))
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
             }
             if let base = body_?.base {
                 Text(base.label).font(.caption).foregroundStyle(.secondary)
             }
+            if let files = body_?.files {
+                unchangedButton(files)
+            }
             if let body_ {
+                let shown = Self.shown(body_.files, hideUnchanged: hideUnchanged)
                 if body_.files.isEmpty {
                     Text("No files written yet.").foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                } else if shown.isEmpty {
+                    Text("Every file is back as it was.").foregroundStyle(.secondary)
                     Spacer(minLength: 0)
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 2) {
-                            ForEach(body_.files) { file in
+                            ForEach(shown) { file in
                                 row(file, base: body_.base)
                             }
                         }
@@ -81,6 +91,33 @@ struct EditedFilesPane: View {
         } catch {
             // Offline or busy: what is held stays, and the next read retries.
             if body_ == nil { failure = "The host did not answer." }
+        }
+    }
+
+    /// An unchanged file is one in the checkout that matches the base; a
+    /// file git could not read is kept, since nothing says it matches.
+    static func unchanged(_ file: EditedFile) -> Bool {
+        file.inRepo && !file.changed
+    }
+
+    /// The list as shown: unchanged files left off when hidden, so one
+    /// that changes again comes back on its own.
+    static func shown(_ files: [EditedFile], hideUnchanged: Bool) -> [EditedFile] {
+        hideUnchanged ? files.filter { !unchanged($0) } : files
+    }
+
+    @ViewBuilder
+    private func unchangedButton(_ files: [EditedFile]) -> some View {
+        let count = files.filter(Self.unchanged).count
+        if count > 0 {
+            Button(hideUnchanged ? "Show \(count) unchanged" : "Clear \(count) unchanged") {
+                hideUnchanged.toggle()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+            .help(hideUnchanged
+                ? "List the files that match the base again"
+                : "Leave off the files that match the base; one that changes again comes back")
         }
     }
 

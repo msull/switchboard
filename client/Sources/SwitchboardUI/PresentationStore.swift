@@ -105,12 +105,27 @@ public struct PaneSettings: Codable, Equatable, Sendable {
     public var filesOpen = false
     public var slotOpen = false
     public var slot: SidePane?
+    /// The files pane leaves off files that match the base.
+    public var hideUnchanged = false
 
     public static let standard = PaneSettings()
     public static let tilts: ClosedRange<Double> = 0...45
     public static let sizes: ClosedRange<Double> = 0.5...1.5
 
     public init() {}
+
+    /// A card saved by an older client lacks what was added since.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let standard = Self.standard
+        tilt = try c.decodeIfPresent(Double.self, forKey: .tilt) ?? standard.tilt
+        leading = try c.decodeIfPresent(Double.self, forKey: .leading) ?? standard.leading
+        trailing = try c.decodeIfPresent(Double.self, forKey: .trailing) ?? standard.trailing
+        filesOpen = try c.decodeIfPresent(Bool.self, forKey: .filesOpen) ?? false
+        slotOpen = try c.decodeIfPresent(Bool.self, forKey: .slotOpen) ?? false
+        slot = try c.decodeIfPresent(SidePane.self, forKey: .slot)
+        hideUnchanged = try c.decodeIfPresent(Bool.self, forKey: .hideUnchanged) ?? false
+    }
 
     /// The angle and sizes as they first were, the panes left as they are.
     public mutating func resetLayout() {

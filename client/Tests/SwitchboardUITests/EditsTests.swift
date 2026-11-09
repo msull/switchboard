@@ -62,6 +62,25 @@ final class EditsTests: XCTestCase {
         XCTAssertEqual(SidePaneLayout.size(width: 400, height: 600, windowHeight: 9000), CGSize(width: 600, height: 900))
     }
 
+    func testClearingUnchangedLeavesOffOnlyFilesThatMatchTheBase() {
+        let files = [
+            EditedFile(path: "same.rs", changed: false),
+            EditedFile(path: "edited.rs", changed: true, added: 2),
+            EditedFile(path: "outside.md", inRepo: false, changed: false),
+        ]
+        XCTAssertEqual(EditedFilesPane.shown(files, hideUnchanged: false).map(\.path), ["same.rs", "edited.rs", "outside.md"])
+        XCTAssertEqual(EditedFilesPane.shown(files, hideUnchanged: true).map(\.path), ["edited.rs", "outside.md"])
+    }
+
+    func testACardSavedBefore0_14_1KeepsItsPanesAndShowsEveryFile() throws {
+        let json = #"{"tilt":30,"leading":1,"trailing":0.8,"filesOpen":true,"slotOpen":false}"#
+        let panes = try JSONDecoder().decode(PaneSettings.self, from: Data(json.utf8))
+        XCTAssertEqual(panes.tilt, 30)
+        XCTAssertEqual(panes.trailing, 0.8)
+        XCTAssertTrue(panes.filesOpen)
+        XCTAssertFalse(panes.hideUnchanged)
+    }
+
     func testACardsPanesAreKeptForItsSessionAndAnOlderStateHasNone() throws {
         let ref = SessionRef(serverID: ServerID("host"), recordID: "rec")
         var panes = PaneSettings()
