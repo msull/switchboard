@@ -53,10 +53,41 @@ final class EditsTests: XCTestCase {
     func testASidePaneScalesWithTheWindowsHeightAndKeepsItsShape() {
         XCTAssertEqual(SidePaneLayout.size(width: 360, height: 640, windowHeight: 900), CGSize(width: 360, height: 640))
         XCTAssertEqual(SidePaneLayout.size(width: 360, height: 640, windowHeight: 450), CGSize(width: 180, height: 320))
+        // The user's size for the side, on top of the window's height.
+        XCTAssertEqual(
+            SidePaneLayout.size(width: 360, height: 640, windowHeight: 450, factor: 1.5), CGSize(width: 270, height: 480))
         // Before the window is measured, and past the limits.
         XCTAssertEqual(SidePaneLayout.size(width: 360, height: 640, windowHeight: 0), CGSize(width: 360, height: 640))
         XCTAssertEqual(SidePaneLayout.size(width: 400, height: 600, windowHeight: 90), CGSize(width: 140, height: 210))
         XCTAssertEqual(SidePaneLayout.size(width: 400, height: 600, windowHeight: 9000), CGSize(width: 600, height: 900))
+    }
+
+    func testACardsPanesAreKeptForItsSessionAndAnOlderStateHasNone() throws {
+        let ref = SessionRef(serverID: ServerID("host"), recordID: "rec")
+        var panes = PaneSettings()
+        panes.tilt = 20
+        panes.trailing = 0.75
+        panes.filesOpen = true
+        panes.slotOpen = true
+        panes.slot = .document(FileRef(serverID: ServerID("host"), projectID: "p", path: "notes.md"))
+        var state = PresentationState()
+        state.setPanes(panes, for: ref)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let back = try decoder.decode(PresentationState.self, from: encoder.encode(state))
+        XCTAssertEqual(back.panes(for: ref), panes)
+        XCTAssertNil(back.panes(for: SessionRef(serverID: ServerID("host"), recordID: "other")))
+
+        let old = try decoder.decode(PresentationState.self, from: Data(#"{"browse":"grid"}"#.utf8))
+        XCTAssertTrue(old.panes.isEmpty)
+
+        // Reset puts the angle and sizes back and leaves the panes open.
+        panes.resetLayout()
+        XCTAssertEqual(panes.tilt, 30)
+        XCTAssertEqual(panes.trailing, 1)
+        XCTAssertTrue(panes.slotOpen)
     }
 
     func testMarksOffACharacterBoundaryOrPastTheEndAreLeftUnmarked() {

@@ -186,7 +186,10 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   or the app relaunched, shows the same tiles in the same order; the
   side panes of a card window of its own (`CardPanes.swift`, never on
   a board tile): ornaments on its left and right edges that move with
-  it, opened from two buttons in its header and kept as window state;
+  it, opened from two buttons in its header, turned in toward the
+  viewer, scaled with the window's height, and kept per session in the
+  presentation state (which are open, what the slot holds, and the
+  angle and each side's size from the header's "Card settings…");
   on the left `EditedFilesPane`, the files the session wrote with
   their lines added and removed against the branch point (the host's
   `session.files`, read every few seconds while open), a tap opening

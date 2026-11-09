@@ -15,13 +15,12 @@ public struct CardWindowView: View {
     @State private var screenScale = ScreenScale.initial
     @Environment(\.openWindow) private var openWindow
     @Environment(\.scenePhase) private var scenePhase
-    /// The side panes, window state: the files on the left, the slot on
-    /// the right and what it holds.
-    @State private var filesOpen = false
-    @State private var slotOpen = false
-    @State private var slot: SidePane?
     /// The window's height, which the side panes scale with.
     @State private var windowHeight: CGFloat = 0
+    /// This card's side panes, kept for its session: saved as a pane
+    /// opens, closes or changes, and when a slider is let go.
+    @State private var paneSettings = PaneSettings.standard
+    @State private var settingsOpen = false
 
     /// In a board tile rather than a window of its own: the window
     /// registry and the launch log are left alone, and the header
@@ -79,6 +78,7 @@ public struct CardWindowView: View {
         .onAppear {
             mode = model.mode(for: request.id)
             guard !embedded else { return }
+            paneSettings = model.panes(for: request.ref)
             LaunchLog.note("card \(request.id) appeared")
             model.windowAppeared(request)
         }
@@ -92,21 +92,31 @@ public struct CardWindowView: View {
         }
         .onChange(of: mode) { _, new in model.setMode(new, for: request.id) }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { windowHeight = $0 }
-        .sidePane(.leading, shown: panes && filesOpen) {
-            if panes && filesOpen, let item {
-                let size = SidePaneLayout.size(width: 360, height: 640, windowHeight: windowHeight)
+        .onChange(of: paneSettings.filesOpen) { savePanes() }
+        .onChange(of: paneSettings.slotOpen) { savePanes() }
+        .onChange(of: paneSettings.slot) { savePanes() }
+        .sidePane(.leading, shown: panes && paneSettings.filesOpen, tilt: paneSettings.tilt) {
+            if panes && paneSettings.filesOpen, let item {
+                let size = SidePaneLayout.size(
+                    width: 360, height: 640, windowHeight: windowHeight, factor: paneSettings.leading)
                 EditedFilesPane(model: model, ref: item.ref, project: item.session.project)
                     .frame(width: size.width, height: size.height)
             }
         }
-        .sidePane(.trailing, shown: panes && slotOpen) {
-            if panes && slotOpen, let item {
+        .sidePane(.trailing, shown: panes && paneSettings.slotOpen, tilt: paneSettings.tilt) {
+            if panes && paneSettings.slotOpen, let item {
                 let size = SidePaneLayout.size(
-                    width: slot == nil ? 380 : 540, height: slot == nil ? 560 : 860, windowHeight: windowHeight)
-                SideSlotPane(model: model, owner: item.ref, project: item.session.project, content: $slot)
+                    width: paneSettings.slot == nil ? 380 : 540, height: paneSettings.slot == nil ? 560 : 860, windowHeight: windowHeight,
+                    factor: paneSettings.trailing)
+                SideSlotPane(model: model, owner: item.ref, project: item.session.project, content: $paneSettings.slot)
                     .frame(width: size.width, height: size.height)
             }
         }
+    }
+
+    private func savePanes() {
+        guard !embedded else { return }
+        model.setPanes(paneSettings, for: request.ref)
     }
 
     /// Side panes go with a card window of its own, never a board tile.
@@ -144,49 +154,50 @@ public struct CardWindowView: View {
             if embedded {
                 EmptyView()
             } else {
+            // The rest, used less, behind one button so the row stays
+            // short on a narrow card; first in the row, so what it opens
+            // stays clear of the right pane, which turns in front of
+            // the window's right edge.
+            Menu {
+                Button {
+                    openWindow(id: PromptWindow.id, value: PromptWindow.value)
+                } label: {
+                    Label("Prompt window", systemImage: "text.alignleft")
+                }
+                Button {
+                    LaunchLog.note("card \(request.id) sessions button opens main")
+                    openWindow(id: MainWindow.id, value: MainWindow.value)
+                } label: {
+                    Label("Sessions", systemImage: "rectangle.grid.2x2")
+                }
+                Divider()
+                Button {
+                    settingsOpen = true
+                } label: {
+                    Label("Card settings…", systemImage: "slider.horizontal.3")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.circle)
+            .controlSize(.mini)
+            .accessibilityLabel("More")
+            // A sheet, centred on the card, rather than a popover at the
+            // button, which the right pane covered.
+            .sheet(isPresented: $settingsOpen) {
+                CardSettings(settings: $paneSettings, files: item?.session.kind == .claude, save: savePanes) {
+                    settingsOpen = false
+                }
+            }
             PinToBoardMenu(model: model, item: .session(request.ref), name: item?.session.name ?? "Board")
             if item?.session.kind == .claude {
-                paneButton("sidebar.left", open: $filesOpen, label: "Files",
+                paneButton("sidebar.left", open: $paneSettings.filesOpen, label: "Files",
                            help: "The files this session edited, beside the card")
             }
-            paneButton("sidebar.right", open: $slotOpen, label: "Side pane",
+            paneButton("sidebar.right", open: $paneSettings.slotOpen, label: "Side pane",
                        help: "A document or another session, beside the card")
-            // Icon only, and small: a tall narrow card has no room for
-            // a word here.
-            Button {
-                openWindow(id: PromptWindow.id, value: PromptWindow.value)
-            } label: {
-                Image(systemName: "text.alignleft")
-                    .font(.caption)
-            }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.circle)
-            .controlSize(.mini)
-            .accessibilityLabel("Prompt window")
-            .help("The prompt window: the whole draft of the session being worked on")
-            Button {
-                openWindow(id: KeysWindow.id, value: KeysWindow.value)
-            } label: {
-                Image(systemName: "keyboard")
-                    .font(.caption)
-            }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.circle)
-            .controlSize(.mini)
-            .accessibilityLabel("Keys panel")
-            .help("The keys panel: punctuation, breaks and caret moves for the prompt, by touch")
-            Button {
-                LaunchLog.note("card \(request.id) sessions button opens main")
-                openWindow(id: MainWindow.id, value: MainWindow.value)
-            } label: {
-                Image(systemName: "rectangle.grid.2x2")
-                    .font(.caption)
-            }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.circle)
-            .controlSize(.mini)
-            .accessibilityLabel("Sessions")
-            .help("The main window, with every session")
             }
         }
     }
@@ -319,6 +330,7 @@ struct ControlBar: View {
     @State private var busy = false
     @State private var note: String?
     @State private var confirmResume = false
+    @Environment(\.openWindow) private var openWindow
     /// This window, to the microphone.
     @State private var window = UUID()
     private var dictation: Dictation { model.dictation }
@@ -364,8 +376,21 @@ struct ControlBar: View {
                 }
                 }
                 // The editor's tools sit over the field, at its left,
-                // away from Send so a tap at one is not the other.
-                if hosted { DraftTools(draft: hostDraft, enabled: canControl, apply: tool) }
+                // away from Send so a tap at one is not the other; the
+                // keys panel, used often, at the row's right.
+                HStack(spacing: 2) {
+                    if hosted { DraftTools(draft: hostDraft, enabled: canControl, apply: tool) }
+                    Spacer(minLength: 0)
+                    Button {
+                        openWindow(id: KeysWindow.id, value: KeysWindow.value)
+                    } label: {
+                        Image(systemName: "keyboard").frame(width: 28, height: 22)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Keys panel")
+                    .help("The keys panel: punctuation, breaks and caret moves for the prompt, by touch")
+                }
                 HStack(spacing: 8) {
                     HStack(alignment: .bottom, spacing: 6) {
                         Button {

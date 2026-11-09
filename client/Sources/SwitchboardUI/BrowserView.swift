@@ -577,6 +577,16 @@ public final class BrowserModel {
         save()
     }
 
+    /// A session card's side panes.
+    public func panes(for session: SessionRef) -> PaneSettings {
+        presentation.panes(for: session) ?? .standard
+    }
+
+    public func setPanes(_ panes: PaneSettings, for session: SessionRef) {
+        presentation.setPanes(panes, for: session)
+        save()
+    }
+
     /// Where a card window stands in its conversation, if it has been
     /// there before.
     public func place(for window: UUID) -> ConversationPlace? {

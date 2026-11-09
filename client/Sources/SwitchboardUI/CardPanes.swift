@@ -5,7 +5,7 @@ import SwitchboardTransport
 
 /// What a card window's right-hand pane holds: one document, or a
 /// second session worked beside the first.
-public enum SidePane: Hashable, Sendable {
+public enum SidePane: Hashable, Codable, Sendable {
     case document(FileRef)
     case session(SessionRef)
 }
@@ -452,16 +452,16 @@ public enum DiffMarks {
 
 /// How the side panes sit beside a card window.
 enum SidePaneLayout {
-    /// Degrees each pane turns in toward the viewer.
-    static let tilt: Double = 30
     /// The card window's default height, which the panes' sizes are drawn for.
     static let designHeight: CGFloat = 900
 
     /// A pane's size for a window `height` tall: its height follows the
     /// window's and its width follows its height, so it keeps its shape.
-    /// Held between a third and one and a half of its drawn size.
-    static func size(width: CGFloat, height: CGFloat, windowHeight: CGFloat) -> CGSize {
-        let scale = windowHeight > 0 ? min(max(windowHeight / designHeight, 0.35), 1.5) : 1
+    /// Held between a third and one and a half of its drawn size, then
+    /// times the user's `factor` for that side.
+    static func size(width: CGFloat, height: CGFloat, windowHeight: CGFloat, factor: Double = 1) -> CGSize {
+        let follow = windowHeight > 0 ? min(max(windowHeight / designHeight, 0.35), 1.5) : 1
+        let scale = follow * CGFloat(factor)
         return CGSize(width: (width * scale).rounded(), height: (height * scale).rounded())
     }
 }
@@ -472,7 +472,9 @@ extension View {
     /// edge next to the window. Only the headset has ornaments; elsewhere
     /// there is no pane.
     @ViewBuilder
-    func sidePane(_ edge: HorizontalEdge, shown: Bool, @ViewBuilder content: () -> some View) -> some View {
+    func sidePane(
+        _ edge: HorizontalEdge, shown: Bool, tilt: Double, @ViewBuilder content: () -> some View
+    ) -> some View {
         #if os(visionOS)
         let inner: UnitPoint3D = edge == .leading ? .trailing : .leading
         ornament(
@@ -489,7 +491,7 @@ extension View {
                 // the left pane turns positive and the right one negative.
                 .rotation3DEffect(
                     Rotation3D(
-                        angle: .degrees(edge == .leading ? SidePaneLayout.tilt : -SidePaneLayout.tilt),
+                        angle: .degrees(edge == .leading ? tilt : -tilt),
                         axis: .y),
                     anchor: inner)
                 .padding(edge == .leading ? .trailing : .leading, 12)
@@ -497,5 +499,54 @@ extension View {
         #else
         self
         #endif
+    }
+}
+
+/// A card window's own settings: how its side panes sit. Sliders move
+/// the panes live; `save` runs when one is let go.
+struct CardSettings: View {
+    @Binding var settings: PaneSettings
+    /// The session has a files pane (Claude sessions do).
+    let files: Bool
+    let save: () -> Void
+    let done: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Card settings").font(.headline)
+                Spacer()
+                Button("Done", action: done)
+                    .controlSize(.small)
+            }
+            row("Pane angle", value: $settings.tilt, in: PaneSettings.tilts,
+                shown: "\(Int(settings.tilt.rounded()))°")
+            if files {
+                row("Files pane size", value: $settings.leading, in: PaneSettings.sizes,
+                    shown: "\(Int((settings.leading * 100).rounded()))%")
+            }
+            row("Right pane size", value: $settings.trailing, in: PaneSettings.sizes,
+                shown: "\(Int((settings.trailing * 100).rounded()))%")
+            Button("Reset") {
+                settings.resetLayout()
+                save()
+            }
+            .controlSize(.small)
+        }
+        .padding()
+        .frame(width: 340)
+    }
+
+    private func row(_ title: String, value: Binding<Double>, in range: ClosedRange<Double>, shown: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title).font(.callout)
+                Spacer()
+                Text(shown).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            Slider(value: value, in: range) { editing in
+                if !editing { save() }
+            }
+        }
     }
 }
