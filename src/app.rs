@@ -3853,10 +3853,14 @@ impl SwitchboardApp {
                 true,
             );
         }
+        let queued = prompt_box::queued_sends(&self.ui_state.prompt_boxes);
         let editor =
             prompt_box::ensure_editor(&self.core, &self.services, &mut self.ui_state, &record);
         prompt_box::apply_dictation(editor, recognizer, &events);
-        self.draft_reply(&record)
+        let mut draft = prompt_box::draft_view(editor);
+        draft.sent = prompt_box::queued_sends(&self.ui_state.prompt_boxes) > queued;
+        let draft = serde_json::to_value(draft).unwrap_or_default();
+        self.envelope(200, &serde_json::json!({ "draft": draft }), true)
     }
 
     /// Every draft a device could hold, fingerprinted against the

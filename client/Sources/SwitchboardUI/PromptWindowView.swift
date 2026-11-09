@@ -13,7 +13,10 @@ import SwitchboardProtocol
 public struct PromptWindowView: View {
     @Bindable var model: BrowserModel
     @Environment(\.openWindow) private var openWindow
-    @State private var dictation = Dictation()
+    /// This window, to the microphone.
+    @State private var window = UUID()
+    private var dictation: Dictation { model.dictation }
+    private var listening: Bool { ref.map(model.isDictating) ?? false }
     @State private var scale = ScreenScale.initial
     @State private var busy = false
     @State private var note: String?
@@ -74,16 +77,17 @@ public struct PromptWindowView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             HStack(spacing: 10) {
                 Button {
-                    Task { await dictation.toggle() }
+                    guard let ref else { return }
+                    Task { await model.toggleDictation(ref, from: window) }
                 } label: {
-                    Image(systemName: dictation.listening ? "waveform" : "mic.fill")
-                        .symbolEffect(.variableColor.iterative, isActive: dictation.listening)
+                    Image(systemName: listening ? "waveform" : "mic.fill")
+                        .symbolEffect(.variableColor.iterative, isActive: listening)
                         .frame(width: 28, height: 22)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(dictation.listening ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                .foregroundStyle(listening ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                 .disabled(!canControl)
-                .accessibilityLabel(dictation.listening ? "Stop dictation" : "Dictate")
+                .accessibilityLabel(listening ? "Stop dictation" : "Dictate")
                 DraftTools(draft: draft, enabled: canControl, apply: tool)
                 Spacer(minLength: 0)
                 Button(action: send) {
@@ -112,14 +116,10 @@ public struct PromptWindowView: View {
         }
         .onAppear {
             LaunchLog.note("prompt appeared")
-            dictation.onEvents = { recognizer, events in
-                guard let ref = await model.activeInput, await model.hasDraft(ref) else { return }
-                _ = await model.dictate(ref, recognizer: recognizer, events: events)
-            }
         }
         .onDisappear {
             LaunchLog.note("prompt disappeared")
-            dictation.stop()
+            model.dictationWindowClosed(window)
             if let held {
                 Task { await model.releaseDraft(held) }
             }
@@ -182,7 +182,7 @@ public struct PromptWindowView: View {
 
     private func send() {
         guard let ref, canControl else { return }
-        dictation.stop()
+        model.stopDictation(ref)
         busy = true
         note = nil
         Task {

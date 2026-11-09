@@ -272,7 +272,10 @@ struct ControlBar: View {
     @State private var busy = false
     @State private var note: String?
     @State private var confirmResume = false
-    @State private var dictation = Dictation()
+    /// This window, to the microphone.
+    @State private var window = UUID()
+    private var dictation: Dictation { model.dictation }
+    private var listening: Bool { model.isDictating(ref) }
     /// The field's text when dictation started, on a host without a
     /// draft: what is heard goes after it, revised in place.
     @State private var typedBeforeDictation = ""
@@ -319,17 +322,17 @@ struct ControlBar: View {
                 HStack(spacing: 8) {
                     HStack(alignment: .bottom, spacing: 6) {
                         Button {
-                            if !dictation.listening { typedBeforeDictation = field.text }
-                            Task { await dictation.toggle() }
+                            if !listening { typedBeforeDictation = field.text }
+                            Task { await model.toggleDictation(ref, from: window) }
                         } label: {
-                            Image(systemName: dictation.listening ? "waveform" : "mic.fill")
-                                .symbolEffect(.variableColor.iterative, isActive: dictation.listening)
+                            Image(systemName: listening ? "waveform" : "mic.fill")
+                                .symbolEffect(.variableColor.iterative, isActive: listening)
                                 .frame(width: 22, height: 22)
                         }
                         .buttonStyle(.plain)
-                        .foregroundStyle(dictation.listening ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                        .foregroundStyle(listening ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                         .disabled(!canControl)
-                        .accessibilityLabel(dictation.listening ? "Stop dictation" : "Dictate")
+                        .accessibilityLabel(listening ? "Stop dictation" : "Dictate")
                         TextField("Message", text: $field.text, selection: $field.selection, axis: .vertical)
                             .lineLimit(2...5)
                             .textFieldStyle(.plain)
@@ -340,7 +343,7 @@ struct ControlBar: View {
                     .padding(.vertical, 8)
                     .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
                     .onChange(of: dictation.heard) { _, heard in
-                        guard !hosted else { return }
+                        guard !hosted, model.dictating == ref else { return }
                         field.set(Dictation.joined(typedBeforeDictation, heard))
                     }
                     .onChange(of: field.text) { _, text in
@@ -350,7 +353,7 @@ struct ControlBar: View {
                         if let trouble { note = trouble }
                     }
                     .onChange(of: dictation.problem) { _, problem in
-                        if let problem { note = problem }
+                        if let problem, model.dictating == ref { note = problem }
                     }
                     Button(action: send) {
                         Image(systemName: "paperplane.fill")
@@ -367,14 +370,8 @@ struct ControlBar: View {
             guard hosted else { return }
             await model.holdDraft(ref)
         }
-        .onAppear {
-            dictation.onEvents = { recognizer, events in
-                guard await model.hasDraft(ref) else { return }
-                _ = await model.dictate(ref, recognizer: recognizer, events: events)
-            }
-        }
         .onDisappear {
-            dictation.stop()
+            model.dictationWindowClosed(window)
             if hosted { Task { await model.releaseDraft(ref) } }
         }
     }
@@ -384,7 +381,7 @@ struct ControlBar: View {
     /// The live utterance goes on revising when it is still whole at
     /// the end.
     private func localEdited(_ draft: String) {
-        guard dictation.listening, draft != Dictation.joined(typedBeforeDictation, dictation.heard)
+        guard listening, draft != Dictation.joined(typedBeforeDictation, dictation.heard)
         else { return }
         let live = dictation.live.trimmingCharacters(in: .whitespaces)
         if !live.isEmpty, draft.hasSuffix(live) {
@@ -408,15 +405,13 @@ struct ControlBar: View {
     }
 
     private func send() {
-        dictation.stop()
+        model.stopDictation(ref)
         guard !empty, canControl else { return }
         if hosted {
             busy = true
             note = nil
             Task {
-                await dictation.settle()
-                await model.flushField(ref)
-                let outcome = await model.sendDraft(ref)
+                let outcome = await model.sendField(ref)
                 note = outcome.note
                 busy = false
             }
@@ -681,6 +676,7 @@ struct ConversationView: View {
                     }
                     .onScrollTargetVisibilityChange(idType: Int.self, threshold: 0.01) { ids in
                         top = ids.filter { $0 != Self.earlierID }.min()
+                        if ids.isEmpty { note("no rows on screen atEnd=\(atEnd)") }
                     }
                     // Following is a mode, not a position: the view is held
                     // at the end and cannot be dragged off it, so a row
@@ -703,7 +699,10 @@ struct ConversationView: View {
                             proxy.scrollTo(Self.endID, anchor: .bottom)
                         }
                     }
-                    .onChange(of: conversation) { _, _ in
+                    .onChange(of: conversation) { _, new in
+                        note(
+                            "page held=\(new.firstHeld ?? 0)-\(new.lastHeld ?? 0) total=\(new.total) "
+                                + "top=\(top.map(String.init) ?? "none") atEnd=\(atEnd)")
                         if following { proxy.scrollTo(Self.endID, anchor: .bottom) }
                     }
                     .onScrollPhaseChange { _, phase in

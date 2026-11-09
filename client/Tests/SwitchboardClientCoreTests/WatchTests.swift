@@ -169,6 +169,45 @@ final class WatchTests: XCTestCase {
         XCTAssertEqual(fake.calls.filter { $0 == "unwatch:r1" }.count, 1)
     }
 
+    /// A conversation the host had none of comes back on the next change
+    /// without the window having to read it again.
+    func testAConversationClearedByARefusalReturnsOnTheNextChange() async throws {
+        let (_, fake, connection) = try await host()
+        await connection.watch(.conversation(session: "r1"))
+        await connection.readConversation("r1", from: nil, limit: 20)
+        let none = await connection.conversations["r1"]
+        XCTAssertNil(none, "the host has none yet")
+        fake.set {
+            $0.revision = 9
+            $0.conversations["r1"] = ConversationBody(
+                resumeID: "h1", total: 1, from: 1, next: nil,
+                turns: [TurnView(n: 1, user: "ping", finalText: "")])
+        }
+        fake.emit(.changed, ResourceRef(kind: "conversation", id: "r1"))
+        await settle(connection) { await $0.conversations["r1"] != nil }
+        let turns = await connection.conversations["r1"]?.turns.map(\.n)
+        XCTAssertEqual(turns, [1])
+    }
+
+    /// A read that failed says nothing of what the conversation holds,
+    /// so what is on screen stays until a read succeeds.
+    func testAFailedConversationReadKeepsWhatIsHeld() async throws {
+        let (_, fake, connection) = try await host()
+        fake.set {
+            $0.conversations["r1"] = ConversationBody(
+                resumeID: "h1", total: 1, from: 1, next: nil,
+                turns: [TurnView(n: 1, user: "ping", finalText: "pong")])
+        }
+        await connection.watch(.conversation(session: "r1"))
+        await connection.readConversation("r1", from: nil, limit: 20)
+        fake.set { $0.failure = .refused(status: 400, code: "failed", message: "read the transcript") }
+        await connection.readConversation("r1", from: 1, limit: nil)
+        let turns = await connection.conversations["r1"]?.turns.map(\.n)
+        XCTAssertEqual(turns, [1], "the failed read took the conversation away")
+        let state = await connection.state
+        XCTAssertEqual(state, .connected)
+    }
+
     func testAChangeIsFollowedToTheEndAcrossSeveralPages() async throws {
         let (_, fake, connection) = try await host()
         fake.set {

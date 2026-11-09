@@ -68,6 +68,13 @@ public final class BrowserModel {
     /// The session whose input is active: the last one a control bar
     /// typed or dictated into, which the prompt window follows.
     public private(set) var activeInput: SessionRef?
+    /// The one microphone, whichever window's button started it, so any
+    /// window showing a session can stop what it hears.
+    public let dictation = Dictation()
+    /// The session the microphone feeds, and the window that started it,
+    /// whose closing stops it.
+    public private(set) var dictating: SessionRef?
+    private var dictationStarter: UUID?
     /// How many turns a conversation page asks for.
     public static let conversationPage = 20
     /// Every session seen from a host, and the ones a connected host
@@ -370,7 +377,53 @@ public final class BrowserModel {
         inputActivated(ref)
         let outcome = await manager.dictate(ref, recognizer: recognizer, events: events)
         took(ref, outcome)
+        // A spoken send ends the run, as the Send button does.
+        if case .applied(let draft) = outcome, draft.sent == true {
+            stopDictation(ref)
+        }
         return outcome
+    }
+
+    /// The microphone is feeding `ref`.
+    public func isDictating(_ ref: SessionRef) -> Bool {
+        dictation.listening && dictating == ref
+    }
+
+    /// A microphone button pressed in window `starter`: stops `ref`'s run,
+    /// or starts one, ending a run on any other session first.
+    public func toggleDictation(_ ref: SessionRef, from starter: UUID) async {
+        if isDictating(ref) {
+            dictation.stop()
+            return
+        }
+        dictation.stop()
+        dictating = ref
+        dictationStarter = starter
+        inputActivated(ref)
+        dictation.onEvents = { [weak self] recognizer, events in
+            guard let self, self.hasDraft(ref) else { return }
+            _ = await self.dictate(ref, recognizer: recognizer, events: events)
+        }
+        await dictation.start()
+    }
+
+    /// Ends `ref`'s run; another session's goes on.
+    public func stopDictation(_ ref: SessionRef) {
+        if dictating == ref { dictation.stop() }
+    }
+
+    /// The window that started the run closed.
+    public func dictationWindowClosed(_ starter: UUID) {
+        if dictationStarter == starter { dictation.stop() }
+    }
+
+    /// The field sent as the host's draft: listening ends and what was
+    /// heard and typed reaches the host first.
+    public func sendField(_ ref: SessionRef) async -> DraftOutcome {
+        stopDictation(ref)
+        await dictation.settle()
+        await flushField(ref)
+        return await sendDraft(ref)
     }
 
     /// The device's scope on a session's host, which says whether the

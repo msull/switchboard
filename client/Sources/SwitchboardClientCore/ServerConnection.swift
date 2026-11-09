@@ -563,6 +563,12 @@ public actor ServerConnection {
             if lastResponses[session] != nil || conversations[session] == nil {
                 await readLastResponse(session)
             }
+            // None held (the host had none, or the read was refused):
+            // the tail, or a window stays empty until it is reopened.
+            guard conversations[session] != nil else {
+                await readConversation(session, from: nil, limit: nil)
+                return
+            }
             // From the last turn held to the end: a page holds only
             // so many turns, and more than that may have arrived.
             var from = conversations[session]?.lastHeld
@@ -902,6 +908,10 @@ public actor ServerConnection {
             }
             changed()
             return reply.body.next
+        } catch RemoteError.refused(_, "failed", _) {
+            // The read failed, which says nothing of the conversation:
+            // what is on screen stays, and the next change reads again.
+            return nil
         } catch RemoteError.refused(let status, _, _) where status == 400 || status == 404 {
             conversations[session] = nil
             changed()

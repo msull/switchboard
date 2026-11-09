@@ -1103,6 +1103,86 @@ fn spoken_send_while_hidden(drawn_before: bool) {
     assert_eq!(written[0].1, "Fix the test.");
 }
 
+/// One chunk spoken from a device while the window is hidden, sent
+/// `times` over as a device resending a batch would: what stays in the
+/// draft and what reached the pane.
+fn spoken_chunk(text: &str, times: usize) -> (String, Vec<String>) {
+    let mut port = port();
+    let (_, _, session) = seed(&mut port, "");
+    running(&mut port, &session, "\u{276f} ");
+    let token = pair(&mut port, "ABCD2345", Scope::Control, "Vision Pro");
+    let t = Some(token.as_str());
+    let (status, reply) = get(&mut port, &format!("/api/v1/sessions/{session}/draft"), t);
+    assert_eq!(status, 200, "{reply}");
+    let mut settings = port.app.core().settings().voice.clone();
+    settings.trigger = "Computer".into();
+    port.app.dispatch(AppAction::SetVoiceSettings(settings));
+    let body = serde_json::json!({"session": 7, "events": [
+        {"sequence": 1, "kind": "started"},
+        {"sequence": 2, "kind": "voice_started", "utterance": 1},
+        {"sequence": 3, "kind": "final", "utterance": 1, "text": text},
+    ]})
+    .to_string();
+    let path = format!("/api/v1/sessions/{session}/dictation");
+    let mut draft = String::new();
+    for sent in (0..times).map(|n| n == 0) {
+        let (status, reply) = call(&mut port, "POST", &path, t, &body);
+        assert_eq!(status, 200, "{reply}");
+        reply["body"]["draft"]["text"]
+            .as_str()
+            .unwrap()
+            .clone_into(&mut draft);
+        // The device stops listening on this, as its Send button does; a
+        // draft left alone says nothing, nor does a batch resent.
+        let says = reply["body"]["draft"].get("sent").is_some();
+        assert_eq!(says, sent && draft.is_empty(), "{reply}");
+    }
+    let ctx = egui::Context::default();
+    let mut frame = eframe::Frame::_new_kittest();
+    eframe::App::logic(&mut port.app, &ctx, &mut frame);
+    eframe::App::logic(&mut port.app, &ctx, &mut frame);
+    let written = port.host.state().written.clone();
+    (draft, written.into_iter().map(|w| w.1).collect())
+}
+
+/// The recognizer decides where a chunk ends, so the phrase can land on
+/// the end of the sentence before it.
+#[test]
+fn a_chunk_closing_on_the_spoken_send_sends_its_words_without_the_phrase() {
+    for spoken in [
+        "Fix the test computer send",
+        "Fix the test computer. Send.",
+        "Fix the test, Computer, send.",
+    ] {
+        let (draft, written) = spoken_chunk(spoken, 1);
+        assert_eq!(draft, "", "{spoken}");
+        assert_eq!(written, ["Fix the test"], "{spoken}");
+    }
+}
+
+#[test]
+fn a_resent_chunk_closing_on_the_spoken_send_sends_once() {
+    let (_, written) = spoken_chunk("Fix the test computer send", 2);
+    assert_eq!(written, ["Fix the test"]);
+}
+
+/// Only the very last words, and only the send: anything else with the
+/// trigger inside a chunk stays what was said.
+#[test]
+fn the_trigger_inside_a_chunk_stays_dictation() {
+    for spoken in [
+        "Say computer send to me later",
+        "The computer send button is broken",
+        "Fix the test computer delete",
+        "Fix the test computer please send",
+        "Send it to the computer",
+    ] {
+        let (draft, written) = spoken_chunk(spoken, 1);
+        assert_eq!(draft, spoken);
+        assert!(written.is_empty(), "{spoken}: {written:?}");
+    }
+}
+
 fn project_with_root(port: &mut Port, space: &str, root: &std::path::Path) -> String {
     let reply = control(
         port,

@@ -705,6 +705,17 @@ pub struct DraftView {
     pub ai: bool,
     /// An AI pass is running.
     pub busy: bool,
+    /// On the reply to a dictation batch only: the batch's spoken send
+    /// went, so the device can stop listening as its Send button does.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sent: bool,
+}
+
+/// How many prompts wait to reach their panes, to tell whether something
+/// applied to an editor sent one.
+#[must_use]
+pub fn queued_sends(boxes: &PromptBoxes) -> usize {
+    lock_recover(&boxes.outbox, "outbox (count)").len()
 }
 
 #[must_use]
@@ -730,6 +741,7 @@ pub fn draft_view(editor: &Editor) -> DraftView {
         can_redo: doc.can_redo(),
         ai: editor.ai_available(),
         busy: core.ai_busy(),
+        sent: false,
     }
 }
 
@@ -815,9 +827,18 @@ pub struct DictationEvent {
 /// provisional text and commit on their final, a stop closes it.
 /// Unknown kinds are skipped, so an older host tolerates a newer
 /// device.
+///
+/// A final that closes on the spoken send becomes two finals, the words
+/// and then the command alone, so the editor's own parser runs the
+/// command once. The second needs a sequence of its own between the
+/// device's numbers, which is why every sequence here is doubled, and an
+/// utterance the device never uses. A resent batch is still refused as a
+/// duplicate, so it cannot send twice.
 pub fn apply_dictation(editor: &mut Editor, session: u64, events: &[DictationEvent]) {
     use promptbox::core::AppAction as A;
     use promptbox::ports::speech::{SpeechEvent, SpeechEventKind};
+    const SPOKEN_SEND_UTTERANCE: u64 = 1 << 63;
+    let trigger = editor.settings().trigger.clone();
     let mut actions = Vec::with_capacity(events.len());
     for event in events {
         let kind = match event.kind.as_str() {
@@ -841,19 +862,75 @@ pub fn apply_dictation(editor: &mut Editor, session: u64, events: &[DictationEve
                 revision: event.revision,
                 text: event.text.clone(),
             },
-            "final" => SpeechEventKind::Final {
-                utterance: event.utterance,
-                text: event.text.clone(),
-                confidence: None,
-            },
+            "final" => {
+                let (words, phrase) = split_trailing_send(&event.text, &trigger)
+                    .map_or((event.text.as_str(), None), |(w, p)| (w, Some(p)));
+                if let Some(phrase) = phrase {
+                    let final_of = |sequence, utterance, text: &str| {
+                        A::SpeechEventReceived(SpeechEvent {
+                            session,
+                            sequence,
+                            audio_range: 0..0,
+                            kind: SpeechEventKind::Final {
+                                utterance,
+                                text: text.to_owned(),
+                                confidence: None,
+                            },
+                        })
+                    };
+                    let sequence = event.sequence.saturating_mul(2);
+                    actions.push(final_of(sequence, event.utterance, words));
+                    actions.push(final_of(
+                        sequence.saturating_add(1),
+                        event.utterance | SPOKEN_SEND_UTTERANCE,
+                        phrase,
+                    ));
+                    continue;
+                }
+                SpeechEventKind::Final {
+                    utterance: event.utterance,
+                    text: event.text.clone(),
+                    confidence: None,
+                }
+            }
             _ => continue,
         };
         actions.push(A::SpeechEventReceived(SpeechEvent {
             session,
-            sequence: event.sequence,
+            sequence: event.sequence.saturating_mul(2),
             audio_range: 0..0,
             kind,
         }));
     }
     editor.apply(actions);
+}
+
+/// Splits a chunk that has words and then closes on the trigger and
+/// "send" into those words and the phrase. The recognizer decides where a
+/// chunk ends and a pause does not reliably end one, so the parser's rule
+/// that a trigger must come first would leave this phrase as text. Only
+/// the send, and only as the very last words: the trigger anywhere else
+/// is still dictation. The parser decides what counts as the trigger; the
+/// last word has to be "send" exactly, since a send cannot be taken back.
+fn split_trailing_send<'a>(text: &'a str, trigger: &str) -> Option<(&'a str, &'a str)> {
+    use promptbox::core::commands::{Command, extract};
+    let mut start = text.len();
+    // A trigger can come through as two words, so up to three in all.
+    for words in 1..=3 {
+        start = text[..start]
+            .trim_end()
+            .trim_end_matches(|c: char| !c.is_whitespace())
+            .len();
+        let tail = &text[start..];
+        if words == 1 {
+            let last = tail.trim().trim_matches(|c: char| !c.is_alphanumeric());
+            if !last.eq_ignore_ascii_case("send") {
+                return None;
+            }
+        } else if extract(tail, trigger).commands == [Command::Send] {
+            let before = text[..start].trim_end().trim_end_matches(',');
+            return (!before.is_empty()).then_some((before, tail));
+        }
+    }
+    None
 }
