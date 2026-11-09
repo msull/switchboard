@@ -13,7 +13,9 @@ use crate::core::{
     AgentKind, ProjectId, RECORD_ID_ENV, RecordId, ResumeHandle, Settings, Views, Workspace,
 };
 use crate::ports::agent::{AgentLaunch, AgentLauncher};
-use crate::ports::changes::{BranchChanges, Changes, FileDiff};
+use crate::ports::changes::{
+    BaseKind, BranchChanges, Changes, FileDiff, FileStat, WorkBase, WorkingChanges,
+};
 use crate::ports::control::{OpLine, Operations};
 use crate::ports::controller::{Controller, ControllerEvent};
 use crate::ports::dispatch::{
@@ -46,6 +48,7 @@ pub fn services() -> Services {
         project_config: Box::new(FakeProjectConfig),
         round_files: Box::new(FakeRoundFiles),
         changes: Arc::new(FakeChanges::default()),
+        working: Arc::new(FakeWorking::default()),
         artifacts: Box::new(FakeArtifacts),
         controller: Box::new(FakeController),
         operations: Box::new(FakeOperations::default()),
@@ -235,6 +238,72 @@ impl BranchChanges for FakeChanges {
         path: &str,
         _old_path: Option<&str>,
     ) -> Result<FileDiff, String> {
+        self.diffs
+            .get(path)
+            .cloned()
+            .ok_or_else(|| "no diff".to_owned())
+    }
+}
+
+/// A working copy as a test sets it: the base answered for any
+/// directory, the counts of the asked paths it holds, and each file's
+/// diff by path. The paths asked for are recorded.
+#[derive(Debug)]
+pub struct FakeWorking {
+    pub base: Result<WorkBase, String>,
+    pub stats: Vec<FileStat>,
+    pub diffs: HashMap<String, FileDiff>,
+    pub asked: Mutex<Vec<Vec<String>>>,
+}
+
+impl Default for FakeWorking {
+    fn default() -> Self {
+        Self {
+            base: Err("not a git repository".to_owned()),
+            stats: Vec::new(),
+            diffs: HashMap::new(),
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl FakeWorking {
+    /// A working copy at `top` on a branch split from `origin/main`.
+    #[must_use]
+    pub fn at(top: &Path, sha: &str) -> Self {
+        Self {
+            base: Ok(WorkBase {
+                sha: sha.to_owned(),
+                kind: BaseKind::Branch("origin/main".to_owned()),
+                top: top.to_path_buf(),
+            }),
+            ..Self::default()
+        }
+    }
+}
+
+impl WorkingChanges for FakeWorking {
+    fn work_base(&self, _dir: &Path, _since: Option<SystemTime>) -> Result<WorkBase, String> {
+        self.base.clone()
+    }
+    fn work_stats(
+        &self,
+        _top: &Path,
+        _base: &str,
+        paths: &[String],
+    ) -> Result<Vec<FileStat>, String> {
+        self.asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(paths.to_vec());
+        Ok(self
+            .stats
+            .iter()
+            .filter(|f| paths.contains(&f.path))
+            .cloned()
+            .collect())
+    }
+    fn work_diff(&self, _top: &Path, _base: &str, path: &str) -> Result<FileDiff, String> {
         self.diffs
             .get(path)
             .cloned()

@@ -16,6 +16,14 @@ public struct PresentationState: Codable, Equatable, Sendable {
     public var focused: SessionRef?
     /// The pin boards, the client's own, in the order they were made.
     public var boards: [Board] = []
+    /// Each session card's side panes, kept by session rather than by
+    /// window: a card closed and opened again is a new window.
+    public var panes: [SessionRef: PanesEntry] = [:]
+
+    public struct PanesEntry: Codable, Equatable, Sendable {
+        public var settings: PaneSettings
+        public var at: Date
+    }
 
     public struct ModeEntry: Codable, Equatable, Sendable {
         public var mode: ViewMode
@@ -45,6 +53,7 @@ public struct PresentationState: Codable, Equatable, Sendable {
         ticketFilters = try c.decodeIfPresent(TicketFilters.self, forKey: .ticketFilters) ?? TicketFilters()
         focused = try c.decodeIfPresent(SessionRef.self, forKey: .focused)
         boards = try c.decodeIfPresent([Board].self, forKey: .boards) ?? []
+        panes = try c.decodeIfPresent([SessionRef: PanesEntry].self, forKey: .panes) ?? [:]
     }
 
     public mutating func setMode(_ mode: ViewMode, for window: UUID, at: Date = Date()) {
@@ -65,12 +74,50 @@ public struct PresentationState: Codable, Equatable, Sendable {
         modes[window]?.place
     }
 
+    public mutating func setPanes(_ settings: PaneSettings, for session: SessionRef, at: Date = Date()) {
+        panes[session] = PanesEntry(settings: settings, at: at)
+        while panes.count > Self.modeCap, let oldest = panes.min(by: { $0.value.at < $1.value.at }) {
+            panes[oldest.key] = nil
+        }
+    }
+
+    public func panes(for session: SessionRef) -> PaneSettings? {
+        panes[session]?.settings
+    }
+
     private mutating func trimModes() {
         while modes.count > Self.modeCap, let oldest = modes.min(by: { $0.value.at < $1.value.at }) {
             modes[oldest.key] = nil
         }
     }
 
+}
+
+/// One session card's side panes: which are open, what the right one
+/// holds, and how they sit. Set per card, since the angle that reads
+/// well depends on where the window stands in the room.
+public struct PaneSettings: Codable, Equatable, Sendable {
+    /// Degrees each pane turns in toward the viewer.
+    public var tilt: Double = 30
+    /// Each side's size against what the window's height gives it.
+    public var leading: Double = 1
+    public var trailing: Double = 1
+    public var filesOpen = false
+    public var slotOpen = false
+    public var slot: SidePane?
+
+    public static let standard = PaneSettings()
+    public static let tilts: ClosedRange<Double> = 0...45
+    public static let sizes: ClosedRange<Double> = 0.5...1.5
+
+    public init() {}
+
+    /// The angle and sizes as they first were, the panes left as they are.
+    public mutating func resetLayout() {
+        tilt = Self.standard.tilt
+        leading = Self.standard.leading
+        trailing = Self.standard.trailing
+    }
 }
 
 /// How the main window lays the sessions out (§7.2).

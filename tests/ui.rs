@@ -5495,6 +5495,7 @@ fn ticket_page_built(
     let services = Services {
         dispatch: Some(Box::new(dispatch)),
         changes: Arc::new(changes),
+        working: Arc::new(switchboard::adapters::fakes::FakeWorking::default()),
         ..fake_services(
             FakeOpener::default(),
             FakeSecrets::default(),

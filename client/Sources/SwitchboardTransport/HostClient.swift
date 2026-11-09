@@ -122,6 +122,8 @@ public protocol HostAPI: Sendable {
     func resumeTicket(_ ticket: String) async throws -> Envelope<TicketResumedBody>
     func closeTicket(_ ticket: String) async throws -> Envelope<TicketResumedBody>
     func ticketFile(_ ticket: String, key: String) async throws -> Envelope<TicketFileBody>
+    func editedFiles(_ id: String) async throws -> Envelope<EditedFilesBody>
+    func diff(_ id: String, base: String, path: String) async throws -> Envelope<FileDiffBody>
     func ticketEvents(_ ticket: String) async throws -> Envelope<TicketEventsBody>
 }
 
@@ -305,6 +307,17 @@ public final class HostClient: HostAPI, @unchecked Sendable {
             .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
             .joined(separator: "/")
         return try await get("projects/\(project)/files/\(escaped)", query: nil)
+    }
+
+    public func editedFiles(_ id: String) async throws -> Envelope<EditedFilesBody> {
+        try await get("sessions/\(id)/files", query: nil)
+    }
+
+    public func diff(_ id: String, base: String, path: String) async throws -> Envelope<FileDiffBody> {
+        let escaped = path.split(separator: "/", omittingEmptySubsequences: false)
+            .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
+            .joined(separator: "/")
+        return try await get("sessions/\(id)/diff/\(base)/\(escaped)", query: nil)
     }
 
     public func tickets() async throws -> Envelope<TicketsBody> {

@@ -111,3 +111,43 @@ pub trait BranchChanges: Send + Sync {
         old_path: Option<&str>,
     ) -> Result<FileDiff, String>;
 }
+
+/// What a session's edits are compared with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseKind {
+    /// Where the checkout's branch split from the default branch,
+    /// named here (`origin/main`): the base its pull request would have.
+    Branch(String),
+    /// The commit the checkout was at when the session started, for a
+    /// checkout on the default branch itself or with none to split from.
+    Session,
+}
+
+/// A base for a working copy's diffs, and the repository they are in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkBase {
+    pub sha: String,
+    pub kind: BaseKind,
+    /// The repository's top directory, which the paths are under.
+    pub top: std::path::PathBuf,
+}
+
+/// Reads a working copy against a base, for the files a session edited:
+/// what is on disk now, committed or not, compared with the base.
+pub trait WorkingChanges: Send + Sync {
+    /// The base for the repository holding `dir`: the branch point when
+    /// there is one, else the last commit before `since` (the session's
+    /// start), else `HEAD`.
+    fn work_base(
+        &self,
+        dir: &Path,
+        since: Option<std::time::SystemTime>,
+    ) -> Result<WorkBase, String>;
+    /// Line counts for `paths` (relative to `top`) between `base` and
+    /// the files on disk, a file git does not track counted whole. A
+    /// path that did not change is left out.
+    fn work_stats(&self, top: &Path, base: &str, paths: &[String])
+    -> Result<Vec<FileStat>, String>;
+    /// One file's diff between `base` and the file on disk.
+    fn work_diff(&self, top: &Path, base: &str, path: &str) -> Result<FileDiff, String>;
+}

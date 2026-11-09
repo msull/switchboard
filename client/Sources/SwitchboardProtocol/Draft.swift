@@ -16,10 +16,13 @@ public struct DraftView: Codable, Sendable, Equatable {
     public var ai: Bool
     /// An AI pass is running.
     public var busy: Bool
+    /// On the reply to a dictation batch only: its spoken send went.
+    public var sent: Bool?
 
     public init(
         text: String = "", live: [Int]? = nil, status: String = "idle", statusText: String? = nil,
-        canUndo: Bool = false, canRedo: Bool = false, ai: Bool = false, busy: Bool = false
+        canUndo: Bool = false, canRedo: Bool = false, ai: Bool = false, busy: Bool = false,
+        sent: Bool? = nil
     ) {
         self.text = text
         self.live = live
@@ -29,6 +32,7 @@ public struct DraftView: Codable, Sendable, Equatable {
         self.canRedo = canRedo
         self.ai = ai
         self.busy = busy
+        self.sent = sent
     }
 
     /// The live utterance's range in the text, for a view that marks it.
@@ -51,7 +55,7 @@ public struct DraftView: Codable, Sendable, Equatable {
     public var listening: Bool { status == "listening" || status == "finishing" }
 
     enum CodingKeys: String, CodingKey {
-        case text, live, status, ai, busy
+        case text, live, status, ai, busy, sent
         case statusText = "status_text"
         case canUndo = "can_undo"
         case canRedo = "can_redo"

@@ -60,6 +60,10 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     var decideSilences = 0
     /// A ticket's files by key, and its events.
     var ticketFiles: [String: TicketFileBody] = [:]
+    /// Each session's edited files, by record id.
+    var edited: [String: EditedFilesBody] = [:]
+    /// Each diff, by `base/path`.
+    var diffs: [String: FileDiffBody] = [:]
     var ticketEvents: [String: TicketEventsBody] = [:]
     /// The pinned files, by `project/path`; a missing one is `not_pinned`.
     var files: [String: FileBody] = [:]
@@ -440,6 +444,26 @@ final class FakeHost: HostAPI, @unchecked Sendable {
         return try answer("close_ticket") { TicketResumedBody(ticket: closing) }
     }
 
+    func editedFiles(_ id: String) async throws -> Envelope<EditedFilesBody> {
+        lock.lock()
+        let held = edited[id]
+        lock.unlock()
+        guard let held else {
+            throw RemoteError.refused(status: 404, code: "not_found", message: "no such session")
+        }
+        return try answer("edited_files:\(id)") { held }
+    }
+
+    func diff(_ id: String, base: String, path: String) async throws -> Envelope<FileDiffBody> {
+        lock.lock()
+        let held = diffs["\(base)/\(path)"]
+        lock.unlock()
+        guard let held else {
+            throw RemoteError.refused(status: 400, code: "failed", message: "no diff")
+        }
+        return try answer("diff:\(path)") { held }
+    }
+
     func ticketFile(_ ticket: String, key: String) async throws -> Envelope<TicketFileBody> {
         lock.lock()
         let held = ticketFiles[key]
@@ -683,6 +707,12 @@ struct Route: HostAPI {
     }
     func ticketFile(_ ticket: String, key: String) async throws -> Envelope<TicketFileBody> {
         try await network.route(address, pin).ticketFile(ticket, key: key)
+    }
+    func editedFiles(_ id: String) async throws -> Envelope<EditedFilesBody> {
+        try await network.route(address, pin).editedFiles(id)
+    }
+    func diff(_ id: String, base: String, path: String) async throws -> Envelope<FileDiffBody> {
+        try await network.route(address, pin).diff(id, base: base, path: path)
     }
     func ticketEvents(_ ticket: String) async throws -> Envelope<TicketEventsBody> {
         try await network.route(address, pin).ticketEvents(ticket)

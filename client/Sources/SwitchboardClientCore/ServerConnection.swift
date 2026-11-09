@@ -563,6 +563,12 @@ public actor ServerConnection {
             if lastResponses[session] != nil || conversations[session] == nil {
                 await readLastResponse(session)
             }
+            // None held (the host had none, or the read was refused):
+            // the tail, or a window stays empty until it is reopened.
+            guard conversations[session] != nil else {
+                await readConversation(session, from: nil, limit: nil)
+                return
+            }
             // From the last turn held to the end: a page holds only
             // so many turns, and more than that may have arrived.
             var from = conversations[session]?.lastHeld
@@ -902,6 +908,10 @@ public actor ServerConnection {
             }
             changed()
             return reply.body.next
+        } catch RemoteError.refused(_, "failed", _) {
+            // The read failed, which says nothing of the conversation:
+            // what is on screen stays, and the next change reads again.
+            return nil
         } catch RemoteError.refused(let status, _, _) where status == 400 || status == 404 {
             conversations[session] = nil
             changed()
@@ -1165,6 +1175,28 @@ public actor ServerConnection {
             return .accepted
         }
         return .unanswered(lastError ?? "no answer")
+    }
+
+    /// The files a session wrote, with their counts against the base.
+    public func readEditedFiles(_ session: String) async throws -> EditedFilesBody {
+        guard let api else { throw RemoteError.transport("not connected") }
+        do {
+            return try await api.editedFiles(session).body
+        } catch RemoteError.refused(let status, let code, let message) {
+            if status == 401 { handle(.refused(status: status, code: code, message: message)) }
+            throw RemoteError.refused(status: status, code: code, message: message)
+        }
+    }
+
+    /// One file's diff against a base the files list named.
+    public func readDiff(_ session: String, base: String, path: String) async throws -> FileDiffBody {
+        guard let api else { throw RemoteError.transport("not connected") }
+        do {
+            return try await api.diff(session, base: base, path: path).body
+        } catch RemoteError.refused(let status, let code, let message) {
+            if status == 401 { handle(.refused(status: status, code: code, message: message)) }
+            throw RemoteError.refused(status: status, code: code, message: message)
+        }
     }
 
     /// One file of a ticket by its key: text, or an image as bytes.

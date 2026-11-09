@@ -404,15 +404,15 @@ private extension View {
 
 /// The keys panel: three rows of keys the size of the system
 /// keyboard's, with undo and redo where the host keeps the draft, under
-/// a strip with the caret's line and a row with the session's name, a
-/// microphone of the panel's own, a peek at the whole prompt and the
-/// AI pass.
+/// a strip with the caret's line and a row with the session's name, the
+/// microphone, a peek at the whole prompt, the AI pass and Send.
 public struct KeysPanelView: View {
     @Bindable var model: BrowserModel
     @State private var held: SessionRef?
     @State private var busy = false
     @State private var note: String?
-    @State private var dictation = Dictation()
+    /// This window, to the microphone.
+    @State private var window = UUID()
     @State private var peeking = false
 
     public init(model: BrowserModel) {
@@ -435,9 +435,14 @@ public struct KeysPanelView: View {
         return standing.controlsEnabled && model.scope(for: ref) == .control && !busy && item.session.kind == .claude
     }
 
-    /// The host's editor is listening, through this panel's microphone
-    /// or another window's.
-    private var listening: Bool { dictation.listening || (draft?.listening ?? false) }
+    private var dictation: Dictation { model.dictation }
+    /// The microphone is feeding this session, whichever window's button
+    /// started it.
+    private var listening: Bool { ref.map(model.isDictating) ?? false }
+    private var empty: Bool {
+        guard let ref, let field = model.fields[ref] else { return true }
+        return field.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -452,6 +457,7 @@ public struct KeysPanelView: View {
                 micButton
                 peekButton
                 smallTool(.cleanUp, "sparkles", "Clean up with AI", on: draft?.ai ?? false, working: draft?.busy == true)
+                sendButton
             }
             .frame(width: Self.rowWidth)
             // The caret's line, as the system keyboard shows the text
@@ -494,27 +500,23 @@ public struct KeysPanelView: View {
         }
         .onAppear {
             LaunchLog.note("keys appeared")
-            dictation.onEvents = { recognizer, events in
-                guard let ref = await model.activeInput, await model.hasDraft(ref) else { return }
-                _ = await model.dictate(ref, recognizer: recognizer, events: events)
-            }
         }
         .onDisappear {
             LaunchLog.note("keys disappeared")
-            dictation.stop()
+            model.dictationWindowClosed(window)
             if let held {
                 Task { await model.releaseDraft(held) }
             }
         }
     }
 
-    /// The microphone: red while the host's editor listens, from here
-    /// or from a card; a tap starts or stops this panel's own, so a
-    /// listen begun in a card is stopped there.
+    /// The microphone: red while it feeds this session, and a tap stops
+    /// it, whichever window started it.
     private var micButton: some View {
         Button {
+            guard let ref else { return }
             note = nil
-            Task { await dictation.toggle() }
+            Task { await model.toggleDictation(ref, from: window) }
         } label: {
             Image(systemName: listening ? "waveform" : "mic.fill")
                 .symbolEffect(.variableColor.iterative, isActive: listening)
@@ -522,9 +524,32 @@ public struct KeysPanelView: View {
         }
         .buttonStyle(.bordered)
         .foregroundStyle(listening ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
-        .disabled(!enabled || !hosted || (listening && !dictation.listening))
-        .accessibilityLabel(dictation.listening ? "Stop dictation" : "Dictate")
-        .help(dictation.listening ? "Stop dictation" : "Dictate into the prompt")
+        .disabled(!enabled || !hosted)
+        .accessibilityLabel(listening ? "Stop dictation" : "Dictate")
+        .help(listening ? "Stop dictation" : "Dictate into the prompt")
+    }
+
+    /// Send, as the card's: it ends listening, and sits apart from the
+    /// tools beside it because a send cannot be taken back.
+    private var sendButton: some View {
+        Button {
+            guard let ref else { return }
+            busy = true
+            note = nil
+            Task {
+                let outcome = await model.sendField(ref)
+                note = outcome.note
+                busy = false
+            }
+        } label: {
+            Image(systemName: "paperplane.fill")
+                .frame(width: Self.smallWidth, height: Self.smallHeight)
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(!enabled || !hosted || empty)
+        .padding(.leading, Self.gap)
+        .accessibilityLabel("Send")
+        .help("Send the prompt")
     }
 
     /// The toggle that keeps the whole prompt open above the panel
@@ -600,7 +625,7 @@ public struct KeysPanelView: View {
     }
 
     static let gap = 6.0
-    static let keyWidth = 56.0
+    static let keyWidth = 50.0
     static let keyHeight = 48.0
     /// The buttons of the top row, beside the session's name.
     static let smallWidth = 22.0

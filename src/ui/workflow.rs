@@ -13,7 +13,7 @@ use super::dialogs::{dialog, dialog_actions, field};
 use super::{DrawCtx, GAP, UiState, document, theme};
 use crate::core::{
     AppAction, BUILTIN_WORKFLOW, DISPATCH_WORKFLOW_PREFIX, HandoffMode, RecordId, Round, RunState,
-    Verdict, WorkflowId, WorkflowRun, snapshot_dir,
+    Verdict, WorkflowId, WorkflowRun, file_refs, snapshot_dir,
 };
 use crate::ports::transcript::Conversation;
 
@@ -60,10 +60,6 @@ impl ReviewDraft {
     }
 }
 
-/// Tools whose input names the file they change; Bash counts when the
-/// reader found a redirection target in the command.
-const WRITING_TOOLS: [&str; 5] = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"];
-
 /// Written files the launch dialog offers. Older ones can still be
 /// typed into the path field, so the list only needs the recent ones
 /// and must never push the dialog's buttons off screen.
@@ -73,53 +69,14 @@ const CANDIDATES_SHOWN: usize = 8;
 /// newest first, each once.
 #[must_use]
 fn written_markdown(conversation: &Conversation, cwd: &Path) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    for turn in conversation.turns.iter().rev() {
-        for activity in turn.activity.iter().rev() {
-            let Some(detail) = &activity.detail else {
-                continue;
-            };
-            if !WRITING_TOOLS.contains(&detail.name.as_str()) {
-                continue;
-            }
-            let Some(path) = detail
-                .path
-                .clone()
-                .or_else(|| file_path_in(&detail.input).map(PathBuf::from))
-            else {
-                continue;
-            };
-            let path = if path.is_absolute() {
-                path
-            } else {
-                cwd.join(path)
-            };
-            let markdown = path
-                .extension()
+    file_refs::written_files(conversation, cwd)
+        .into_iter()
+        .filter(|path| {
+            path.extension()
                 .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("md"));
-            if markdown && !out.contains(&path) {
-                out.push(path);
-            }
-        }
-    }
-    out
-}
-
-/// The `file_path` of a tool's input. The input is JSON, but capped, so
-/// a scan for the key stands in when it no longer parses.
-fn file_path_in(input: &str) -> Option<String> {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(input)
-        && let Some(p) = v.get("file_path").and_then(|p| p.as_str())
-    {
-        return Some(p.to_owned());
-    }
-    let key = "\"file_path\":";
-    let start = input.find(key)? + key.len();
-    let rest = input[start..].trim_start();
-    let rest = rest.strip_prefix('"')?;
-    let end = rest.find('"')?;
-    Some(rest[..end].to_owned())
+                .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        })
+        .collect()
 }
 
 /// The typed path as an absolute one: `~` is the home directory and a
@@ -891,20 +848,6 @@ mod tests {
             ]
         );
         assert!(diff_lines("", "").is_empty());
-    }
-
-    #[test]
-    fn file_path_is_read_from_json_or_scanned_from_a_cut_input() {
-        assert_eq!(
-            file_path_in("{\"file_path\": \"/p/plan.md\", \"content\": \"x\"}").as_deref(),
-            Some("/p/plan.md")
-        );
-        assert_eq!(
-            file_path_in("{\n  \"file_path\": \"/p/plan.md\",\n  \"content\": \"cut off")
-                .as_deref(),
-            Some("/p/plan.md")
-        );
-        assert_eq!(file_path_in("{\"command\": \"ls\"}"), None);
     }
 
     #[test]

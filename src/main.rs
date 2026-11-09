@@ -242,6 +242,7 @@ fn main() -> eframe::Result {
                 project_config: Box::new(FileConfigReader::new()),
                 round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),
                 changes: std::sync::Arc::new(GitChanges),
+                working: std::sync::Arc::new(GitChanges),
                 artifacts: Box::new(switchboard::adapters::artifacts::DiskArtifacts),
                 controller: Box::new(controller),
                 operations: Box::new(operations),
