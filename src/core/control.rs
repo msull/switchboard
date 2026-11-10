@@ -81,6 +81,10 @@ pub enum ControlAction {
     /// Resume an agent's conversation without opening a terminal; never
     /// a fresh launch.
     Resume(RecordId),
+    /// A new run of a command record that is not running: its dead pane
+    /// cleared and the command launched fresh. Only a runnable command
+    /// is run; an agent, a shell or a service is refused.
+    Run(RecordId),
     Remove(RecordId),
     SetNotes {
         id: RecordId,
@@ -351,6 +355,10 @@ impl AppCore {
             }
             ControlAction::Resume(id) => {
                 self.control_resume(id, now, out);
+                Vec::new()
+            }
+            ControlAction::Run(id) => {
+                self.control_run(id, now, out);
                 Vec::new()
             }
             ControlAction::Remove(id) => {
@@ -1203,6 +1211,7 @@ fn control_kind(action: &ControlAction) -> String {
         ControlAction::Prompt { .. } => "session.prompt",
         ControlAction::Kill(_) => "session.kill",
         ControlAction::Resume(_) => "session.resume",
+        ControlAction::Run(_) => "session.run",
         ControlAction::Remove(_) => "session.remove",
         ControlAction::SetNotes { .. } => "session.notes",
         ControlAction::SetWaiting { .. } => "session.waiting",
@@ -1385,6 +1394,7 @@ impl TryFrom<wire::Body> for ControlAction {
             },
             wire::Body::SessionKill { session: s } => Self::Kill(session(&s)?),
             wire::Body::SessionResume { session: s } => Self::Resume(session(&s)?),
+            wire::Body::SessionRun { session: s } => Self::Run(session(&s)?),
             wire::Body::SessionRemove { session: s } => Self::Remove(session(&s)?),
             wire::Body::SessionNotes { session: s, text } => Self::SetNotes {
                 id: session(&s)?,

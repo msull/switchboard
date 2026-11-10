@@ -4,7 +4,7 @@
 //! lives in [`crate::ui`].
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -205,6 +205,14 @@ pub struct SwitchboardApp {
     /// `SWITCHBOARD_REMOTE_PORT`: a port in place of the identity's, so
     /// two instances can run on one machine; `0` picks a free one.
     remote_port_override: Option<u16>,
+    /// The home directory `project.add` from a device is held under;
+    /// the user's own unless a test sets one.
+    remote_home: Option<PathBuf>,
+    /// The owner-channel message each device op made, by device and op.
+    asks_by_op: HashMap<String, dispatch_control::AskView>,
+    /// The keys of `asks_by_op`, oldest first, so the oldest goes when
+    /// the map is full.
+    ask_op_order: VecDeque<String>,
     /// The remote port's refusals since the last summary line. In a
     /// `RefCell` because `refuse` takes `&self` at every call site;
     /// the frame is one thread and `count_refusal` and
@@ -330,6 +338,9 @@ struct TicketReply {
     call: Body,
     reply: mpsc::SyncSender<RemoteReply>,
     asked: Instant,
+    /// The device's op for an owner-channel message, kept with the
+    /// answer so a repeat after a lost reply asks nothing twice.
+    op: Option<String>,
 }
 
 /// A file diff's answer from its thread.
@@ -464,6 +475,9 @@ impl SwitchboardApp {
             remote_wake: None,
             remote_bound: None,
             remote_port_override: None,
+            remote_home: None,
+            asks_by_op: HashMap::new(),
+            ask_op_order: VecDeque::new(),
             refusals: RefCell::new(RefusalSummary::default()),
             epoch: uuid::Uuid::new_v4(),
             revision: 0,
@@ -2786,6 +2800,12 @@ impl SwitchboardApp {
             Body::Close {
                 ticket: t.id.clone(),
                 reason: None,
+                by: None,
+            }
+        } else if verb == "park" {
+            match self.ticket_park_call(request, &t) {
+                Ok(call) => call,
+                Err(served) => return served,
             }
         } else if t.state == "parked" {
             Body::Resume {
@@ -2800,12 +2820,28 @@ impl SwitchboardApp {
                 true,
             ));
         };
+        // An agent's decision, close or park carries its name, which
+        // Dispatch stamps and holds to the supervisor's table; the name
+        // is the device's as paired, never one the body gave.
+        let mut call = call;
+        let agent_by = device.agent.then(|| agent_name(device));
+        match &mut call {
+            Body::Decide { by, .. } | Body::Close { by, .. } | Body::Park { by, .. } => {
+                by.clone_from(&agent_by);
+            }
+            _ => {}
+        }
         let action = match &call {
+            Body::Decide { .. } | Body::Close { .. } if agent_by.is_some() => {
+                AppAction::DispatchBody(call.clone())
+            }
+            Body::Park { .. } => AppAction::DispatchBody(call.clone()),
             Body::Decide {
                 ticket,
                 decision,
                 answer,
                 note,
+                ..
             } => AppAction::DispatchDecide {
                 ticket: ticket.clone(),
                 decision: decision.clone(),
@@ -2819,9 +2855,467 @@ impl SwitchboardApp {
             call,
             reply: reply.clone(),
             asked: Instant::now(),
+            op: None,
         });
         self.dispatch_inner(action);
         Served::Deferred
+    }
+
+    /// The refusal of a command to a device without `control` scope.
+    fn control_only(&self, request: &RemoteRequest, device: &PairedDevice) -> Option<RemoteReply> {
+        (device.scope != Scope::Control).then(|| {
+            self.refuse(
+                request,
+                403,
+                "scope",
+                "this device reads only; raise its scope on the host",
+                true,
+            )
+        })
+    }
+
+    /// The JSON body of a request and its `op`, trimmed, or the 400
+    /// that says which was wrong.
+    fn body_op(&self, request: &RemoteRequest) -> Result<(serde_json::Value, String), RemoteReply> {
+        let Ok(body) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
+            return Err(self.refuse(request, 400, "bad_request", "the body is not JSON", true));
+        };
+        let op = body
+            .get("op")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_owned();
+        if op.is_empty() || op.len() > OP_CAP {
+            return Err(self.refuse(
+                request,
+                400,
+                "bad_request",
+                "op is the operation id, 1 to 64 characters",
+                true,
+            ));
+        }
+        Ok((body, op))
+    }
+
+    /// The refusal of a call to Dispatch while no runner answers.
+    fn dispatch_off(&self, request: &RemoteRequest) -> Option<RemoteReply> {
+        (!self.core.dispatch_state().connected).then(|| {
+            self.refuse(
+                request,
+                503,
+                "dispatch_off",
+                "Dispatch is not running on the host",
+                true,
+            )
+        })
+    }
+
+    /// Send `call` to Dispatch for a device, its answer going to the
+    /// device through `answer_ticket_reply`.
+    fn ask_dispatch(
+        &mut self,
+        call: Body,
+        reply: &mpsc::SyncSender<RemoteReply>,
+        op: Option<String>,
+    ) {
+        // The same owner-channel message already waiting on Dispatch
+        // (a retried or repeated op) shares its one answer; a second
+        // body would be typed twice and answered once.
+        let waiting = matches!(call, Body::SupervisorAsk { .. })
+            && self
+                .ticket_replies
+                .iter()
+                .any(|r| same_call(&r.call, &call));
+        self.ticket_replies.push(TicketReply {
+            call: call.clone(),
+            reply: reply.clone(),
+            asked: Instant::now(),
+            op,
+        });
+        if !waiting {
+            self.dispatch_inner(AppAction::DispatchBody(call));
+        }
+    }
+
+    /// A project's brief from Dispatch, masked as ticket text is.
+    /// `project` is Dispatch's name for it, as tickets carry.
+    fn remote_brief(
+        &mut self,
+        request: &RemoteRequest,
+        project: &str,
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> Served {
+        if let Some(off) = self.dispatch_off(request) {
+            return Served::Now(off);
+        }
+        self.ask_dispatch(
+            Body::Brief {
+                project: project.to_owned(),
+            },
+            reply,
+            None,
+        );
+        Served::Deferred
+    }
+
+    /// A ticket's report, as `dispatch report <ticket> --json` prints
+    /// it, masked as ticket text is.
+    fn remote_report(
+        &mut self,
+        request: &RemoteRequest,
+        ticket: &str,
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> Served {
+        if self.core.ticket(ticket).is_none() {
+            return Served::Now(self.refuse(request, 404, "not_found", "no such ticket", true));
+        }
+        if let Some(off) = self.dispatch_off(request) {
+            return Served::Now(off);
+        }
+        self.ask_dispatch(
+            Body::Report {
+                ticket: ticket.to_owned(),
+            },
+            reply,
+            None,
+        );
+        Served::Deferred
+    }
+
+    /// Queue an agent's message to a project's supervisor (the owner
+    /// channel) and answer with the message queued.
+    ///
+    /// Only a `control` device the owner paired as an agent may, so a
+    /// headset never types into a supervisor this way. The sender is the
+    /// device's name as paired. Dispatch types the message once the pane
+    /// is ready, and a repeat of the device's op is answered with the
+    /// message it made.
+    fn remote_ask(
+        &mut self,
+        request: &RemoteRequest,
+        device: &PairedDevice,
+        project: &str,
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> Served {
+        if let Some(refused) = self.control_only(request, device) {
+            return Served::Now(refused);
+        }
+        if !device.agent {
+            return Served::Now(self.refuse(
+                request,
+                403,
+                "agent_only",
+                "only a device paired as an agent messages a supervisor",
+                true,
+            ));
+        }
+        let (body, op) = match self.body_op(request) {
+            Ok(parsed) => parsed,
+            Err(refused) => return Served::Now(refused),
+        };
+        let field = |name: &str| body.get(name).and_then(|v| v.as_str()).map(str::trim);
+        let text = field("text").unwrap_or_default();
+        if text.is_empty() || text.len() > SEND_BYTES_CAP {
+            return Served::Now(self.refuse(
+                request,
+                400,
+                "bad_request",
+                "text is the message, 1 byte to 16 KiB",
+                true,
+            ));
+        }
+        let key = format!("{}/{op}", device.id);
+        if let Some(a) = self.asks_by_op.get(&key).cloned() {
+            let value = ask_json(&a);
+            return self.serve_ticket_text(
+                request,
+                Some(project),
+                TicketPart::Ask(a.id.clone()),
+                value,
+                reply,
+            );
+        }
+        if let Some(off) = self.dispatch_off(request) {
+            return Served::Now(off);
+        }
+        self.ask_dispatch(
+            Body::SupervisorAsk {
+                project: project.to_owned(),
+                text: text.to_owned(),
+                by: agent_name(device),
+            },
+            reply,
+            Some(key),
+        );
+        Served::Deferred
+    }
+
+    /// Keep the message an op made, bounded: the oldest goes once the
+    /// map is full, which costs only a repeat's idempotency.
+    fn remember_ask(&mut self, key: String, ask: dispatch_control::AskView) {
+        if self.asks_by_op.insert(key.clone(), ask).is_none() {
+            self.ask_op_order.push_back(key);
+        }
+        while self.ask_op_order.len() > ASK_OPS_KEPT {
+            if let Some(old) = self.ask_op_order.pop_front() {
+                self.asks_by_op.remove(&old);
+            }
+        }
+    }
+
+    /// Where an owner-channel message stands: `queued` until Dispatch
+    /// typed it, then `delivered`, and `answered` with the supervisor's
+    /// reply once the turn it was typed as has ended. The reply is read
+    /// from the supervisor's transcript and masked with its project's
+    /// secrets, as every conversation read is.
+    fn remote_ask_status(
+        &mut self,
+        request: &RemoteRequest,
+        project: &str,
+        id: &str,
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> Served {
+        if content::ask_number(id).is_none() {
+            return Served::Now(self.refuse(
+                request,
+                400,
+                "bad_request",
+                "the id is the message's, ask- and 12 hex digits",
+                true,
+            ));
+        }
+        if let Some(off) = self.dispatch_off(request) {
+            return Served::Now(off);
+        }
+        self.ask_dispatch(
+            Body::SupervisorAskStatus {
+                project: project.to_owned(),
+                id: id.to_owned(),
+            },
+            reply,
+            None,
+        );
+        Served::Deferred
+    }
+
+    /// A delivered message's standing from the supervisor's transcript;
+    /// without a transcript to read it is `delivered` with no reply.
+    fn answer_delivered_ask(
+        &mut self,
+        project: &str,
+        ask: &dispatch_control::AskView,
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) {
+        let record = ask
+            .session
+            .as_deref()
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .map(RecordId);
+        let job = record
+            .zip(content::ask_number(&ask.id))
+            .and_then(|(id, n)| {
+                self.content_job(
+                    &ContentKey::Conversation(id),
+                    ContentView::AskReply { id: n },
+                    Some(reply.clone()),
+                )
+                .ok()
+            });
+        if let Some(job) = job
+            && self.content.as_ref().is_some_and(|c| c.submit(job))
+        {
+            return;
+        }
+        let value = ask_json(ask);
+        if !self.submit_ticket_text(Some(project), TicketPart::Ask(ask.id.clone()), value, reply) {
+            let _ = reply.try_send(RemoteReply::new(
+                503,
+                self.error_json("busy", "the content worker is behind; try again"),
+                true,
+            ));
+        }
+    }
+
+    /// A new run of a command session under `control` scope (§4.3):
+    /// only a command record the owner made, or a project entry the
+    /// owner approved in the Run tab, and only while it is not running.
+    /// The run goes through `serve` under the device's op, so it is
+    /// logged before it starts and never started twice for one op.
+    fn remote_run(
+        &mut self,
+        request: &RemoteRequest,
+        device: &PairedDevice,
+        session: &str,
+    ) -> RemoteReply {
+        if let Some(refused) = self.control_only(request, device) {
+            return refused;
+        }
+        let (_, op) = match self.body_op(request) {
+            Ok(parsed) => parsed,
+            Err(refused) => return refused,
+        };
+        let op = op.as_str();
+        let record = parse_uuid("session", session)
+            .ok()
+            .and_then(|id| self.core.session(RecordId(id)))
+            .cloned();
+        let Some(record) = record else {
+            return self.refuse(request, 404, "not_found", "no such session", true);
+        };
+        // A repeat of an op that ran is answered from the log below,
+        // whatever the record is doing now.
+        if self.replied(op).is_none() {
+            if !matches!(record.kind, SessionKind::Command) {
+                return self.refuse(
+                    request,
+                    409,
+                    "not_a_command",
+                    "only a command session is run; a service is started on the host",
+                    true,
+                );
+            }
+            if !record.runnable() {
+                return self.refuse(
+                    request,
+                    409,
+                    "not_approved",
+                    "this entry from .switchboard/project.json is not approved; the owner approves it in the Run tab",
+                    true,
+                );
+            }
+            if self.core.is_running(record.id) {
+                return self.refuse(request, 409, "running", "the command is running", true);
+            }
+        }
+        let reply = self.serve_from(
+            &wire::Request::new(
+                op,
+                wire::Body::SessionRun {
+                    session: session.to_owned(),
+                },
+            ),
+            Origin::Owner,
+        );
+        if let wire::Reply::Failed { reason } = &reply {
+            if reason.starts_with("interrupted") {
+                return self.refuse(request, 409, "interrupted", reason, true);
+            }
+            return self.remote_reply(request, &reply, STRING_CAP);
+        }
+        let run = self
+            .core
+            .session(record.id)
+            .and_then(|r| r.runs.last())
+            .map(|r| r.n);
+        self.envelope(
+            200,
+            &serde_json::json!({ "session": session, "run": run }),
+            true,
+        )
+    }
+
+    /// A new project under `control` scope, through `project.add` with
+    /// the device's op as the key. The root must be a directory strictly
+    /// below a folder of the host user's home with no dot-component, so
+    /// the one extra thing a root grants, `file.read` under it, never
+    /// reaches the home directory itself or its dotfiles.
+    fn remote_add_project(
+        &mut self,
+        request: &RemoteRequest,
+        device: &PairedDevice,
+    ) -> RemoteReply {
+        if let Some(refused) = self.control_only(request, device) {
+            return refused;
+        }
+        let (body, op) = match self.body_op(request) {
+            Ok(parsed) => parsed,
+            Err(refused) => return refused,
+        };
+        let field = |name: &str| body.get(name).and_then(|v| v.as_str()).map(str::trim);
+        let name = field("name").unwrap_or_default();
+        if name.is_empty() || name.len() > NAME_CAP {
+            return self.refuse(
+                request,
+                400,
+                "bad_request",
+                "name is the project's name, 1 to 128 bytes",
+                true,
+            );
+        }
+        let home = self
+            .remote_home
+            .clone()
+            .or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()));
+        let root = field("root")
+            .zip(home)
+            .and_then(|(root, home)| project_root_below_home(Path::new(root), &home));
+        let Some(root) = root else {
+            return self.refuse(
+                request,
+                400,
+                "bad_root",
+                "root is an existing directory inside a folder of the host's home, with no dot-folder on the way",
+                true,
+            );
+        };
+        let given = field("space").filter(|s| !s.is_empty()).map(str::to_owned);
+        let chosen = given.or_else(|| {
+            self.core
+                .default_project_space()
+                .map(|space| space.0.to_string())
+        });
+        let Some(space) = chosen else {
+            return self.refuse(request, 400, "bad_request", "space is required", true);
+        };
+        let reply = self.serve_from(
+            &wire::Request::new(
+                op,
+                wire::Body::ProjectAdd {
+                    space,
+                    name: name.to_owned(),
+                    root,
+                },
+            ),
+            Origin::Owner,
+        );
+        self.remote_reply(request, &reply, STRING_CAP)
+    }
+
+    /// The `park` call a request asks for, or the refusal: an active
+    /// ticket, with the body's `reason` if it gave one.
+    fn ticket_park_call(
+        &self,
+        request: &RemoteRequest,
+        t: &crate::ports::dispatch::TicketView,
+    ) -> Result<Body, Served> {
+        if t.state != "active" {
+            return Err(Served::Now(self.refuse(
+                request,
+                409,
+                "not_active",
+                &format!("the ticket is {}; only an active ticket is parked", t.state),
+                true,
+            )));
+        }
+        let reason = serde_json::from_slice::<serde_json::Value>(&request.body)
+            .ok()
+            .and_then(|b| b.get("reason")?.as_str().map(str::trim).map(str::to_owned))
+            .filter(|r| !r.is_empty());
+        if reason.as_ref().is_some_and(|r| r.len() > STRING_CAP) {
+            return Err(Served::Now(self.refuse(
+                request,
+                400,
+                "bad_request",
+                "the reason is too long",
+                true,
+            )));
+        }
+        Ok(Body::Park {
+            ticket: t.id.clone(),
+            reason,
+            by: None,
+        })
     }
 
     /// The `decide` call a request's body asks for, or the refusal.
@@ -2900,28 +3394,13 @@ impl SwitchboardApp {
             decision: d.id.clone(),
             answer: chosen.join(","),
             note,
+            by: None,
         })
     }
 
     /// Dispatch's answer to a call a device asked for, sent on to it.
     fn answer_ticket_reply(&mut self, body: &Body, result: &Result<Reply, String>) {
-        let same = |a: &Body| match (a, body) {
-            (
-                Body::Decide {
-                    ticket, decision, ..
-                },
-                Body::Decide {
-                    ticket: t,
-                    decision: d,
-                    ..
-                },
-            ) => ticket == t && decision == d,
-            (Body::Resume { ticket }, Body::Resume { ticket: t })
-            | (Body::Close { ticket, .. }, Body::Close { ticket: t, .. })
-            | (Body::Events { ticket, .. }, Body::Events { ticket: t, .. }) => ticket == t,
-            (Body::Artifact { path, .. }, Body::Artifact { path: p, .. }) => path == p,
-            _ => false,
-        };
+        let same = |a: &Body| same_call(a, body);
         // Every device that asked for the same thing gets the one answer.
         let (pending, kept): (Vec<TicketReply>, Vec<TicketReply>) =
             std::mem::take(&mut self.ticket_replies)
@@ -2931,38 +3410,32 @@ impl SwitchboardApp {
         if pending.is_empty() {
             return;
         }
+        if let (Body::SupervisorAskStatus { project, .. }, Ok(Reply::Ask(a))) = (body, result)
+            && a.state == "delivered"
+        {
+            for r in pending {
+                self.answer_delivered_ask(project, a, &r.reply);
+            }
+            return;
+        }
+        if let (Body::SupervisorAsk { .. }, Ok(Reply::Ask(a))) = (body, result) {
+            for r in &pending {
+                if let Some(op) = &r.op {
+                    self.remember_ask(op.clone(), a.clone());
+                }
+            }
+        }
         // Ticket text goes to the worker to be masked, which answers
         // each device; anything else is answered here.
-        let text = match (body, result) {
-            (_, Ok(Reply::Decided(d))) => Some((
-                TicketPart::Detail,
-                serde_json::json!({
-                    "decision": crate::core::tickets::TicketDecision::from(d),
-                }),
-            )),
-            (_, Ok(Reply::Ticket(t))) => Some((
-                TicketPart::Detail,
-                serde_json::json!({ "ticket": self.core.ticket_summary(t) }),
-            )),
-            (Body::Artifact { path, .. }, Ok(Reply::Artifact { text })) => {
-                let key = crate::core::tickets::file_key(path);
-                Some((
-                    TicketPart::File(key.clone()),
-                    serde_json::json!({ "key": key, "text": text }),
-                ))
-            }
-            // The core has taken the events in by now, or marked them
-            // unavailable from this runner; either way the cache answers.
-            (Body::Events { ticket, .. }, Ok(Reply::Events(_) | Reply::Failed { .. })) => Some((
-                TicketPart::Events,
-                serde_json::to_value(self.core.ticket_events(ticket)).unwrap_or_default(),
-            )),
-            _ => None,
-        };
-        if let Some((part, value)) = text {
-            let ticket = body_ticket(body);
+        let text = self.ticket_text_of(body, result);
+        if let Some((ticket, part, value)) = text {
             for r in pending {
-                if !self.submit_ticket_text(ticket, part.clone(), value.clone(), &r.reply) {
+                if !self.submit_ticket_text(
+                    ticket.as_deref(),
+                    part.clone(),
+                    value.clone(),
+                    &r.reply,
+                ) {
                     let _ = r.reply.try_send(RemoteReply::new(
                         503,
                         self.error_json("busy", "the content worker is behind; try again"),
@@ -2981,6 +3454,18 @@ impl SwitchboardApp {
                 let (status, code, reason) = content::ContentError::TooLarge(len).refusal();
                 self.count_refusal(code);
                 RemoteReply::new(status, self.error_json(code, &reason), true)
+            }
+            (Body::SupervisorAsk { .. }, Ok(Reply::Failed { reason }))
+                if reason.starts_with(dispatch_control::NO_SUPERVISOR) =>
+            {
+                self.count_refusal("no_supervisor");
+                RemoteReply::new(409, self.error_json("no_supervisor", reason), true)
+            }
+            (Body::SupervisorAsk { .. }, Ok(Reply::Failed { reason }))
+                if reason.starts_with(dispatch_control::QUEUE_FULL) =>
+            {
+                self.count_refusal("queue_full");
+                RemoteReply::new(409, self.error_json("queue_full", reason), true)
             }
             (_, Ok(Reply::Failed { reason })) => {
                 let (status, code) = if reason.starts_with("no such") {
@@ -3003,6 +3488,64 @@ impl SwitchboardApp {
         };
         for r in pending {
             let _ = r.reply.try_send(answer.clone());
+        }
+    }
+
+    /// The masked text a device gets for Dispatch's reply to `body`:
+    /// the ticket slot of its key, the part, and the value; `None` for a
+    /// reply answered as it is.
+    fn ticket_text_of(
+        &self,
+        body: &Body,
+        result: &Result<Reply, String>,
+    ) -> Option<(Option<String>, TicketPart, serde_json::Value)> {
+        match (body, result) {
+            (Body::Brief { project }, Ok(Reply::Brief(b))) => Some((
+                Some(project.clone()),
+                TicketPart::Brief,
+                serde_json::json!({ "brief": b }),
+            )),
+            (Body::Report { ticket }, Ok(Reply::Report(r))) => Some((
+                Some(ticket.clone()),
+                TicketPart::Report,
+                serde_json::json!({ "report": r }),
+            )),
+            (
+                Body::SupervisorAsk { project, .. } | Body::SupervisorAskStatus { project, .. },
+                Ok(Reply::Ask(a)),
+            ) => Some((
+                Some(project.clone()),
+                TicketPart::Ask(a.id.clone()),
+                ask_json(a),
+            )),
+            (_, Ok(Reply::Decided(d))) => Some((
+                body_ticket(body).map(str::to_owned),
+                TicketPart::Detail,
+                serde_json::json!({
+                    "decision": crate::core::tickets::TicketDecision::from(d),
+                }),
+            )),
+            (_, Ok(Reply::Ticket(t))) => Some((
+                body_ticket(body).map(str::to_owned),
+                TicketPart::Detail,
+                serde_json::json!({ "ticket": self.core.ticket_summary(t) }),
+            )),
+            (Body::Artifact { path, .. }, Ok(Reply::Artifact { text })) => {
+                let key = crate::core::tickets::file_key(path);
+                Some((
+                    body_ticket(body).map(str::to_owned),
+                    TicketPart::File(key.clone()),
+                    serde_json::json!({ "key": key, "text": text }),
+                ))
+            }
+            // The core has taken the events in by now, or marked them
+            // unavailable from this runner; either way the cache answers.
+            (Body::Events { ticket, .. }, Ok(Reply::Events(_) | Reply::Failed { .. })) => Some((
+                Some(ticket.clone()),
+                TicketPart::Events,
+                serde_json::to_value(self.core.ticket_events(ticket)).unwrap_or_default(),
+            )),
+            _ => None,
         }
     }
 
@@ -3044,6 +3587,7 @@ impl SwitchboardApp {
             },
             reply: reply.clone(),
             asked: Instant::now(),
+            op: None,
         });
         self.dispatch_inner(AppAction::DispatchReadEvents {
             ticket: ticket.to_owned(),
@@ -3114,6 +3658,7 @@ impl SwitchboardApp {
             },
             reply: reply.clone(),
             asked: Instant::now(),
+            op: None,
         });
         self.dispatch_inner(AppAction::DispatchReadArtifact {
             ticket: ticket.to_owned(),
@@ -3563,6 +4108,12 @@ impl SwitchboardApp {
         self.remote_port_override = port;
     }
 
+    /// The home directory a device's new project must sit under; tests
+    /// set a temporary one.
+    pub fn set_remote_home(&mut self, home: Option<PathBuf>) {
+        self.remote_home = home;
+    }
+
     /// Bind the remote port as the identity says: loopback until the
     /// owner allows the local network. `wake` runs on a connection
     /// thread whenever a request is queued. Refused for a read-only
@@ -3723,6 +4274,21 @@ impl SwitchboardApp {
             ("POST", ["sessions", session, "dictation"]) => {
                 return Served::Now(self.remote_dictation(request, &device, session));
             }
+            ("POST", ["projects"]) => {
+                return Served::Now(self.remote_add_project(request, &device));
+            }
+            ("POST", ["sessions", session, "run"]) => {
+                return Served::Now(self.remote_run(request, &device, session));
+            }
+            ("GET", ["dispatch", "projects", project, "brief"]) => {
+                return self.remote_brief(request, project, reply);
+            }
+            ("POST", ["dispatch", "projects", project, "supervisor", "ask"]) => {
+                return self.remote_ask(request, &device, project, reply);
+            }
+            ("GET", ["dispatch", "projects", project, "supervisor", "ask", id]) => {
+                return self.remote_ask_status(request, project, id, reply);
+            }
             ("GET", ["dispatch", "tickets"]) => return self.remote_tickets(request, reply),
             ("GET", ["dispatch", "tickets", ticket]) => {
                 return self.remote_ticket(request, ticket, reply);
@@ -3733,10 +4299,13 @@ impl SwitchboardApp {
                     "dispatch",
                     "tickets",
                     ticket,
-                    verb @ ("decide" | "resume" | "close"),
+                    verb @ ("decide" | "resume" | "close" | "park"),
                 ],
             ) => {
                 return self.remote_ticket_command(request, &device, ticket, verb, reply);
+            }
+            ("GET", ["dispatch", "tickets", ticket, "report"]) => {
+                return self.remote_report(request, ticket, reply);
             }
             ("GET", ["dispatch", "tickets", ticket, "events"]) => {
                 return self.remote_ticket_events(request, ticket, reply);
@@ -3851,20 +4420,11 @@ impl SwitchboardApp {
                 true,
             );
         }
-        let Ok(body) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
-            return self.refuse(request, 400, "bad_request", "the body is not JSON", true);
+        let (body, op) = match self.body_op(request) {
+            Ok(parsed) => parsed,
+            Err(refused) => return refused,
         };
         let field = |name: &str| body.get(name).and_then(|v| v.as_str()).map(str::trim);
-        let op = field("op").unwrap_or_default();
-        if op.is_empty() || op.len() > OP_CAP {
-            return self.refuse(
-                request,
-                400,
-                "bad_request",
-                "op is the operation id, 1 to 64 characters",
-                true,
-            );
-        }
         let session = session.to_owned();
         let body = match verb {
             "send" => {
@@ -3917,20 +4477,11 @@ impl SwitchboardApp {
                 true,
             );
         }
-        let Ok(body) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
-            return self.refuse(request, 400, "bad_request", "the body is not JSON", true);
+        let (body, op) = match self.body_op(request) {
+            Ok(parsed) => parsed,
+            Err(refused) => return refused,
         };
         let field = |name: &str| body.get(name).and_then(|v| v.as_str()).map(str::trim);
-        let op = field("op").unwrap_or_default();
-        if op.is_empty() || op.len() > OP_CAP {
-            return self.refuse(
-                request,
-                400,
-                "bad_request",
-                "op is the operation id, 1 to 64 characters",
-                true,
-            );
-        }
         let root = parse_uuid("project", project)
             .ok()
             .and_then(|id| self.core.workspace(ProjectId(id)))
@@ -4281,7 +4832,7 @@ impl SwitchboardApp {
             "server_id": identity.server_id,
             "server_name": identity.server_name,
             "protocol": REMOTE_PROTOCOL,
-            "capabilities": ["read", "control", "draft", "scope", "tickets", "evidence", "create"],
+            "capabilities": ["read", "control", "draft", "scope", "tickets", "evidence", "create", "owner_channel"],
             "spki_sha256": identity.spki_sha256,
             "version": self.core.version(),
             "limits": {
@@ -4415,6 +4966,7 @@ impl SwitchboardApp {
             "device_id": device.id,
             "name": device.name,
             "scope": device.scope,
+            "agent": device.agent,
             "server_id": identity.map(|i| i.server_id),
             "server_name": identity.map(|i| i.server_name.as_str()),
         });
@@ -5107,6 +5659,81 @@ fn same_origin(request: &RemoteRequest) -> bool {
         (Some(origin), Some(host)) => origin.strip_prefix("https://") == Some(host.as_str()),
         _ => false,
     }
+}
+
+/// Whether a device's call `a` is answered by Dispatch's reply to
+/// `body`: the same thing asked of the same ticket or project.
+fn same_call(a: &Body, body: &Body) -> bool {
+    match (a, body) {
+        (
+            Body::Decide {
+                ticket, decision, ..
+            },
+            Body::Decide {
+                ticket: t,
+                decision: d,
+                ..
+            },
+        ) => ticket == t && decision == d,
+        (Body::Resume { ticket }, Body::Resume { ticket: t })
+        | (Body::Close { ticket, .. }, Body::Close { ticket: t, .. })
+        | (Body::Park { ticket, .. }, Body::Park { ticket: t, .. })
+        | (Body::Report { ticket }, Body::Report { ticket: t })
+        | (Body::Events { ticket, .. }, Body::Events { ticket: t, .. }) => ticket == t,
+        (Body::Artifact { path, .. }, Body::Artifact { path: p, .. }) => path == p,
+        (Body::Brief { project }, Body::Brief { project: p }) => project == p,
+        (
+            Body::SupervisorAsk { project, text, by },
+            Body::SupervisorAsk {
+                project: p,
+                text: x,
+                by: b,
+            },
+        ) => project == p && text == x && by == b,
+        (
+            Body::SupervisorAskStatus { project, id },
+            Body::SupervisorAskStatus { project: p, id: i },
+        ) => project == p && id == i,
+        _ => false,
+    }
+}
+
+/// How many owner-channel ops the app remembers the message of.
+const ASK_OPS_KEPT: usize = 256;
+
+/// Who an agent device acts as in Dispatch's records.
+fn agent_name(device: &PairedDevice) -> String {
+    format!("mcp:{}", device.name)
+}
+
+/// An owner-channel message on the wire before the supervisor has
+/// answered: the message and where it stands, with no reply.
+fn ask_json(a: &dispatch_control::AskView) -> serde_json::Value {
+    serde_json::json!({
+        "id": a.id,
+        "state": a.state,
+        "reply": serde_json::Value::Null,
+        "ask": a,
+    })
+}
+
+/// `root` canonicalised when it is a directory strictly below a direct
+/// child of `home`, with no component that starts with a dot; a link
+/// out of the home directory resolves outside it and is refused.
+fn project_root_below_home(root: &Path, home: &Path) -> Option<PathBuf> {
+    let home = home.canonicalize().ok()?;
+    let root = root.canonicalize().ok()?;
+    if !root.is_dir() {
+        return None;
+    }
+    let below = root.strip_prefix(&home).ok()?;
+    let parts: Vec<_> = below.components().collect();
+    let clean = parts.len() >= 2
+        && parts.iter().all(|c| match c {
+            std::path::Component::Normal(name) => !name.to_string_lossy().starts_with('.'),
+            _ => false,
+        });
+    clean.then_some(root)
 }
 
 /// The ticket a call to Dispatch is about.

@@ -499,6 +499,7 @@ fn pair(port: &mut Port, code: &str, scope: Scope, name: &str) -> String {
     port.app.dispatch(AppAction::OpenPairing {
         code: code.into(),
         scope,
+        agent: false,
     });
     let spki = port
         .remote
@@ -676,6 +677,7 @@ fn a_pairing_with_another_hosts_key_or_the_wrong_code_counts_and_three_lock_the_
     port.app.dispatch(AppAction::OpenPairing {
         code: "ABCD2345".into(),
         scope: Scope::Read,
+        agent: false,
     });
     let spki = port
         .remote
@@ -738,6 +740,7 @@ fn a_pair_body_with_no_key_is_refused_and_not_counted() {
     port.app.dispatch(AppAction::OpenPairing {
         code: "ABCD2345".into(),
         scope: Scope::Read,
+        agent: false,
     });
     for body in [
         serde_json::json!({}),
@@ -761,6 +764,7 @@ fn reopening_pairing_lets_a_locked_address_pair() {
         port.app.dispatch(AppAction::OpenPairing {
             code: "ABCD2345".into(),
             scope: Scope::Read,
+            agent: false,
         });
     };
     open(&mut port);
@@ -844,7 +848,7 @@ fn the_allowlist_refuses_everything_else_with_no_side_effect() {
         ("POST", format!("/api/v1/sessions/{session}/notes")),
         ("GET", format!("/api/v1/sessions/{session}/env")),
         ("GET", "/api/v1/env/resolve".into()),
-        ("POST", "/api/v1/projects".into()),
+        ("DELETE", format!("/api/v1/projects/{project}")),
         ("DELETE", format!("/api/v1/sessions/{session}")),
         ("GET", "/api/v2/projects".into()),
     ] {
@@ -1866,6 +1870,7 @@ fn a_missing_key_at_start_remakes_the_identity_and_clears_the_devices() {
                 token_sha256: "ab".repeat(32),
                 created: std::time::SystemTime::UNIX_EPOCH,
                 last_seen: None,
+                agent: false,
             });
     }
     let secrets = FakeSecrets::default();
@@ -2064,6 +2069,7 @@ fn write_fixtures(dir: &std::path::Path) {
     port.app.dispatch(AppAction::OpenPairing {
         code: "ABCD2345".into(),
         scope: Scope::Read,
+        agent: false,
     });
     let body = serde_json::json!({
         "code": "ABCD2345", "device_name": "Vision Pro", "spki_sha256": identity.spki_sha256
@@ -4516,6 +4522,7 @@ fn pair_cookie(port: &mut Port, code: &str, scope: Scope) -> (String, serde_json
     port.app.dispatch(AppAction::OpenPairing {
         code: code.into(),
         scope,
+        agent: false,
     });
     let spki = port
         .remote
@@ -4681,6 +4688,7 @@ fn a_browser_pairs_into_a_cookie_named_for_the_host() {
     port.app.dispatch(AppAction::OpenPairing {
         code: "WXYZ6789".into(),
         scope: Scope::Read,
+        agent: false,
     });
     let spki = info["body"]["spki_sha256"].as_str().unwrap();
     let body = serde_json::json!({ "code": "WXYZ6789", "device_name": "Pad", "spki_sha256": spki });
@@ -4976,6 +4984,7 @@ fn browser_step(
         port.app.dispatch(AppAction::OpenPairing {
             code: code.into(),
             scope: Scope::Control,
+            agent: false,
         });
         let identity = port.remote.state().identity.clone().unwrap();
         let window = port.app.core().pairing().unwrap().clone();
@@ -5468,4 +5477,460 @@ fn an_evidence_image_at_the_limit_is_served_and_one_byte_over_is_refused() {
     let bytes = shot_bytes(700 * 1024 + 1);
     let (status, reply) = shot_read(&bytes, "shot-over-limit");
     assert_eq!((status, code(&reply)), (413, "too_large"), "{reply}");
+}
+
+// --- the agent routes: brief, owner channel, runs, new projects
+
+/// A port whose Dispatch answers `tickets_status` and a brief of
+/// Orchard naming a secret, with the fake's shared owner-channel
+/// messages and calls.
+struct AgentPort {
+    port: Port,
+    asks: Arc<std::sync::Mutex<Vec<dispatch_control::AskView>>>,
+    calls: Arc<std::sync::Mutex<Vec<dispatch_control::Body>>>,
+}
+
+fn agent_port() -> AgentPort {
+    let dispatch = FakeDispatch {
+        status: Some(tickets_status()),
+        briefs: [(
+            "Orchard".to_owned(),
+            dispatch_control::BriefView {
+                project: "Orchard".into(),
+                supervisor: "supervisor: session sup-session-id, 2m00s old".into(),
+                handoff: Some("deploy key tok-5e3cr3t is in the vault".into()),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        ..FakeDispatch::default()
+    };
+    let (asks, calls) = (Arc::clone(&dispatch.asks), Arc::clone(&dispatch.calls));
+    let mut port = port_built(
+        FakeHost::default(),
+        FakeSecrets::default(),
+        FakeRemoteStore::default(),
+        dispatch,
+    );
+    port.app
+        .dispatch(AppAction::DispatchStatus(Some(tickets_status())));
+    AgentPort { port, asks, calls }
+}
+
+/// Open a window of `scope`, for an agent or not, and pair as `name`
+/// with `extra` fields in the body: the token.
+fn pair_as(
+    port: &mut Port,
+    scope: Scope,
+    agent: bool,
+    name: &str,
+    extra: &serde_json::Value,
+) -> String {
+    port.app.dispatch(AppAction::OpenPairing {
+        code: "ABCD2345".into(),
+        scope,
+        agent,
+    });
+    let spki = port.remote.state().identity.clone().unwrap().spki_sha256;
+    let mut body = serde_json::json!({
+        "code": "ABCD2345", "device_name": name, "spki_sha256": spki,
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        body[k] = v.clone();
+    }
+    let (status, reply) = call(port, "POST", "/api/v1/pair", None, &body.to_string());
+    assert_eq!(status, 200, "{reply}");
+    reply["body"]["token"].as_str().unwrap().to_owned()
+}
+
+/// A project secret `API_TOKEN` = `tok-5e3cr3t` on `project`.
+fn project_secret(port: &mut Port, project: &str) {
+    let pid = switchboard::core::ProjectId(uuid::Uuid::parse_str(project).unwrap());
+    port.secrets.state().insert(
+        switchboard::core::SecretScope::Project(pid).account("API_TOKEN"),
+        "tok-5e3cr3t".into(),
+    );
+    port.app.dispatch(AppAction::SetProjectEnv(
+        pid,
+        switchboard::core::ProjectEnv {
+            vars: vec![switchboard::core::EnvVar {
+                name: "API_TOKEN".into(),
+                value: String::new(),
+                secret: true,
+            }],
+            ..Default::default()
+        },
+    ));
+}
+
+#[test]
+fn info_names_the_owner_channel_and_me_says_whether_the_device_is_an_agent() {
+    let AgentPort { mut port, .. } = agent_port();
+    let (_, info) = get(&mut port, "/api/v1/info", None);
+    let caps = info["body"]["capabilities"].as_array().unwrap();
+    assert!(caps.iter().any(|c| c == "owner_channel"), "{info}");
+    let token = pair_as(
+        &mut port,
+        Scope::Control,
+        true,
+        "laptop",
+        &serde_json::json!({}),
+    );
+    let (status, me) = get(&mut port, "/api/v1/me", Some(&token));
+    assert_eq!(status, 200, "{me}");
+    assert_eq!(me["body"]["agent"], true);
+}
+
+#[test]
+fn a_brief_is_read_masked_with_the_projects_secrets() {
+    let AgentPort { mut port, .. } = agent_port();
+    let (_, project, _) = seed(&mut port, "");
+    project_secret(&mut port, &project);
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Pad");
+    let (status, reply) = get(
+        &mut port,
+        "/api/v1/dispatch/projects/Orchard/brief",
+        Some(&token),
+    );
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(
+        reply["body"]["brief"]["handoff"],
+        "deploy key <API_TOKEN> is in the vault"
+    );
+    assert!(!reply.to_string().contains("tok-5e3cr3t"), "{reply}");
+    let (status, reply) = get(
+        &mut port,
+        "/api/v1/dispatch/projects/Grove/brief",
+        Some(&token),
+    );
+    assert_eq!((status, code(&reply)), (404, "not_found"), "{reply}");
+}
+
+#[test]
+fn only_a_control_device_the_owner_paired_as_an_agent_messages_a_supervisor() {
+    let AgentPort { mut port, asks, .. } = agent_port();
+    let ask = "/api/v1/dispatch/projects/Orchard/supervisor/ask";
+    let body = r#"{"op":"a-1","text":"Where does t1 stand?"}"#;
+    // A device that claims to be an agent when it pairs is not one.
+    let claimed = pair_as(
+        &mut port,
+        Scope::Control,
+        false,
+        "Vision Pro",
+        &serde_json::json!({ "client": "mcp", "agent": true }),
+    );
+    assert!(!port.app.core().devices()[0].agent, "the claim is ignored");
+    let (status, reply) = call(&mut port, "POST", ask, Some(&claimed), body);
+    assert_eq!((status, code(&reply)), (403, "agent_only"), "{reply}");
+    let read = pair_as(
+        &mut port,
+        Scope::Read,
+        true,
+        "reader",
+        &serde_json::json!({}),
+    );
+    let (status, reply) = call(&mut port, "POST", ask, Some(&read), body);
+    assert_eq!((status, code(&reply)), (403, "scope"), "{reply}");
+    assert!(asks.lock().unwrap().is_empty(), "nothing reached Dispatch");
+
+    let agent = pair_as(
+        &mut port,
+        Scope::Control,
+        true,
+        "laptop",
+        &serde_json::json!({}),
+    );
+    let t = Some(agent.as_str());
+    let grove = "/api/v1/dispatch/projects/Grove/supervisor/ask";
+    let (status, reply) = call(&mut port, "POST", grove, t, body);
+    assert_eq!((status, code(&reply)), (409, "no_supervisor"), "{reply}");
+    let (status, reply) = call(&mut port, "POST", ask, t, body);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["state"], "queued");
+    assert_eq!(
+        reply["body"]["ask"]["by"], "mcp:laptop",
+        "the device's own name"
+    );
+    let id = reply["body"]["id"].as_str().unwrap().to_owned();
+    // A repeat of the op is answered with the message it made.
+    let (status, again) = call(&mut port, "POST", ask, t, body);
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["body"]["id"], id.as_str());
+    assert_eq!(asks.lock().unwrap().len(), 1, "asked once");
+    port.app.dispatch(AppAction::DispatchStatus(None));
+    let other = r#"{"op":"a-2","text":"And t2?"}"#;
+    let (status, reply) = call(&mut port, "POST", ask, t, other);
+    assert_eq!((status, code(&reply)), (503, "dispatch_off"), "{reply}");
+}
+
+#[test]
+fn an_ask_reads_queued_then_delivered_then_answered_with_the_reply_masked() {
+    let AgentPort { mut port, asks, .. } = agent_port();
+    let (_, project, session) = seed(&mut port, "");
+    project_secret(&mut port, &project);
+    launched(&mut port, &session);
+    let agent = pair_as(
+        &mut port,
+        Scope::Control,
+        true,
+        "laptop",
+        &serde_json::json!({}),
+    );
+    let t = Some(agent.as_str());
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        "/api/v1/dispatch/projects/Orchard/supervisor/ask",
+        t,
+        r#"{"op":"a-1","text":"Where does t1 stand?"}"#,
+    );
+    assert_eq!(status, 200, "{reply}");
+    let id = reply["body"]["id"].as_str().unwrap().to_owned();
+    let path = format!("/api/v1/dispatch/projects/Orchard/supervisor/ask/{id}");
+    let (status, reply) = get(&mut port, &path, t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["state"], "queued");
+
+    // Typed into the pane; the transcript has the turn, still running.
+    {
+        let mut asks = asks.lock().unwrap();
+        asks[0].state = "delivered".into();
+        asks[0].session = Some(session.clone());
+    }
+    let turn = |end: bool| Turn {
+        n: 2,
+        user: format!(
+            "Owner message {id} (from mcp:laptop):\nAn orchestrating session, not the owner, \
+             asks; answer in your next response.\nWhere does t1 stand?"
+        ),
+        final_text: if end {
+            "t1 waits on tok-5e3cr3t".into()
+        } else {
+            String::new()
+        },
+        end: end.then(SystemTime::now),
+        ..Turn::default()
+    };
+    let mut c = conversation(1);
+    c.turns.push(turn(false));
+    port.transcripts.set(Some(c.clone()));
+    let (status, reply) = get(&mut port, &path, t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["state"], "delivered");
+    assert_eq!(reply["body"]["reply"], serde_json::Value::Null);
+
+    c.turns[1] = turn(true);
+    port.transcripts.set(Some(c));
+    let (status, reply) = get(&mut port, &path, t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["state"], "answered");
+    assert_eq!(reply["body"]["reply"], "t1 waits on <API_TOKEN>");
+    assert!(!reply.to_string().contains("tok-5e3cr3t"), "{reply}");
+}
+
+#[test]
+fn an_agents_decision_and_park_reach_dispatch_with_its_name() {
+    let AgentPort {
+        mut port, calls, ..
+    } = agent_port();
+    let agent = pair_as(
+        &mut port,
+        Scope::Control,
+        true,
+        "laptop",
+        &serde_json::json!({}),
+    );
+    let t = Some(agent.as_str());
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        "/api/v1/dispatch/tickets/t1/decide",
+        t,
+        r#"{"decision":"d1","answer":"frontend","by":"supervisor"}"#,
+    );
+    assert_eq!(status, 200, "{reply}");
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        "/api/v1/dispatch/tickets/t1/park",
+        t,
+        r#"{"reason":"waits on a release"}"#,
+    );
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["ticket"]["state"], "parking");
+    let (status, reply) = get(&mut port, "/api/v1/dispatch/tickets/t1/report", t);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["report"]["id"], "t1");
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        "/api/v1/dispatch/tickets/t3/park",
+        t,
+        "{}",
+    );
+    assert_eq!((status, code(&reply)), (409, "not_active"), "{reply}");
+    let calls = calls.lock().unwrap();
+    assert!(
+        calls.iter().any(|c| matches!(c,
+            dispatch_control::Body::Decide { ticket, by: Some(by), .. }
+                if ticket == "t1" && by == "mcp:laptop")),
+        "{calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| matches!(c,
+            dispatch_control::Body::Park { ticket, reason: Some(r), by: Some(by) }
+                if ticket == "t1" && r == "waits on a release" && by == "mcp:laptop")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn a_run_starts_only_an_approved_command_that_is_not_running() {
+    let mut port = port();
+    let (_, project, agent_session) = seed(&mut port, "");
+    project_secret(&mut port, &project);
+    let token = pair(&mut port, "ABCD2345", Scope::Control, "laptop");
+    let t = Some(token.as_str());
+    let run = |s: &str| format!("/api/v1/sessions/{s}/run");
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &run(&agent_session),
+        t,
+        r#"{"op":"r-0"}"#,
+    );
+    assert_eq!((status, code(&reply)), (409, "not_a_command"), "{reply}");
+    let live = running_command(&mut port, &project, "building\n");
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &run(&live.0.to_string()),
+        t,
+        r#"{"op":"r-1"}"#,
+    );
+    assert_eq!((status, code(&reply)), (409, "running"), "{reply}");
+
+    // A project file's entry is listed, not run, until approved.
+    let pid = switchboard::core::ProjectId(uuid::Uuid::parse_str(&project).unwrap());
+    port.app.dispatch(AppAction::ProjectConfigRead {
+        project: pid,
+        result: Ok(Some(switchboard::ports::project_config::ProjectConfig {
+            entries: vec![switchboard::ports::project_config::DefinedEntry {
+                name: "lint".into(),
+                kind: switchboard::core::SessionKind::Command,
+                command: "make lint".into(),
+                cwd: None,
+                env: Vec::new(),
+                autostart: false,
+                outputs: Vec::new(),
+            }],
+            warnings: vec![],
+            shell: "/bin/sh".into(),
+            show: vec![],
+        })),
+    });
+    let lint = port
+        .app
+        .core()
+        .workspace(pid)
+        .unwrap()
+        .sessions
+        .iter()
+        .find(|s| s.name == "lint")
+        .unwrap()
+        .id;
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        &run(&lint.0.to_string()),
+        t,
+        r#"{"op":"r-2"}"#,
+    );
+    assert_eq!((status, code(&reply)), (409, "not_approved"), "{reply}");
+
+    let (session, id) = command_with_run(&mut port, &project, "first\n");
+    exited(&mut port, id, 0);
+    port.app.poll_now();
+    let (status, reply) = call(&mut port, "POST", &run(&session), t, r#"{"op":"r-3"}"#);
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["body"]["run"], 2);
+    write_last_log(&port, id, "API_TOKEN=tok-5e3cr3t\nok\n");
+    exited(&mut port, id, 0);
+    port.app.poll_now();
+    let (_, runs) = get(&mut port, &format!("/api/v1/sessions/{session}/runs"), t);
+    let listed = runs["body"]["runs"].as_array().unwrap();
+    assert_eq!(listed.len(), 2, "{runs}");
+    assert_eq!(listed[1]["exit"], 0);
+    let (status, out) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/runs/2/output"),
+        t,
+    );
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["body"]["text"], "API_TOKEN=<API_TOKEN>\nok");
+    // The same op again is answered from the log, and starts nothing.
+    let (status, again) = call(&mut port, "POST", &run(&session), t, r#"{"op":"r-3"}"#);
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(port.app.core().session(id).unwrap().runs.len(), 2);
+}
+
+#[test]
+fn a_device_adds_a_project_only_below_a_folder_of_the_home_directory() {
+    let mut port = port();
+    let (space, _, _) = seed(&mut port, "");
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    for dir in ["code_repos/x", "Documents", ".config/x"] {
+        std::fs::create_dir_all(h.join(dir)).unwrap();
+    }
+    std::os::unix::fs::symlink("/tmp", h.join("code_repos/out")).unwrap();
+    port.app.set_remote_home(Some(h.to_path_buf()));
+    let token = pair(&mut port, "ABCD2345", Scope::Control, "laptop");
+    let t = Some(token.as_str());
+    let add = |op: &str, root: &std::path::Path| {
+        serde_json::json!({ "op": op, "name": "x", "root": root, "space": space }).to_string()
+    };
+    for (n, root) in [
+        PathBuf::from("/"),
+        h.to_path_buf(),
+        h.join("Documents"),
+        h.join(".config/x"),
+        h.join("code_repos/out"),
+        h.join("code_repos/missing"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, reply) = call(
+            &mut port,
+            "POST",
+            "/api/v1/projects",
+            t,
+            &add(&format!("p-{n}"), root),
+        );
+        assert_eq!(
+            (status, code(&reply)),
+            (400, "bad_root"),
+            "{}: {reply}",
+            root.display()
+        );
+    }
+    let (status, reply) = call(
+        &mut port,
+        "POST",
+        "/api/v1/projects",
+        t,
+        &add("p-ok", &h.join("code_repos/x")),
+    );
+    assert_eq!(status, 200, "{reply}");
+    let root = h.join("code_repos/x").canonicalize().unwrap();
+    assert!(
+        port.app
+            .core()
+            .workspaces()
+            .iter()
+            .any(|w| w.project.root == root),
+        "the project was made at the canonical root"
+    );
 }

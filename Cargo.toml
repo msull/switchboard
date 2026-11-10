@@ -79,6 +79,7 @@ security-framework = "3"
 mdns-sd = "0.21"
 
 [dev-dependencies]
+switchboard-mcp = { path = "mcp" }
 egui_kittest = { version = "0.37", features = ["eframe"] }
 tempfile = "3"
 
@@ -86,9 +87,10 @@ tempfile = "3"
 workspace = true
 
 # The other crates: the control port's wire contract, which both the app
-# and Dispatch speak, and Dispatch itself. Spikes stay standalone.
+# and Dispatch speak, Dispatch itself, and the MCP server that drives a
+# paired host. Spikes stay standalone.
 [workspace]
-members = ["control", "dispatch", "dispatch-control"]
+members = ["control", "dispatch", "dispatch-control", "mcp"]
 # A path dependency, not ours to lint.
 exclude = ["vendor/egui_term"]
 

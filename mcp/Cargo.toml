@@ -1,0 +1,33 @@
+[package]
+name = "switchboard-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "An MCP server that lets an agent session watch and drive paired Switchboard hosts"
+license = "MIT"
+publish = false
+
+[lib]
+name = "switchboard_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "switchboard-mcp"
+path = "src/main.rs"
+
+# No egui and no app: the pinned client is copied, not linked from the
+# root crate, so this stays a small helper beside the others.
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tungstenite = "0.30"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+rcgen = "0.14"
+tempfile = "3"
+
+[lints]
+workspace = true

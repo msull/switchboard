@@ -108,6 +108,13 @@ pub enum TicketPart {
     Events,
     /// One file of an attempt, by its key.
     File(String),
+    /// A project's brief, by Dispatch's project name in the ticket slot.
+    Brief,
+    /// A ticket's report.
+    Report,
+    /// An owner-channel message to a project's supervisor, by its id;
+    /// the project's name is in the ticket slot.
+    Ask(String),
 }
 
 impl ContentKey {
@@ -140,6 +147,9 @@ impl ContentKey {
                     TicketPart::Detail => ticket.to_owned(),
                     TicketPart::Events => format!("{ticket}/events"),
                     TicketPart::File(key) => format!("{ticket}/files/{key}"),
+                    TicketPart::Brief => format!("{ticket}/brief"),
+                    TicketPart::Report => format!("{ticket}/report"),
+                    TicketPart::Ask(id) => format!("{ticket}/asks/{id}"),
                 }
             }
         }
@@ -400,6 +410,12 @@ pub enum ContentView {
     /// One turn whole, with its tool detail uncut.
     Turn {
         n: usize,
+    },
+    /// The supervisor's answer to an owner-channel message: the turn
+    /// whose prompt starts `Owner message ask-<id>`, with `id` the 48
+    /// bits of hex after `ask-`, and its response once the turn ended.
+    AskReply {
+        id: u64,
     },
     Tail {
         lines: usize,
@@ -1036,6 +1052,7 @@ fn observe(
                         conversation_page(conversation, links, &resume_id, from, limit)
                     }
                     ContentView::Turn { n } => turn_body(conversation, links, &resume_id, n),
+                    ContentView::AskReply { id } => ask_reply(conversation, id),
                     _ => last_response(conversation, links, &resume_id),
                 };
                 (source, body)
@@ -1283,6 +1300,44 @@ pub fn conversation_page(
         "from": first,
         "next": next,
         "turns": turns,
+    })
+}
+
+/// The id an owner-channel message carries, `ask-` and 12 hex digits,
+/// as the number `ContentView::AskReply` holds; `None` for anything
+/// else.
+#[must_use]
+pub fn ask_number(id: &str) -> Option<u64> {
+    let hex = id.strip_prefix("ask-")?;
+    if hex.len() != 12 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u64::from_str_radix(hex, 16).ok()
+}
+
+/// Where the supervisor stands on owner-channel message `id`: the turn
+/// it was typed as, found by the prompt's first words, and the turn's
+/// answer once the turn has ended. Not found yet is `delivered`: the
+/// transcript lags the pane by a moment.
+#[must_use]
+pub fn ask_reply(conversation: &Conversation, id: u64) -> serde_json::Value {
+    let ask = format!("ask-{id:012x}");
+    let head = format!("Owner message {ask} ");
+    let turn = conversation
+        .turns
+        .iter()
+        .rev()
+        .find(|t| t.user.trim_start().starts_with(&head));
+    let answered = turn.filter(|t| t.end.is_some() && !t.final_text.trim().is_empty());
+    let (text, truncated) = answered.map_or((String::new(), false), |t| {
+        cap_text(&t.final_text, TURN_BYTES_CAP)
+    });
+    serde_json::json!({
+        "id": ask,
+        "state": if answered.is_some() { "answered" } else { "delivered" },
+        "n": turn.map(|t| t.n),
+        "reply": answered.map(|_| text),
+        "truncated": truncated,
     })
 }
 

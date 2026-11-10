@@ -434,6 +434,17 @@ pub const BY_RESUME: &str = "resume";
 /// Who answered, parked, resumed, closed or took when the command came
 /// from a project's supervisor session.
 pub const BY_SUPERVISOR: &str = "supervisor";
+/// The prefix of who acted when an orchestrating agent did, through
+/// Switchboard's remote port: `mcp:<device name>`.
+pub const BY_AGENT_PREFIX: &str = "mcp:";
+
+/// Whether `by` answers only what the project's `[supervisor]` table's
+/// `decides` lists: a supervisor session, or an orchestrating agent,
+/// which gets no wider a grant than the supervisor it talks to.
+#[must_use]
+pub fn bound_by_table(by: &str) -> bool {
+    by == BY_SUPERVISOR || by.starts_with(BY_AGENT_PREFIX)
+}
 
 /// The largest note `dispatch decide --file` reads, in bytes.
 pub const NOTE_FILE_MAX: u64 = 64 * 1024;
@@ -9214,7 +9225,7 @@ impl Runner {
             }
             // A supervisor answers only what the live table lets it; a
             // refusal is saved on the decision, which still waits.
-            if by == BY_SUPERVISOR
+            if bound_by_table(by)
                 && !crate::supervisor::decides(&self.data, &t.project).contains(&d.name)
             {
                 let name = d.name.clone();
@@ -9224,6 +9235,13 @@ impl Runner {
                     at_ms: now_ms,
                 });
                 write_ticket_stamped(&self.data, &mut t, now_ms)?;
+                if by != BY_SUPERVISOR {
+                    bail!(
+                        "{by} may not answer `{name}`: the project's supervisor table does not \
+                         list it; the owner does, {}",
+                        crate::supervisor::OWNER_ROUTES
+                    );
+                }
                 bail!(
                     "the supervisor may not answer `{name}`; the owner does, {}; a command \
                      typed in the supervisor's pane is the supervisor's",

@@ -344,6 +344,14 @@ pub struct FakeDispatch {
     pub usage: HashMap<String, dispatch_control::UsageView>,
     /// What `build_on_disk` answers.
     pub on_disk: Option<dispatch_control::BuildId>,
+    /// What a brief answers, by project; any other is `no such project`.
+    pub briefs: HashMap<String, dispatch_control::BriefView>,
+    /// The owner-channel messages, shared so a test can mark one typed.
+    /// An ask to a project whose status shows no supervisor session is
+    /// refused as the runner refuses it.
+    pub asks: Arc<Mutex<Vec<dispatch_control::AskView>>>,
+    /// Every call made, in order, shared so a test can read it back.
+    pub calls: Arc<Mutex<Vec<DispatchBody>>>,
 }
 
 impl FakeDispatch {
@@ -357,6 +365,66 @@ impl FakeDispatch {
             }
             Some(text) => DispatchReply::Artifact { text: text.clone() },
         }
+    }
+
+    /// The answer to a brief, an owner-channel call, a park or a
+    /// report; `None` for any other body.
+    fn owner_channel_reply(&self, status: &Status, body: &DispatchBody) -> Option<DispatchReply> {
+        let ticket = |id: &str| status.tickets.iter().find(|t| t.id == id).cloned();
+        Some(match body {
+            DispatchBody::Brief { project } => self.briefs.get(project).cloned().map_or_else(
+                || DispatchReply::failed("no such project"),
+                DispatchReply::Brief,
+            ),
+            DispatchBody::SupervisorAsk { project, text, by } => {
+                let seated = status
+                    .projects
+                    .iter()
+                    .find(|p| &p.name == project)
+                    .and_then(|p| p.supervisor.as_ref())
+                    .is_some_and(|s| s.session.is_some());
+                if !seated {
+                    return Some(DispatchReply::failed(format!(
+                        "{}: {project} has no supervisor session",
+                        dispatch_control::NO_SUPERVISOR
+                    )));
+                }
+                let mut asks = self.asks.lock().unwrap();
+                let view = dispatch_control::AskView {
+                    id: format!("ask-{:012x}", asks.len() + 1),
+                    project: project.clone(),
+                    text: text.clone(),
+                    by: by.clone(),
+                    state: "queued".into(),
+                    ..Default::default()
+                };
+                asks.push(view.clone());
+                DispatchReply::Ask(view)
+            }
+            DispatchBody::SupervisorAskStatus { project, id } => self
+                .asks
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|a| &a.project == project && &a.id == id)
+                .cloned()
+                .map_or_else(
+                    || DispatchReply::failed("no such message"),
+                    DispatchReply::Ask,
+                ),
+            DispatchBody::Park { ticket: id, .. } => ticket(id).map_or_else(
+                || DispatchReply::failed("no such ticket"),
+                |mut t| {
+                    t.state = "parking".into();
+                    DispatchReply::Ticket(t)
+                },
+            ),
+            DispatchBody::Report { ticket: id } => ticket(id).map_or_else(
+                || DispatchReply::failed("no such ticket"),
+                |t| DispatchReply::Report(serde_json::json!({ "id": t.id, "title": t.title })),
+            ),
+            _ => return None,
+        })
     }
 
     /// The usage set for `ticket`, else the answer of a runner from
@@ -382,10 +450,15 @@ impl DispatchPort for FakeDispatch {
     fn build_on_disk(&self) -> Option<dispatch_control::BuildId> {
         self.on_disk.clone()
     }
+    #[allow(clippy::too_many_lines)] // one arm per body
     fn call(&mut self, body: &DispatchBody) -> std::io::Result<DispatchReply> {
         let Some(status) = &self.status else {
             return Err(std::io::Error::other("no runner"));
         };
+        self.calls.lock().unwrap().push(body.clone());
+        if let Some(reply) = self.owner_channel_reply(status, body) {
+            return Ok(reply);
+        }
         Ok(match body {
             DispatchBody::Status => DispatchReply::Status(status.clone()),
             DispatchBody::Ticket { id } => status
@@ -452,7 +525,7 @@ impl DispatchPort for FakeDispatch {
                     || DispatchReply::failed("no such ticket"),
                     DispatchReply::Ticket,
                 ),
-            DispatchBody::Close { ticket, reason } => status
+            DispatchBody::Close { ticket, reason, .. } => status
                 .tickets
                 .iter()
                 .find(|t| &t.id == ticket)
@@ -472,6 +545,11 @@ impl DispatchPort for FakeDispatch {
                         DispatchReply::Ticket(t)
                     },
                 ),
+            DispatchBody::Brief { .. }
+            | DispatchBody::SupervisorAsk { .. }
+            | DispatchBody::SupervisorAskStatus { .. }
+            | DispatchBody::Park { .. }
+            | DispatchBody::Report { .. } => DispatchReply::failed("answered above"),
             // As the runner answers: the intent saved, the status at once.
             DispatchBody::SupervisorFresh { project } => {
                 let mut status = status.clone();

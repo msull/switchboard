@@ -378,6 +378,13 @@ pub enum Body {
     /// paid turn, so it is never repeated by recovery.
     #[serde(rename = "standing.restart")]
     StandingRestart { session: String },
+    /// Start a new run of a command session that is not running: the
+    /// dead pane is cleared and the command launched fresh. Only a
+    /// runnable record (user-made, or an approved project entry) is
+    /// started; a running one is left alone. Never repeated by recovery,
+    /// since a command can do anything once more.
+    #[serde(rename = "session.run")]
+    SessionRun { session: String },
     #[serde(rename = "workflow.continue")]
     WorkflowContinue { run: String },
     /// The owner's objection to a converged or capped plan review: opens
@@ -477,6 +484,7 @@ impl Body {
             | Self::SessionPrompt { .. }
             | Self::SessionResume { .. }
             | Self::StandingRestart { .. }
+            | Self::SessionRun { .. }
             | Self::WorkflowContinue { .. }
             | Self::WorkflowObject { .. } => Class::NonReplayable,
             Self::Projects { .. }
@@ -1285,6 +1293,12 @@ mod tests {
         );
         assert_eq!(req.body.class(), Class::NonReplayable);
         assert_eq!(req.body.kind(), "session.prompt");
+        let run = Body::SessionRun {
+            session: "s".into(),
+        };
+        assert_eq!(run.class(), Class::NonReplayable);
+        assert_eq!(run.kind(), "session.run");
+        round_trip_request(run);
         round_trip_request(req.body);
         // A view from an older app has no refusal, which reads as none.
         let mut line = serde_json::to_value(session()).unwrap();

@@ -46,12 +46,13 @@ impl AppCore {
                     });
                 }
             }
-            AppAction::OpenPairing { code, scope } => {
+            AppAction::OpenPairing { code, scope, agent } => {
                 // Typed by hand on the device, so case never matters.
                 self.pairing = Some(PairingWindow {
                     until: now.mono + PAIRING_WINDOW,
                     code: code.trim().to_ascii_uppercase(),
                     scope,
+                    agent,
                     failures: 0,
                     sources: Vec::new(),
                 });
@@ -181,14 +182,16 @@ impl AppCore {
         self.pairing.as_ref()
     }
 
-    /// A device record for a pairing that matched: the window's scope,
-    /// the token's hash, and the time.
+    /// A device record for a pairing that matched: the window's scope
+    /// and agent mark, the token's hash, and the time. Nothing the
+    /// device sent decides either.
     #[must_use]
     pub fn new_device(&self, name: &str, token_sha256: String, at: SystemTime) -> PairedDevice {
         PairedDevice {
             id: Uuid::new_v4(),
             name: name.trim().chars().take(64).collect(),
             scope: self.pairing.as_ref().map_or(Scope::Read, |p| p.scope),
+            agent: self.pairing.as_ref().is_some_and(|p| p.agent),
             token_sha256,
             created: at,
             last_seen: None,

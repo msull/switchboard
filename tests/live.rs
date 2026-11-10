@@ -5,7 +5,15 @@
 //! cargo test --locked --test live -- --ignored claude_live --nocapture
 //! cargo test --locked --test live -- --ignored codex_live --nocapture
 //! cargo test --locked --test live -- --ignored ghostty_live --nocapture
+//! cargo test --locked --test live -- --ignored owner_message_live --nocapture
 //! ```
+//!
+//! `owner_message_live` sends one owner-channel message, headed as
+//! Dispatch types it into a supervisor's pane, to a one-turn haiku
+//! session, and asserts the transcript holds it as one user turn that
+//! the port's `ask_reply` finds and reads as answered. It checks the
+//! header and the reply read on the Claude Code version installed; the
+//! pane's between-turns typing is the delivery tests' fake's.
 //!
 //! `claude_live` runs, from a temp cwd with a temp data dir:
 //!
@@ -30,6 +38,7 @@ use switchboard::core::{AgentKind, RecordId, ResumeHandle};
 use switchboard::ports::agent::AgentLauncher;
 use switchboard::ports::events::{EventKind, EventSource};
 use switchboard::ports::opener::Opener;
+use switchboard::ports::transcript::TranscriptReader as _;
 
 /// A nested Claude session inherits `CLAUDE*` variables that turn off
 /// transcript saving in the child (spike 03), so scrub them.
@@ -192,4 +201,51 @@ fn ghostty_live() {
         Ok(false),
         "window should be gone"
     );
+}
+
+#[test]
+#[ignore = "runs claude with --model haiku; costs a fraction of a cent"]
+fn owner_message_live() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let cwd = tmp.path().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let hook_bin = Path::new(env!("CARGO_BIN_EXE_switchboard-hook"));
+    write_hook_settings(&data_dir, hook_bin).unwrap();
+    let agents = Agents::detect(&data_dir);
+    assert!(agents.available(AgentKind::ClaudeCode), "claude not found");
+    let record = RecordId::new();
+    let launch = agents
+        .prepare_launch(AgentKind::ClaudeCode, record, "switchboard-live", &cwd)
+        .unwrap();
+    // As `dispatch::subscribe::ask_text` heads it.
+    let id = "ask-00000000002a";
+    let text = format!(
+        "Owner message {id} (from mcp:live):\nAn orchestrating session, not the owner, asks; \
+         answer in your next response.\nReply with the single word pong."
+    );
+    let mut cmd = Command::new(&launch.argv[0]);
+    cmd.args(["-p", &text, "--max-turns", "1", "--model", "haiku"])
+        .args(&launch.argv[1..])
+        .current_dir(&cwd)
+        .envs(launch.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    scrub_claude_env(&mut cmd);
+    let out = cmd.output().expect("run claude");
+    println!("stdout: {}", String::from_utf8_lossy(&out.stdout));
+    assert!(out.status.success(), "claude exited {}", out.status);
+    let handle = launch.resume.unwrap();
+    let conversation = switchboard::adapters::transcript::ClaudeTranscripts
+        .read(&handle)
+        .unwrap();
+    let typed: Vec<_> = conversation
+        .turns
+        .iter()
+        .filter(|t| t.user.starts_with(&format!("Owner message {id} ")))
+        .collect();
+    assert_eq!(typed.len(), 1, "one user turn: {:?}", conversation.turns);
+    let n = switchboard::content::ask_number(id).unwrap();
+    let reply = switchboard::content::ask_reply(&conversation, n);
+    println!("reply: {reply}");
+    assert_eq!(reply["state"], "answered", "{reply}");
+    assert!(reply["reply"].as_str().is_some_and(|r| !r.is_empty()));
 }

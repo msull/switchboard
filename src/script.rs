@@ -654,7 +654,7 @@ fn step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         }
         [
             "set-env" | "set-secret" | "dotenv" | "environment" | "config" | "env-setup"
-            | "pairing" | "remote-devices" | "remote-listen",
+            | "pairing" | "pairing-agent" | "remote-devices" | "remote-listen",
             ..,
         ] => {
             env_step(app, w)?;
@@ -766,6 +766,13 @@ fn env_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
         ["pairing", code] => app.dispatch(AppAction::OpenPairing {
             code: (*code).to_owned(),
             scope: crate::ports::remote::Scope::Read,
+            agent: false,
+        }),
+        // `pairing-agent ABCD2345` opens a control window for an agent.
+        ["pairing-agent", code] => app.dispatch(AppAction::OpenPairing {
+            code: (*code).to_owned(),
+            scope: crate::ports::remote::Scope::Control,
+            agent: true,
         }),
         ["remote-devices"] => {
             app.ui_state.remote_dialog = Some(crate::ui::remote::RemoteDraft::open(app.core()));

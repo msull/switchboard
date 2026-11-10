@@ -7975,6 +7975,47 @@ mod control {
         assert!(clone.env.is_empty(), "{:?}", clone.env);
     }
 
+    /// The port's run of a command launches it once; a second run while
+    /// the pane is live is refused and starts nothing.
+    #[test]
+    fn a_port_run_launches_a_runnable_command_once_and_not_while_live() {
+        let (mut core, _, ids) = with_records(&[SessionKind::Command], |_| None);
+        let id = ids[0];
+        let effects = control(&mut core, "op-1", ControlAction::Run(id), 2);
+        assert_eq!(super::spawns(&effects).len(), 1, "{effects:?}");
+        assert_eq!(core.take_control_outcome("op-1").unwrap().error, None);
+        core.dispatch(AppAction::HostListed(vec![running(id)]), Clock::at(3));
+        let effects = control(&mut core, "op-2", ControlAction::Run(id), 4);
+        assert!(super::spawns(&effects).is_empty(), "{effects:?}");
+        let error = core.take_control_outcome("op-2").unwrap().error.unwrap();
+        assert!(error.starts_with("running"), "{error}");
+    }
+
+    /// An entry from the project file nobody approved is refused, and
+    /// so are an agent and a service: only a command is run this way.
+    #[test]
+    fn a_port_run_refuses_an_unapproved_entry_an_agent_and_a_service() {
+        let (mut core, pid, ids) = with_records(&[agent(), SessionKind::Service], |_| None);
+        read(
+            &mut core,
+            pid,
+            config(vec![entry("lint", SessionKind::Command, "cargo clippy")]),
+            1,
+        );
+        let lint = defined(&core, pid, "lint").id;
+        for (n, id, want) in [
+            (1, lint, "not approved"),
+            (2, ids[0], "not a command"),
+            (3, ids[1], "not a command"),
+        ] {
+            let op = format!("op-{n}");
+            let effects = control(&mut core, &op, ControlAction::Run(id), 2);
+            assert!(super::spawns(&effects).is_empty(), "{effects:?}");
+            let error = core.take_control_outcome(&op).unwrap().error.unwrap();
+            assert!(error.contains(want), "{error}");
+        }
+    }
+
     /// The port's resume of a running pane leaves it as it is: the
     /// quiet port never opens a terminal.
     #[test]
@@ -9034,6 +9075,7 @@ mod dispatch_page {
             decision: "d1".into(),
             answer: "frontend".into(),
             note: None,
+            by: None,
         };
         assert!(e.contains(&Effect::DispatchCall(body.clone())));
         let mut answered = core.ticket("t1").unwrap().decisions[0].clone();
@@ -10462,6 +10504,7 @@ mod dispatch_page {
         let body = Body::Close {
             ticket: "t1".into(),
             reason: None,
+            by: None,
         };
         let e = core.dispatch(close, Clock::at(3));
         assert!(e.contains(&Effect::DispatchCall(body.clone())));
@@ -12757,6 +12800,7 @@ mod remote {
             token_sha256: hash.into(),
             created: Clock::at(0).wall,
             last_seen: None,
+            agent: false,
         }
     }
 
@@ -12854,6 +12898,7 @@ mod remote {
             until: Duration::ZERO,
             code: "ABCD2345".into(),
             scope: Scope::Read,
+            agent: false,
             failures: 0,
             sources: Vec::new(),
         };
@@ -12909,6 +12954,7 @@ mod remote {
             AppAction::OpenPairing {
                 code: "ABCD2345".into(),
                 scope: Scope::Control,
+                agent: false,
             },
             Clock::at(1_000),
         );
@@ -12930,6 +12976,7 @@ mod remote {
             AppAction::OpenPairing {
                 code: "ABCD2345".into(),
                 scope: Scope::Read,
+                agent: false,
             },
             Clock::at(2_000),
         );
@@ -12953,6 +13000,7 @@ mod remote {
             AppAction::OpenPairing {
                 code: "ZZZZ2345".into(),
                 scope: Scope::Read,
+                agent: false,
             },
             Clock::at(3_000),
         );
@@ -12969,6 +13017,7 @@ mod remote {
             AppAction::OpenPairing {
                 code: "ABCD2345".into(),
                 scope: Scope::Read,
+                agent: false,
             },
             Clock::at(at),
         );
@@ -13147,6 +13196,7 @@ mod remote {
             AppAction::OpenPairing {
                 code: "ABCD2345".into(),
                 scope: Scope::Control,
+                agent: false,
             },
             Clock::at(1_000),
         );
@@ -13166,6 +13216,28 @@ mod remote {
             core.new_device("x", "h3".into(), Clock::at(0).wall).scope,
             Scope::Read
         );
+    }
+
+    /// The agent mark comes from the window the owner opened, and only
+    /// from it.
+    #[test]
+    fn a_window_opened_for_an_agent_makes_an_agent_device_and_one_without_makes_none() {
+        let mut core = loaded_core();
+        for agent in [true, false] {
+            core.dispatch(
+                AppAction::OpenPairing {
+                    code: "ABCD2345".into(),
+                    scope: Scope::Control,
+                    agent,
+                },
+                Clock::at(1_000),
+            );
+            assert_eq!(core.pairing().unwrap().agent, agent);
+            let made = core.new_device("laptop", "h".into(), Clock::at(1_001).wall);
+            assert_eq!(made.agent, agent);
+        }
+        core.dispatch(AppAction::ClosePairing, Clock::at(1_002));
+        assert!(!core.new_device("x", "h".into(), Clock::at(0).wall).agent);
     }
 
     #[test]
@@ -14893,4 +14965,19 @@ mod standing {
             "{effects:?}"
         );
     }
+}
+
+#[test]
+fn a_new_project_lands_in_the_active_space_or_the_first_real_one() {
+    let (mut core, ..) = two_spaces();
+    let active = core.active_space();
+    assert_eq!(core.default_project_space(), Some(active));
+    core.dispatch(AppAction::ShowSpace(SpaceId::GLOBAL), Clock::at(1));
+    let first = core
+        .spaces()
+        .iter()
+        .map(|s| s.id)
+        .find(|id| !id.is_global());
+    assert!(first.is_some());
+    assert_eq!(core.default_project_space(), first);
 }
