@@ -25,6 +25,8 @@ pub fn bitbucket_repo(url: &str) -> Option<String> {
     let rest = url
         .strip_prefix("git@bitbucket.org:")
         .or_else(|| url.strip_prefix("ssh://git@bitbucket.org/"))
+        .or_else(|| url.strip_prefix("git@ssh.bitbucket.org:"))
+        .or_else(|| url.strip_prefix("ssh://git@ssh.bitbucket.org/"))
         .or_else(|| {
             url.strip_prefix("https://")
                 .and_then(|r| r.split_once("bitbucket.org/").map(|(_, r)| r))
@@ -506,6 +508,8 @@ mod tests {
             "https://bitbucket.org/example-co/orchard-backend.git",
             "https://me@bitbucket.org/example-co/orchard-backend",
             "ssh://git@bitbucket.org/example-co/orchard-backend.git",
+            "git@ssh.bitbucket.org:example-co/orchard-backend.git",
+            "ssh://git@ssh.bitbucket.org/example-co/orchard-backend",
         ] {
             assert_eq!(
                 bitbucket_repo(url).as_deref(),

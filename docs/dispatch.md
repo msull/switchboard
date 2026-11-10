@@ -271,8 +271,15 @@ stage before it that the ticket never ran (the refusal says to restart
 at that stage, for a ticket that can take a ranged restart), drops one
 of the ticket's lanes, or changes a lane's `path`, `repo`, `base` or
 `remote` or the project's `repo`, `base`, `remote` or `worktrees`, and
-for a stage after the current one. A stage only the live file has may
-be the target when every live stage before it was run and the first
+for a stage after the current one. A lane's `repo` counts as unchanged
+when the live URL names the same repository (the same `owner/name`) on
+another host of the same provider, such as Bitbucket's
+`ssh.bitbucket.org` for `bitbucket.org`, however the URL is spelled; a
+change of provider is refused. The refusal names each differing lane
+field with its old and new values, any user or password removed from a
+URL. The project's `repo` stays strict: it is compared as text on the
+pipeline's `project` table, not through that same-repository reading. A
+stage only the live file has may be the target when every live stage before it was run and the first
 live stage after it that the ticket has is its current stage or an
 earlier one: the ticket is put there, and the work from that following
 stage on is discarded, as for an earlier stage. When the live file

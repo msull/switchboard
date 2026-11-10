@@ -198,11 +198,14 @@ impl Runner {
                     lane.name
                 );
             };
-            if old.lane(&lane.name).map(lane_shape) != Some(lane_shape(live)) {
+            let Some(mine) = old.lane(&lane.name) else {
                 bail!(
-                    "the live pipeline changes lane {}'s path, repo, base or remote",
+                    "this ticket's own pipeline has no lane {}, so the live one cannot be compared with it",
                     lane.name
                 );
+            };
+            if let Some(difference) = lane_difference(mine, live) {
+                bail!("the live pipeline changes lane {}: {difference}", lane.name);
             }
         }
         let (a, b) = (&old.project, &new.project);
@@ -755,10 +758,122 @@ fn locate(
     Ok((target_old, target_new, live_only))
 }
 
-/// What a restart compares a lane by: where it lives and what it
-/// branches from.
-fn lane_shape(l: &Lane) -> (&PathBuf, &Option<String>, &Option<String>, &Option<String>) {
-    (&l.path, &l.repo, &l.base, &l.remote)
+/// How the live file's `new` differs from the ticket's `old` in where
+/// the lane lives and what it branches from: each differing field as
+/// `<field> <old> to <new>`, joined with "; ", or `None` when a restart
+/// may keep the lane's worktree. `path` is a filesystem path and shown
+/// as is; the URL fields have any user or password removed. A `repo`
+/// that names the same repository on another host of the same provider
+/// is no difference: the clone already made is still that repository.
+fn lane_difference(old: &Lane, new: &Lane) -> Option<String> {
+    fn shown(v: Option<&String>) -> String {
+        v.map_or_else(|| "none".to_owned(), |s| without_userinfo(s))
+    }
+    let mut out = Vec::new();
+    if old.path != new.path {
+        out.push(format!(
+            "path {} to {}",
+            old.path.display(),
+            new.path.display()
+        ));
+    }
+    let same_repo = match (&old.repo, &new.repo) {
+        (Some(a), Some(b)) => same_repository(a, b),
+        (a, b) => a == b,
+    };
+    if !same_repo {
+        out.push(format!(
+            "repo {} to {}",
+            shown(old.repo.as_ref()),
+            shown(new.repo.as_ref())
+        ));
+    }
+    for (field, a, b) in [
+        ("base", &old.base, &new.base),
+        ("remote", &old.remote, &new.remote),
+    ] {
+        if a != b {
+            out.push(format!(
+                "{field} {} to {}",
+                shown(a.as_ref()),
+                shown(b.as_ref())
+            ));
+        }
+    }
+    (!out.is_empty()).then(|| out.join("; "))
+}
+
+/// Whether two remote URLs name one repository: the same provider and
+/// the same `owner/name`, however the URL is spelled (SSH, scp-like or
+/// HTTPS, with or without user, port or `.git`). A URL that is not a
+/// remote (a local path) names only itself.
+fn same_repository(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (repo_identity(a), repo_identity(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// A remote URL as (`scheme://` or empty, authority, rest), where rest
+/// starts at the `/` or `:` that begins the path; `None` for a local
+/// path or a bare name, which has no authority.
+fn split_remote(url: &str) -> Option<(&str, &str, &str)> {
+    if let Some((scheme, rest)) = url.split_once("://") {
+        let end = rest.find('/').unwrap_or(rest.len());
+        let (authority, path) = rest.split_at(end);
+        return Some((&url[..scheme.len() + 3], authority, path));
+    }
+    match (url.find(':'), url.find('/')) {
+        // scp-like: a colon before any slash.
+        (Some(c), slash) if slash.is_none_or(|s| c < s) => Some(("", &url[..c], &url[c..])),
+        _ => None,
+    }
+}
+
+/// The provider and path a remote URL names, or `None` for one that is
+/// not a remote. Bitbucket's SSH and HTTPS hosts are one provider, as
+/// `guess_provider` has it; any other host is its own.
+fn repo_identity(url: &str) -> Option<(String, String)> {
+    let (_, authority, rest) = split_remote(url)?;
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = host
+        .split_once(':')
+        .map_or(host, |(h, _)| h)
+        .to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    let path = rest.trim_matches(|c| c == '/' || c == ':');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.len() < 2 || segments.iter().any(|s| s.is_empty()) {
+        return None;
+    }
+    // `guess_provider` does not read a URL with a port, so only the one
+    // provider with several hosts is taken from it; any other is its host.
+    let provider = if matches!(host.as_str(), "bitbucket.org" | "ssh.bitbucket.org")
+        && crate::scheduler::guess_provider(url) == "bitbucket"
+    {
+        "bitbucket".to_owned()
+    } else {
+        host
+    };
+    Some((provider, path.to_owned()))
+}
+
+/// `url` with any user and password removed, for a message that may be
+/// stored: a refusal at apply becomes the ticket's parked reason.
+fn without_userinfo(url: &str) -> String {
+    match split_remote(url) {
+        Some((scheme, authority, rest)) => {
+            let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+            format!("{scheme}{host}{rest}")
+        }
+        None => url.to_owned(),
+    }
 }
 
 /// The stage a restart goes to, by name: the one named, else the
@@ -1015,4 +1130,81 @@ fn check_branches(t: &Ticket, old: &Pipeline, new: &Pipeline) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_remote_is_read_as_its_provider_and_path_in_every_spelling() {
+        let docs = Some(("github.com".to_owned(), "example-org/docs".to_owned()));
+        for url in [
+            "git@github.com:example-org/docs.git",
+            "ssh://git@github.com:22/example-org/docs.git",
+            "https://user:token@github.com/example-org/docs",
+            "https://GitHub.com/example-org/docs.git/",
+        ] {
+            assert_eq!(repo_identity(url), docs, "{url}");
+        }
+        for url in [
+            "/srv/git/docs",
+            "./docs",
+            "../docs.git",
+            "git@github.com:docs.git",
+            "docs",
+            "vendor.d/team/docs",
+        ] {
+            assert_eq!(repo_identity(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn bitbucket_hosts_are_one_repository_and_other_providers_are_not() {
+        let old = "git@bitbucket.org:example-org/docs.git";
+        assert!(same_repository(
+            old,
+            "git@ssh.bitbucket.org:example-org/docs.git"
+        ));
+        assert!(same_repository(
+            old,
+            "ssh://git@ssh.bitbucket.org/example-org/docs"
+        ));
+        assert!(same_repository(
+            old,
+            "https://bitbucket.org/example-org/docs.git"
+        ));
+        assert!(!same_repository(
+            old,
+            "git@ssh.bitbucket.org:example-org/other.git"
+        ));
+        assert!(!same_repository(old, "git@github.com:example-org/docs.git"));
+        assert!(!same_repository(
+            old,
+            "https://git.example.com/bitbucket.org/example-org/docs.git"
+        ));
+        assert!(!same_repository(
+            old,
+            "https://notbitbucket.org/example-org/docs.git"
+        ));
+        assert!(same_repository("/srv/git/docs", "/srv/git/docs"));
+        assert!(!same_repository("/srv/git/docs", "/srv/git/docs.git"));
+        assert!(!same_repository(
+            "vendor.d/team/docs",
+            "vendor.d/team/docs.git"
+        ));
+    }
+
+    #[test]
+    fn credentials_are_removed_from_a_shown_url() {
+        assert_eq!(
+            without_userinfo("https://user:token@bitbucket.org/example-org/docs.git"),
+            "https://bitbucket.org/example-org/docs.git"
+        );
+        assert_eq!(
+            without_userinfo("git@ssh.bitbucket.org:example-org/docs.git"),
+            "ssh.bitbucket.org:example-org/docs.git"
+        );
+        assert_eq!(without_userinfo("/srv/git/docs"), "/srv/git/docs");
+    }
 }
