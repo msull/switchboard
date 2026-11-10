@@ -16,7 +16,7 @@
 //! while the host shows something else or is hidden.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -483,7 +483,7 @@ pub struct ContentVersion {
 #[derive(Debug, Clone)]
 pub struct Watch {
     pub last_read: Option<Instant>,
-    pub subscribers: std::collections::HashSet<u64>,
+    pub subscribers: HashSet<u64>,
 }
 
 /// What goes down the worker's channel: a read, or a word that the
@@ -1577,6 +1577,9 @@ struct Entry {
 pub struct ConversationCache {
     entries: HashMap<RecordId, Entry>,
     errors: HashMap<RecordId, String>,
+    /// The sessions with a read running. Only `finish_read` clears one,
+    /// so dropping an entry never starts a second reader for a session.
+    reading: HashSet<RecordId>,
 }
 
 impl ConversationCache {
@@ -1665,6 +1668,29 @@ impl ConversationCache {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// Note that a read of the session's transcript starts; false when
+    /// one is already running, and then the caller starts none.
+    pub fn begin_read(&mut self, id: RecordId) -> bool {
+        self.reading.insert(id)
+    }
+
+    /// Note that the session's read answered.
+    pub fn finish_read(&mut self, id: RecordId) {
+        self.reading.remove(&id);
+    }
+
+    /// Whether a read of any session's transcript is running.
+    #[must_use]
+    pub fn any_reading(&self) -> bool {
+        !self.reading.is_empty()
+    }
+
+    /// Whether a read of `id`'s transcript is running.
+    #[must_use]
+    pub fn is_reading(&self, id: RecordId) -> bool {
+        self.reading.contains(&id)
     }
 }
 
@@ -1938,6 +1964,31 @@ mod tests {
         assert!(!cache.is_current(id, &handle("b"), at), "rebound");
         assert!(!cache.is_current(id, &handle("a"), None), "file changed");
         assert!(!cache.is_current(RecordId::new(), &handle("a"), at));
+    }
+
+    #[test]
+    fn a_session_has_one_read_at_a_time_and_only_its_answer_ends_it() {
+        let id = RecordId::new();
+        let mut cache = ConversationCache::default();
+        assert!(!cache.is_reading(id));
+        assert!(cache.begin_read(id));
+        assert!(!cache.begin_read(id), "one is running");
+        assert!(cache.is_reading(id));
+        assert!(
+            cache.begin_read(RecordId::new()),
+            "another session's is its own"
+        );
+        cache.insert(id, handle("a"), None, Conversation::default());
+        assert!(cache.is_reading(id), "insert leaves the read running");
+        cache.fail(id, "gone".into());
+        assert!(cache.is_reading(id), "fail leaves the read running");
+        cache.remove(id);
+        assert!(cache.is_reading(id), "remove leaves the read running");
+        cache.clear();
+        assert!(cache.is_reading(id), "clear leaves the read running");
+        cache.finish_read(id);
+        assert!(!cache.is_reading(id));
+        assert!(cache.begin_read(id), "free again");
     }
 
     #[test]

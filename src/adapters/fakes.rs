@@ -724,6 +724,15 @@ impl crate::ports::secrets::SecretStore for FakeSecrets {
 #[derive(Debug, Default, Clone)]
 pub struct FakeTranscripts {
     state: Arc<Mutex<FakeTranscriptState>>,
+    /// While true, `read` waits, so a test can look at a read in flight.
+    gate: Arc<Gate>,
+}
+
+/// A flag reads wait on while it is set.
+#[derive(Debug, Default)]
+struct Gate {
+    closed: Mutex<bool>,
+    opened: std::sync::Condvar,
 }
 
 #[derive(Debug, Default)]
@@ -747,10 +756,29 @@ impl FakeTranscripts {
         state.conversation = conversation;
         state.version += 1;
     }
+
+    /// Reads wait from here until `release`.
+    pub fn hold(&self) {
+        *self.gate.closed.lock().expect("fake transcripts") = true;
+    }
+
+    /// Let the reads waiting since `hold` go on.
+    pub fn release(&self) {
+        *self.gate.closed.lock().expect("fake transcripts") = false;
+        self.gate.opened.notify_all();
+    }
 }
 
 impl TranscriptReader for FakeTranscripts {
     fn read(&self, _handle: &ResumeHandle) -> Result<Conversation, String> {
+        {
+            let closed = self.gate.closed.lock().expect("fake transcripts");
+            let _open = self
+                .gate
+                .opened
+                .wait_while(closed, |closed| *closed)
+                .expect("fake transcripts");
+        }
         self.state
             .lock()
             .expect("fake transcripts")
@@ -763,11 +791,11 @@ impl TranscriptReader for FakeTranscripts {
     }
     fn version(&self, _handle: &ResumeHandle) -> Option<TranscriptVersion> {
         let state = self.state.lock().expect("fake transcripts");
-        // A fixed time and the set count as the size: the app reads a
+        // The set count as the size and the file time: the app reads a
         // conversation once per `set`.
         state.conversation.as_ref().map(|_| TranscriptVersion {
             size: state.version,
-            modified: Some(std::time::UNIX_EPOCH),
+            modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(state.version)),
         })
     }
     fn clone_all(&self, handle: &ResumeHandle) -> Result<ResumeHandle, String> {
