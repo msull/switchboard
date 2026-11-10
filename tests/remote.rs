@@ -863,6 +863,7 @@ fn the_allowlist_refuses_everything_else_with_no_side_effect() {
         t,
     );
     assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+    port.app.settle_host();
     assert!(
         port.host.state().written.is_empty(),
         "nothing reached a pane"
@@ -1016,6 +1017,7 @@ fn a_draft_is_the_sessions_editor_fed_by_dictation_and_worked_by_its_tools() {
         r#"{"action":"send","op":"d1"}"#,
     );
     assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+    port.app.settle_host();
     assert!(port.host.state().written.is_empty());
     let (_, reply) = get(&mut port, &draft, t);
     assert_eq!(reply["body"]["draft"]["text"], "ship it");
@@ -1029,6 +1031,7 @@ fn a_draft_is_the_sessions_editor_fed_by_dictation_and_worked_by_its_tools() {
     );
     assert_eq!(status, 200, "{reply}");
     assert_eq!(reply["body"]["draft"]["text"], "");
+    port.app.settle_host();
     assert_eq!(port.host.state().written.len(), 1);
     let (status, _) = call(
         &mut port,
@@ -1038,6 +1041,7 @@ fn a_draft_is_the_sessions_editor_fed_by_dictation_and_worked_by_its_tools() {
         r#"{"action":"send","op":"d2"}"#,
     );
     assert_eq!(status, 200);
+    port.app.settle_host();
     assert_eq!(port.host.state().written.len(), 1, "the op is the key");
 
     // Only an agent session has a prompt.
@@ -1110,6 +1114,7 @@ fn spoken_send_while_hidden(drawn_before: bool) {
     let mut frame = eframe::Frame::_new_kittest();
     eframe::App::logic(&mut port.app, &ctx, &mut frame);
     eframe::App::logic(&mut port.app, &ctx, &mut frame);
+    port.app.settle_host();
     let written = port.host.state().written.clone();
     assert_eq!(written.len(), 1, "{written:?}");
     assert_eq!(written[0].1, "Fix the test.");
@@ -1500,6 +1505,7 @@ fn the_control_scope_sends_with_the_op_as_the_key_and_a_read_device_is_refused()
     let hello = r#"{"op":"tx1","text":"hello"}"#;
     let (status, reply) = call(&mut port, "POST", &send, t, hello);
     assert_eq!((status, code(&reply)), (403, "scope"), "{reply}");
+    port.app.settle_host();
     assert!(port.host.state().written.is_empty());
 
     let id = port.app.core().devices()[0].id;
@@ -1522,11 +1528,13 @@ fn the_control_scope_sends_with_the_op_as_the_key_and_a_read_device_is_refused()
     let (status, reply) = call(&mut port, "POST", &send, t, hello);
     assert_eq!(status, 200, "{reply}");
     assert_eq!(reply["body"]["made"], serde_json::json!([]));
+    port.app.settle_host();
     let written = port.host.state().written.clone();
     assert_eq!(written.len(), 1, "{written:?}");
     assert_eq!(written[0].1, "hello");
     let (status, again) = call(&mut port, "POST", &send, t, hello);
     assert_eq!(status, 200, "{again}");
+    port.app.settle_host();
     assert_eq!(
         port.host.state().written.len(),
         1,
@@ -1548,6 +1556,7 @@ fn the_control_scope_sends_with_the_op_as_the_key_and_a_read_device_is_refused()
             "{body}: {reply}"
         );
     }
+    port.app.settle_host();
     assert_eq!(port.host.state().written.len(), 1);
 
     // A resume while running is accepted and launches nothing; trust
@@ -1559,6 +1568,7 @@ fn the_control_scope_sends_with_the_op_as_the_key_and_a_read_device_is_refused()
     let trust = format!("/api/v1/sessions/{session}/trust");
     let (status, reply) = call(&mut port, "POST", &trust, t, r#"{"op":"tr1"}"#);
     assert_eq!((status, code(&reply)), (400, "failed"), "{reply}");
+    port.app.settle_host();
     assert_eq!(port.host.state().written.len(), 1);
     let (status, reply) = call(
         &mut port,
@@ -1635,6 +1645,7 @@ fn a_devices_send_answers_the_ask_and_a_socket_send_does_not() {
     assert!(!asking(&port), "the device's send answered");
     let (status, _) = call(&mut port, "POST", &send, t, body);
     assert_eq!(status, 200);
+    port.app.settle_host();
     assert_eq!(
         port.host.state().written.len(),
         1,
@@ -1669,6 +1680,7 @@ fn a_devices_send_answers_the_ask_and_a_socket_send_does_not() {
         r#"{"action":"send","op":"d1"}"#,
     );
     assert_eq!(status, 200);
+    port.app.settle_host();
     assert_eq!(
         port.host.state().written.len(),
         2,
@@ -1688,6 +1700,7 @@ fn a_devices_send_answers_the_ask_and_a_socket_send_does_not() {
         ),
     );
     assert!(!matches!(reply, Reply::Failed { .. }), "{reply:?}");
+    port.app.settle_host();
     assert_eq!(port.host.state().written.len(), 3);
     hook(&mut port, id, EventKind::PromptSubmitted);
     assert!(asking(&port), "a tool's send is not the owner's answer");
@@ -1712,10 +1725,12 @@ fn trust_answers_the_folder_question_the_session_view_carries() {
     let trust = format!("/api/v1/sessions/{session}/trust");
     let (status, reply) = call(&mut port, "POST", &trust, t, r#"{"op":"tr1"}"#);
     assert_eq!(status, 200, "{reply}");
+    port.app.settle_host();
     let keys = port.host.state().keys.len();
     assert!(keys >= 1, "the answer reached the pane");
     let (status, _) = call(&mut port, "POST", &trust, t, r#"{"op":"tr1"}"#);
     assert_eq!(status, 200);
+    port.app.settle_host();
     assert_eq!(port.host.state().keys.len(), keys, "once");
 }
 
@@ -5018,6 +5033,7 @@ fn browser_step(
             "go".into()
         }
         "sent" => {
+            port.app.settle_host();
             let written = port.host.state().written.clone();
             let sent = written.iter().filter(|(_, text)| text == "second").count();
             assert_eq!(sent, 1, "{written:?}");

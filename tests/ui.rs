@@ -2439,6 +2439,7 @@ fn message_box_is_multiline_and_enter_sends() {
         text: "first line\nsecond line".into(),
         from: Composer::Line,
     }));
+    harness.state_mut().settle_host();
     // The fake pane took it, so the draft is gone (the box re-creates an
     // empty one on the next frame).
     assert_eq!(
@@ -2468,6 +2469,8 @@ fn a_failed_send_keeps_the_draft() {
         text: "do not lose me".into(),
         from: Composer::Line,
     }));
+    harness.state_mut().settle_host();
+    harness.run_steps(2);
     assert_eq!(
         harness
             .state()
@@ -2481,6 +2484,112 @@ fn a_failed_send_keeps_the_draft() {
     assert_eq!(
         harness.get_by_label("Message").value().as_deref(),
         Some("do not lose me")
+    );
+}
+
+/// The issue's acceptance: tmux taking its time costs the frame nothing.
+/// A line is two writes, so a frame that waited on it would take at least
+/// twice the delay; the bound is one delay, which is generous for a frame.
+#[test]
+fn a_send_on_a_slow_host_does_not_stall_the_frame() {
+    let host = FakeHost::default();
+    let (mut harness, ids) =
+        harness_build(FakeOpener::default(), FakeSecrets::default(), host.clone());
+    plain_message_box(&mut harness);
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    type_into(&mut harness, "Message", "while tmux thinks");
+    let delay = Duration::from_millis(300);
+    host.state().delay = delay;
+    let started = std::time::Instant::now();
+    harness.get_by_label("Send").click();
+    harness.run_steps(2);
+    assert!(started.elapsed() < delay, "{:?}", started.elapsed());
+    // On its way: the draft stays until the pane has it.
+    assert!(harness.state().ui_state.sending.contains(&id));
+    assert_eq!(draft(&harness, id).as_deref(), Some("while tmux thinks"));
+    harness.state_mut().settle_host();
+    assert_eq!(written(&host), vec!["while tmux thinks"]);
+    assert_eq!(draft(&harness, id), None);
+    assert!(harness.state().ui_state.sending.is_empty());
+}
+
+#[test]
+fn a_failed_send_on_a_slow_host_keeps_the_draft_and_says_so() {
+    let host = FakeHost::default();
+    let (mut harness, ids) =
+        harness_build(FakeOpener::default(), FakeSecrets::default(), host.clone());
+    plain_message_box(&mut harness);
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    type_into(&mut harness, "Message", "do not lose me");
+    let delay = Duration::from_millis(300);
+    {
+        let mut state = host.state();
+        state.delay = delay;
+        state.fail_write = Some("pane is dead".into());
+    }
+    let started = std::time::Instant::now();
+    harness.get_by_label("Send").click();
+    harness.run_steps(2);
+    assert!(started.elapsed() < delay, "{:?}", started.elapsed());
+    harness.state_mut().settle_host();
+    harness.run_steps(2);
+    assert_eq!(draft(&harness, id).as_deref(), Some("do not lose me"));
+    assert!(harness.state().ui_state.sending.is_empty());
+    harness.get_by_label_contains("send a message to");
+}
+
+/// The draft stays in the box while the write is out, so a second press
+/// would send it twice.
+#[test]
+fn send_is_inert_while_the_last_message_is_on_its_way() {
+    let host = FakeHost::default();
+    let (mut harness, ids) =
+        harness_build(FakeOpener::default(), FakeSecrets::default(), host.clone());
+    plain_message_box(&mut harness);
+    let id = seed_claude(&mut harness, &ids);
+    showing(&mut harness, View::Session(id));
+    type_into(&mut harness, "Message", "only once");
+    host.state().delay = Duration::from_millis(200);
+    harness.get_by_label("Send").click();
+    harness.run_steps(2);
+    harness.get_by_label("Send").click();
+    harness.run_steps(2);
+    harness.get_by_label("Message").focus();
+    harness.run_steps(2);
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    let sends = actions(&harness)
+        .iter()
+        .filter(|a| matches!(a, AppAction::SendMessage { .. }))
+        .count();
+    assert_eq!(sends, 1);
+    harness.state_mut().settle_host();
+    assert_eq!(written(&host), vec!["only once"]);
+}
+
+/// The card's line box holds its draft the same way.
+#[test]
+fn the_card_line_is_inert_while_its_message_is_on_its_way() {
+    let host = FakeHost::default();
+    let (mut harness, ids) =
+        harness_build(FakeOpener::default(), FakeSecrets::default(), host.clone());
+    let (id, _) = working_set_of_two(&mut harness, &ids);
+    harness.get_by_label("Line to send").focus();
+    harness.run_steps(2);
+    harness.get_by_label("Line to send").type_text("ls -la");
+    harness.step();
+    harness.state_mut().ui_state.sending.insert(id);
+    harness.state_mut().dispatched.clear();
+    harness.key_press(egui::Key::Enter);
+    harness.run_steps(2);
+    assert!(
+        !actions(&harness)
+            .iter()
+            .any(|a| matches!(a, AppAction::SendMessage { .. })),
+        "{:?}",
+        actions(&harness)
     );
 }
 
@@ -2540,6 +2649,7 @@ fn a_delivery_leaves_the_message_box_draft() {
         .unwrap();
     assert_eq!(view.prompt_refusal, None);
     deliver(&mut harness, id);
+    harness.state_mut().settle_host();
     assert_eq!(written(&host), vec!["Dispatch subscription: events"]);
     assert_eq!(draft(&harness, id).as_deref(), Some("half typed"));
     assert_eq!(
@@ -2551,6 +2661,7 @@ fn a_delivery_leaves_the_message_box_draft() {
     harness.run_steps(2);
     harness.key_press(egui::Key::Enter);
     harness.run_steps(2);
+    harness.state_mut().settle_host();
     assert_eq!(
         written(&host).last().map(String::as_str),
         Some("half typed")
@@ -2573,6 +2684,7 @@ fn a_session_send_leaves_the_card_line_draft() {
         },
     });
     harness.run_steps(2);
+    harness.state_mut().settle_host();
     assert_eq!(written(&host), vec!["from the port"]);
     assert_eq!(draft(&harness, id).as_deref(), Some("not yet"));
 }
@@ -4148,6 +4260,8 @@ fn a_failed_editor_write_gives_the_prompt_back() {
     harness.run_steps(2);
     harness.get_by_label("Send →").click();
     harness.run_steps(3);
+    harness.state_mut().settle_host();
+    harness.run_steps(2);
     let notice = harness.state().core().notice().map(|n| n.text.clone());
     assert!(
         notice
@@ -4228,6 +4342,7 @@ fn an_editor_send_leaves_the_card_line_draft() {
     harness.run_steps(2);
     harness.get_by_label("Send →").click();
     harness.run_steps(3);
+    harness.state_mut().settle_host();
     assert_eq!(written(&host), vec!["from the editor"]);
     assert_eq!(draft(&harness, id).as_deref(), Some("card line"));
 }

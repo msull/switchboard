@@ -849,6 +849,7 @@ pub fn send_field_id(id: RecordId) -> egui::Id {
 fn send_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, running: bool) {
     let p = theme::palette(ui);
     let field_id = send_field_id(record.id);
+    let sending = cx.state.sending.contains(&record.id);
     let draft = cx.state.input_drafts.entry(record.id).or_default();
     let hint = if running {
         "Send a line…"
@@ -871,7 +872,7 @@ fn send_line(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, running:
         )
         .labelled_by(label.id);
     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.is_none());
-    if response.lost_focus() && enter && !draft.trim().is_empty() {
+    if response.lost_focus() && enter && !sending && !draft.trim().is_empty() {
         let text = draft.clone();
         cx.dispatch(AppAction::SendMessage {
             id: record.id,

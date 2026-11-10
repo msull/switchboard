@@ -4575,6 +4575,67 @@ that lane's detached tree. A stage that names services may not come at
 or before the `lanes` gate, since choosing the lanes moves the trees a
 running service would be serving from (`dispatch check` refuses it).
 
+## Host work off the frame (2026-11-06)
+
+Every tmux call is a process launch, and the frame used to wait on them:
+a list a second, and a capture per card every two seconds. On a quiet Mac
+each call costs about 4 ms whatever the number of sessions (`tmux_call_timings`
+in `tests/gate.rs`), so a caption cycle over 30 cards held the frame for
+about 140 ms, and a loaded machine stretches every call. Keys typed during
+a stall are queued, not lost, so it read as lag. Host polls and pane writes
+now run on `src/hostwork.rs`, whose answers `logic` drains next to the diff
+reads. No record changes shape, and every answer enters the core as an
+action that already exists (`HostListed`, `PromptSeen`, `Failed`). Captions
+and snapshots are UI state, written at the drain.
+
+Two lanes, each one thread on a FIFO channel. The read lane takes lists
+and capture batches, at most one of each out at a time, so a slow tmux
+cannot pile up polls. The write lane takes every pane write in the order
+its effect ran. A send's text, its pause and its Enter are one job
+(`ProcessHost::send_line`), which makes order a property of the queue: the
+detached Enter thread behind `write_line` could let two sends to one pane
+inside its 150 ms reach it as text, text, Enter, Enter. One lane for all
+writes also means no two pastes on a pane's `sb-send-<host>` buffer overlap.
+The cost is that a write waits for the ones before it, Stop included, each
+line taking at least the 150 ms pause.
+
+The list generation guard. A list result can write the record
+(`host_listed` through `keep_last_output`), and a list asked for before a
+spawn does not show the new pane and would mark it gone. `spawn`, `kill`
+and `attach`, still on the frame, move `host_gen`, and a list stamped with
+an older value is dropped; the next poll is at most a tick away. The
+startup list stays a direct call in `start`, before the first frame,
+because `rearm_discoveries` reads what it reconciles.
+
+The draft guard. A message box keeps its draft until the pane has the text,
+now across frames, so `UiState::sending` holds the sessions with a box's
+message out, and Send and Enter are inert for them. The Prompt Box editor
+empties itself when it queues, so it needs no guard; a failed write hands
+its text back at the drain.
+
+The badge follows the drain: a hidden pass that hears a list answer updates
+the Dock count, since that pass, not the one that asked, has the new count.
+
+`logic` itself, on the switchboard view, one tick with a real tmux, base
+against this change: about 24 ms at 1 session, 75 ms at 10 and 140 ms at 30
+before; after, under 2 ms at each, but for one 10.8 ms pass at 10 sessions, a
+known gap: likely the first pass after startup, not confirmed.
+
+Known gaps:
+
+- `spawn`, `kill` and `attach` still block the frame.
+- A hung tmux child is never killed (there is no timeout), so its lane stays
+  busy until tmux answers. A hung write leaves Send inert for that session
+  and every later write queued.
+- Captions and trust results may land one cycle late.
+- A write queued at quit may be lost with its notice and draft, which are not
+  durable.
+- Transcript parse and `turn_block` layout stay on the frame.
+- A write queued before a restart of its session (kill, then spawn under the
+  same host id) can outlive the pane it was meant for: `kill` and `spawn`
+  run on the frame and do not wait for the write lane, so the text lands in
+  the new process or fails against a dead pane.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

@@ -63,8 +63,15 @@ pub trait ProcessHost: Send + Sync {
     /// part before. Enter must follow as a separate write after a pause
     /// (a newline in the same chunk reads as a pasted line break to a
     /// TUI), and that pause must not stall the caller: the host reports
-    /// only whether the text went out.
+    /// only whether the text went out. Callers on the frame use this one;
+    /// worker threads use `send_line`.
     fn write_line(&self, id: &HostId, text: &str) -> std::io::Result<()>;
+    /// `write_line` for a caller off the frame, which wants the send whole:
+    /// text, the pause and Enter have all happened when this returns, so
+    /// a queue of these cannot interleave, and a failed Enter is reported.
+    fn send_line(&self, id: &HostId, text: &str) -> std::io::Result<()> {
+        self.write_line(id, text)
+    }
     fn kill(&self, id: &HostId) -> std::io::Result<()>;
     /// The argv an external terminal runs to attach to this session.
     fn attach_command(&self, id: &HostId) -> Vec<String>;
