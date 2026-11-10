@@ -221,11 +221,13 @@ API does not match expectations, read the crate source under
 
 ## Platform-specific code
 
-The crate forbids `unsafe`. Native calls (AppKit via `objc2`,
-`security-framework`) go in a small adapter behind
-`#[cfg(target_os = "macos")]` using safe wrapper crates. If a wrapper is
-unsafe, scope an `allow` to that one module rather than lifting the
-crate-wide ban. macOS-only dependencies go in the
+The workspace lint denies `unsafe` (`deny`, not `forbid`, so one module
+can opt out). Native calls (AppKit via `objc2`, `security-framework`) go
+in a small adapter behind `#[cfg(target_os = "macos")]` using safe
+wrapper crates. If a wrapper is unsafe, or there is none, scope an
+`allow(unsafe_code)` to that one module rather than lifting the ban:
+`src/adapters/dnssd.rs` (the `DNSServiceRegister` FFI) is today the one
+module with it. macOS-only dependencies go in the
 `[target.'cfg(target_os = "macos")'.dependencies]` table.
 
 The bundle must be signed with a stable identity: Accessibility grants

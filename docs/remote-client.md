@@ -447,9 +447,10 @@ sends on the reply synchronizes with the frame; the pools, the 5 s
 handshake timeout and the subscriber overflow behave as §4.1 says under
 20 stalled connections and an unread socket, with a paired client
 unaffected; a wrong pin fails at the handshake; `mdns-sd` advertises
-and `dns-sd` sees it; the 146 MB largest transcript parses in 290 ms at
-575 MB peak, which is why content work is off the frame; ctime and
-inode catch the same-size rewrite, the rename and the regrown log. Two
+and `dns-sd` sees it (the host now advertises through mDNSResponder);
+the 146 MB largest transcript parses in 290 ms at 575 MB peak, which is
+why content work is off the frame; ctime and inode catch the same-size
+rewrite, the rename and the regrown log. Two
 amendments follow: content reads go to **one worker thread** with a
 queue rather than each connection thread, so one large parse is in
 memory at a time (§4.1 is read with that change), and the Bonjour

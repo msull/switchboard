@@ -3348,8 +3348,10 @@ Built so far:
   reply synchronizes with the frame), the connection pools, the
   handshake timeout and the subscriber overflow hold under a stall and
   an unread socket, a wrong pin fails at the handshake, and `mdns-sd`
-  advertises a service `dns-sd` sees. The largest transcript on this
-  machine (146 MB) reads and parses in 290 ms at 575 MB peak, which
+  advertises a service `dns-sd` sees (the host has since moved to
+  mDNSResponder, see "Bonjour through mDNSResponder"). The largest
+  transcript on this machine (146 MB) reads and parses in 290 ms at
+  575 MB peak, which
   settles that content work runs off the frame and argues for one
   content worker rather than one per connection. ctime and inode see
   the same-size rewrite, the rename and the regrown log that mtime,
@@ -3396,10 +3398,10 @@ Built so far:
   screen cache of A4), Bonjour (A2), and `server_name` lives in
   `identity.json` rather than `Settings`, which the spec now says.
 - **A2, two hosts and the first client.** The host advertises
-  `_switchboard._tcp` through `mdns-sd` (`adapters/bonjour.rs`, a stub
-  off macOS) while the port is on the local network, under the display
-  name with a short id suffix and TXT `v`, `name` and `id`; a rename
-  re-advertises, loopback withdraws. The Swift package under `client/`
+  `_switchboard._tcp` through mDNSResponder (`adapters/bonjour.rs` over
+  `adapters/dnssd.rs`, a stub off macOS) while the port is on the local
+  network, under the display name with a short id suffix and TXT `v`,
+  `name` and `id`; a rename re-advertises, loopback withdraws. The Swift package under `client/`
   is the protocol (the wire views as `Codable`, decoded against
   fixtures the Rust port writes and checks), the transport (`URLSession`
   with a delegate that accepts only a certificate over the pinned
@@ -3501,6 +3503,9 @@ Built so far:
   listen setting is saved on, otherwise at the first tick of "Allow
   devices on the local network". The keys are necessary but not shown
   to be sufficient for a Developer ID build that sends raw multicast.
+  The host no longer sends multicast itself (it registers through
+  mDNSResponder); whether the prompt still appears is not yet observed,
+  so the keys and the hint stay.
 - **B2, card windows.** A session in the browser opens as a window of
   its own through `WindowGroup(for: CardWindowRequest.self)`: a
   request is the qualified session plus a window id, so two requests
@@ -4787,6 +4792,41 @@ plaintext token file is acceptable beyond the owner's laptop. The live
 check (`tests/live.rs`, `owner_message_live`) reads a headed message
 back from a one-turn haiku session's transcript; the typing between
 turns in a real pane is checked only against the fake.
+
+## Bonjour through mDNSResponder (2026-11-10)
+
+Built: the host's `_switchboard._tcp` record is registered with the
+system's mDNSResponder through `DNSServiceRegister`
+(`adapters/dnssd.rs`, FFI against libSystem, the one module allowed
+`unsafe`), replacing the in-process `mdns-sd` responder that bound UDP
+5353 beside the system's. One responder now answers for the Mac; the
+record is among the services a Sleep Proxy can hold for it; it is
+deregistered when the ref is deallocated (withdraw, drop) and when the
+app is killed (spike 27; measured with the app itself: a SIGKILL takes
+the record out of a `dns-sd -B` browse about a second later, where the
+`mdns-sd` record stayed listed). The record carries no host name of its
+own (`NULL` host, so mDNSResponder uses the Mac's), and an
+advertisement equal to the one in force is not registered again. If
+mDNSResponder renames the instance on a conflict, the name it used is
+logged at warn; nothing reads it back.
+
+Known gaps:
+- The listener stays IPv4-only (`0.0.0.0`) while mDNSResponder
+  publishes every address it has for the Mac, IPv6 included; a client
+  that dials an AAAA answer finds nothing. Binding `[::]` is the
+  follow-up.
+- A TTL-0 goodbye on the wire at quit or kill is not captured: that
+  needs `tcpdump` as root on UDP 5353. Left to the owner (`sudo tcpdump -i any -vv -n 'udp port
+  5353'` across a quit and a kill). The client's pre-flight re-resolve
+  stays either way.
+- If mDNSResponder restarts, the registration ends (logged) and is not
+  rebuilt until the next `advertise` call, which registers again because
+  the worker no longer holds a registration.
+- The Local Network prompt on the signed bundle is unverified before
+  and after: observing it means installing a signed bundle over the
+  owner's app. `NSLocalNetworkUsageDescription` and `NSBonjourServices`
+  stay; a refused registration (`PolicyDenied`) is an `Err` with the
+  code in the log.
 
 ## Open questions
 
