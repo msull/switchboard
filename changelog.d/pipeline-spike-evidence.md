@@ -1,1 +1,0 @@
-Changed: The example Switchboard pipeline keeps a facts-stage spike in the attempt's evidence directory, where the planner cites it and the implementer's first commit lands it under spikes/, so the facts stage never runs the pre-commit build; and it gains the owner's try stage, a human gate between code review and the pull request.

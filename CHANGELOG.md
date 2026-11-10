@@ -10,6 +10,16 @@ publishes that section as the release notes. The format follows
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-10
+
+### Changed
+
+- The example Switchboard pipeline keeps a facts-stage spike in the attempt's evidence directory, where the planner cites it and the implementer's first commit lands it under spikes/, so the facts stage never runs the pre-commit build; and it gains the owner's try stage, a human gate between code review and the pull request.
+
+### Fixed
+
+- The host now advertises itself to paired devices through the system's own Bonjour service instead of a second one of its own, so discovery no longer clashes with macOS and the record is dropped when the app quits or crashes.
+
 ## [0.15.0] - 2026-11-09
 
 ### Added

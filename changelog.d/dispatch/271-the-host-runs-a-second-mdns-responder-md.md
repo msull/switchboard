@@ -1,1 +1,0 @@
-Fixed: The host now advertises itself to paired devices through the system's own Bonjour service instead of a second one of its own, so discovery no longer clashes with macOS and the record is dropped when the app quits or crashes.
