@@ -10,6 +10,19 @@ publishes that section as the release notes. The format follows
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-09
+
+### Added
+
+- switchboard-mcp, an MCP server in the bundle that lets an agent session watch and drive paired Switchboard hosts: a project brief, an owner channel to a project's supervisor, decisions, and runs of approved commands.
+- Standing agents, Claude Code or Codex sessions with instructions, notes, a ledger and a hand-off in a directory of their own, that Restart into a fresh session and show when their instructions changed.
+
+### Fixed
+
+- Dispatch restart no longer refuses a ticket because a lane's repo URL changed host within the same provider (for example Bitbucket's SSH host), and a refusal now names the lane field that differs with both values.
+- Typing no longer stalls while Switchboard waits on tmux; polls and sent messages run off the UI thread, and messages to one session arrive in the order sent.
+- A session opens at the end of its current conversation, and says when it is loading or updating.
+
 ## [0.14.0] - 2026-11-09
 
 ### Added

@@ -1,1 +1,0 @@
-Added: switchboard-mcp, an MCP server in the bundle that lets an agent session watch and drive paired Switchboard hosts: a project brief, an owner channel to a project's supervisor, decisions, and runs of approved commands.
