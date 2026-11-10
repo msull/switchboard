@@ -482,6 +482,7 @@ impl AppCore {
             // A planner is no Dispatch stage and is granted nothing.
             env_sets: Vec::new(),
             token_hash: None,
+            standing: None,
             asking: None,
             ..source
         });

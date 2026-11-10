@@ -318,4 +318,18 @@ hang in the agent pane:
   `Edit(//abs/dir/**)` allow rule writes unattended, a `Write(...)` rule
   is ignored.
 
+- A standing agent's launch prompt never rides Claude Code's command
+  line, since a positional prompt may be lost to the folder-trust
+  dialog; it is typed into the pane on the new session's own
+  `SessionStart` or right after `session.trust` answers the dialog,
+  whichever comes first. The dialog shows unless some ancestor of the
+  data directory is trusted in `~/.claude.json`; either way the trust
+  path covers it. Codex has no hooks, so its brief stays on argv.
+- Claude Code reads every `CLAUDE.md` from the launch directory up to
+  `/`, and `~/.claude/CLAUDE.md`, so a standing agent's instructions are
+  its own file plus whatever sits above the data directory. Its
+  auto-memory lives under `~/.claude/projects/` keyed by the directory
+  (the data directory is not in a git repository); Switchboard depends
+  on `notes.md`, `ledger.md` and `handoff.md`, not on that memory.
+
 When an unattended launch stalls, capture the test tmux pane first.

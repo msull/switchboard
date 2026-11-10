@@ -39,6 +39,7 @@ use crate::ports::host::{HostId, HostStatus, Liveness, SpawnSpec};
 use crate::ports::project_config::ProjectConfig;
 use crate::ports::remote::{Identity, PairedDevice, Scope};
 use crate::ports::round_files::Probed;
+use crate::ports::standing::PreparedStanding;
 use crate::ports::store::{Loaded, StoreError};
 
 /// The current time as the core sees it.
@@ -462,7 +463,8 @@ pub enum AppAction {
     /// current turn without leaving the conversation view.
     Interrupt(RecordId),
     KillSession(RecordId),
-    /// Stop a shell, command, or service if it runs, then start it again.
+    /// Stop a shell, command, or service if it runs, then start it again;
+    /// for a standing agent, a fresh session in its directory.
     RestartSession(RecordId),
     RemoveSession(RecordId),
     /// Fork an agent session at one of the user's prompts: a new record
@@ -605,6 +607,43 @@ pub enum AppAction {
     },
     /// Answer Claude's folder trust question in the pane with yes.
     TrustFolder(RecordId),
+    /// A standing agent: an agent of `agent` kind whose identity is the
+    /// directory `<data dir>/standing/<name>/`, launched there with
+    /// `launch_flags` as extra flags. `instructions` is the owner's text
+    /// for its instructions file; `None` keeps a file already there.
+    NewStanding {
+        name: String,
+        agent: AgentKind,
+        instructions: Option<String>,
+        launch_flags: Vec<String>,
+    },
+    /// The directory for `NewStanding` is ready (or could not be made).
+    StandingPrepared {
+        name: String,
+        agent: AgentKind,
+        launch_flags: Vec<String>,
+        result: Result<PreparedStanding, String>,
+    },
+    /// A poll of a standing agent's directory: its instructions file's
+    /// hash and `handoff.md`'s modified time.
+    StandingSeen {
+        id: RecordId,
+        hash: Option<String>,
+        handoff_at: Option<SystemTime>,
+    },
+    /// Replace the owner's part of a standing agent's instructions.
+    SaveStandingInstructions {
+        id: RecordId,
+        text: String,
+    },
+    /// The write for `SaveStandingInstructions` finished; `Ok` is the
+    /// file's new hash.
+    StandingInstructionsWritten {
+        id: RecordId,
+        result: Result<String, String>,
+    },
+    /// Kill a standing agent and remove its record; its directory stays.
+    RemoveStanding(RecordId),
     Tick,
     /// One command from the control port, run quietly under its
     /// operation id; the outcome is taken with `take_control_outcome`.
@@ -883,6 +922,22 @@ pub enum Effect {
         root: PathBuf,
         text: String,
     },
+    /// Make or find a standing agent's directory and its instructions
+    /// file (reports `StandingPrepared`).
+    PrepareStanding {
+        name: String,
+        agent: AgentKind,
+        instructions: Option<String>,
+        launch_flags: Vec<String>,
+    },
+    /// Replace the owner's part of a standing agent's instructions file
+    /// in `dir` (reports `StandingInstructionsWritten`).
+    WriteStandingInstructions {
+        id: RecordId,
+        agent: AgentKind,
+        dir: PathBuf,
+        text: String,
+    },
     /// Read `<root>/.switchboard/project.json`; answered with
     /// `ProjectConfigRead`.
     ReadProjectConfig {
@@ -1156,6 +1211,16 @@ pub struct AppCore {
     /// it was the prompt: the input box may hold text until `TYPED_HOLD`
     /// passes or a prompt is submitted. Transient; a restart loses it.
     pub(super) typed: Vec<(RecordId, SystemTime, bool)>,
+    /// The latest hash seen of each standing agent's instructions file,
+    /// set by the directory poll and by a save. Transient: the first poll
+    /// after a start fills it again.
+    pub(super) standing_hashes: Vec<(RecordId, String)>,
+    /// `standing.new` operations waiting for their directory, by name:
+    /// the record is made one action after the command. Transient.
+    pub(super) standing_ops: Vec<(String, String)>,
+    /// Standing agents whose launch prompt was typed with the answer to
+    /// the trust question and has not been seen submitted. Transient.
+    pub(super) brief_sent: Vec<RecordId>,
     /// Text to submit as the first prompt of a record's next launch,
     /// on its command line. Consumed by `launch_prepared`.
     pub(super) first_prompts: Vec<(RecordId, String)>,
@@ -1310,6 +1375,12 @@ impl AppCore {
             AppAction::DismissNotice => self.dismiss_notice(),
             AppAction::PromptSeen { id, seen } => self.prompt_seen(id, seen),
             AppAction::TrustFolder(id) => self.trust_folder(id, &mut out),
+            AppAction::NewStanding { .. }
+            | AppAction::StandingPrepared { .. }
+            | AppAction::StandingSeen { .. }
+            | AppAction::SaveStandingInstructions { .. }
+            | AppAction::StandingInstructionsWritten { .. }
+            | AppAction::RemoveStanding(_) => self.standing_action(action, now, &mut out),
             AppAction::Tick => self.tick(now, &mut out),
             AppAction::SetEnvSetup { open } => {
                 self.env_setup_until = open.then_some(now.mono + ENV_SETUP_WINDOW);
@@ -2373,6 +2444,7 @@ impl AppCore {
         self.started.retain(|r| !gone(*r));
         self.spawned_at.retain(|(r, _)| !gone(*r));
         self.typed.retain(|(r, ..)| !gone(*r));
+        self.standing_hashes.retain(|(r, _)| !gone(*r));
         if self.codex_pending.is_some_and(gone) {
             self.codex_pending = None;
         }
@@ -2440,7 +2512,7 @@ impl AppCore {
     /// Removing takes the record off its board at once but keeps it,
     /// and its record on disk, until the undo window closes; the toast
     /// offers to put it back.
-    fn trash_session(&mut self, id: RecordId, now: Clock) {
+    pub(super) fn trash_session(&mut self, id: RecordId, now: Clock) {
         let mut taken = None;
         for w in &mut self.workspaces {
             if let Some(pos) = w.sessions.iter().position(|s| s.id == id) {
@@ -2520,6 +2592,11 @@ impl AppCore {
             });
         }
         self.notices.retain(|n| n.undo != Some(id));
+    }
+
+    /// The records removed within their undo window.
+    pub(super) fn trashed_sessions(&self) -> impl Iterator<Item = &SessionRecord> {
+        self.trash.iter().map(|t| &t.record)
     }
 
     /// The undo window closed: the record is dropped for good.
@@ -2986,6 +3063,11 @@ impl AppCore {
             host,
             bytes: TRUST_YES_KEYS.to_vec(),
         });
+        // A standing agent's launch prompt waits for the question to be
+        // answered, so the dialog cannot swallow it.
+        if self.claude_brief_pending(id) {
+            self.release_brief(id, true, out);
+        }
     }
 
     fn prompt_seen(&mut self, id: RecordId, seen: bool) {

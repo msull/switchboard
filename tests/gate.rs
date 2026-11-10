@@ -125,6 +125,9 @@ impl Gate {
             transcripts: std::sync::Arc::new(ClaudeTranscripts),
             secrets: std::sync::Arc::new(FakeSecrets::default()),
             project_config: Box::new(FileConfigReader::new()),
+            standing: Box::new(switchboard::adapters::standing::StandingDirs::new(
+                self.data_dir.clone(),
+            )),
             round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),
             changes: std::sync::Arc::new(switchboard::adapters::git::GitChanges),
             working: std::sync::Arc::new(switchboard::adapters::git::GitChanges),
@@ -372,6 +375,7 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, cwd: &Path) -> Sess
         env: Vec::new(),
         env_sets: Vec::new(),
         token_hash: None,
+        standing: None,
         asking: None,
     }
 }

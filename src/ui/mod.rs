@@ -169,6 +169,8 @@ pub struct UiState {
     pub whats_new_dialog: bool,
     /// The project config editor, while open.
     pub config_dialog: Option<config::ConfigDraft>,
+    /// A standing agent's instructions editor, while open.
+    pub standing_dialog: Option<config::StandingDraft>,
     /// The "Review a plan" dialog while it is open.
     pub review_dialog: Option<workflow::ReviewDraft>,
     /// Which round each review page shows, its diff toggle, its note.
@@ -352,6 +354,7 @@ impl Default for UiState {
             remote_dialog: None,
             whats_new_dialog: false,
             config_dialog: None,
+            standing_dialog: None,
             review_dialog: None,
             review_views: HashMap::new(),
             confirm_cleanup: None,
@@ -550,6 +553,7 @@ fn draw_frame(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
     remote::show(cx, ui.ctx());
     whats_new::show(cx, ui.ctx());
     config::show(cx, ui.ctx());
+    config::show_standing(cx, ui.ctx());
     workflow::dialog_show(cx, ui.ctx());
     zoom::end_frame(cx, ui.ctx());
     cx.state.had_focus = ui.ctx().memory(egui::Memory::focused);
@@ -766,6 +770,7 @@ fn keyboard(cx: &mut DrawCtx<'_>, ui: &Ui, view: &View) {
         || cx.state.remote_dialog.is_some()
         || cx.state.whats_new_dialog
         || cx.state.config_dialog.is_some()
+        || cx.state.standing_dialog.is_some()
         || cx.state.review_dialog.is_some()
         || cx.state.confirm_cleanup.is_some()
         || cx.state.confirm_close_ticket.is_some()

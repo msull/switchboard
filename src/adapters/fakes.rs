@@ -46,6 +46,7 @@ pub fn services() -> Services {
         transcripts: Arc::new(FakeTranscripts::default()),
         secrets: std::sync::Arc::new(FakeSecrets::default()),
         project_config: Box::new(FakeProjectConfig),
+        standing: Box::new(FakeStanding::default()),
         round_files: Box::new(FakeRoundFiles),
         changes: Arc::new(FakeChanges::default()),
         working: Arc::new(FakeWorking::default()),
@@ -828,6 +829,88 @@ impl ProjectConfigReader for FakeProjectConfig {
     }
     fn modified(&self, _root: &Path) -> Option<SystemTime> {
         None
+    }
+}
+
+/// Standing directories in memory: the instructions text per
+/// directory, and the writes made. Shared handles, so a test keeps a
+/// clone to read and change it under a running app.
+#[derive(Debug, Default, Clone)]
+pub struct FakeStanding {
+    pub files: Arc<Mutex<HashMap<PathBuf, String>>>,
+    pub writes: Arc<Mutex<Vec<(PathBuf, String)>>>,
+}
+
+impl FakeStanding {
+    /// Where the fake keeps its standing agents.
+    pub const ROOT: &'static str = "/tmp/switchboard-fake/standing";
+
+    fn hash(text: &str) -> String {
+        format!("hash-{}", text.len())
+    }
+}
+
+impl crate::ports::standing::StandingFiles for FakeStanding {
+    fn prepare(
+        &self,
+        name: &str,
+        _agent: crate::core::AgentKind,
+        instructions: Option<&str>,
+    ) -> Result<crate::ports::standing::PreparedStanding, String> {
+        if !crate::core::standing::valid_standing_name(name) {
+            return Err(format!("{name:?} is not a standing agent's name"));
+        }
+        let root = PathBuf::from(Self::ROOT);
+        let dir = root.join(name);
+        let mut files = self.files.lock().expect("fake standing");
+        let text = match instructions {
+            Some(text) => text.to_owned(),
+            None => files.get(&dir).cloned().unwrap_or_default(),
+        };
+        files.insert(dir.clone(), text.clone());
+        Ok(crate::ports::standing::PreparedStanding {
+            dir,
+            root,
+            hash: Self::hash(&text),
+        })
+    }
+    fn inspect(
+        &self,
+        dir: &Path,
+        _agent: crate::core::AgentKind,
+    ) -> crate::ports::standing::StandingState {
+        crate::ports::standing::StandingState {
+            hash: self
+                .files
+                .lock()
+                .expect("fake standing")
+                .get(dir)
+                .map(|t| Self::hash(t)),
+            handoff_at: None,
+        }
+    }
+    fn read_instructions(
+        &self,
+        dir: &Path,
+        _agent: crate::core::AgentKind,
+    ) -> Result<Option<String>, String> {
+        Ok(self.files.lock().expect("fake standing").get(dir).cloned())
+    }
+    fn write_instructions(
+        &self,
+        dir: &Path,
+        _agent: crate::core::AgentKind,
+        text: &str,
+    ) -> Result<String, String> {
+        self.files
+            .lock()
+            .expect("fake standing")
+            .insert(dir.to_path_buf(), text.to_owned());
+        self.writes
+            .lock()
+            .expect("fake standing")
+            .push((dir.to_path_buf(), text.to_owned()));
+        Ok(Self::hash(text))
     }
 }
 

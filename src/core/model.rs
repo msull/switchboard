@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Bump when the on-disk shape changes incompatibly.
-pub const SCHEMA_VERSION: u32 = 17;
+pub const SCHEMA_VERSION: u32 = 18;
 
 /// How the UI picks its colours: follow the system, or force one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -995,6 +995,16 @@ impl AgentKind {
             Self::Codex => "Codex",
         }
     }
+
+    /// The file the agent reads its instructions from in its launch
+    /// directory: a standing agent's instructions are written there.
+    #[must_use]
+    pub fn instructions_file(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "CLAUDE.md",
+            Self::Codex => "AGENTS.md",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1187,6 +1197,34 @@ pub struct SessionRecord {
     /// at every spawn, so a dead pane's token stops working.
     #[serde(default)]
     pub token_hash: Option<String>,
+    /// Set for a standing agent: an agent whose identity is its
+    /// directory under `<data dir>/standing/`, which holds its
+    /// instructions and the notes it keeps, and which restarts into a
+    /// fresh session rather than resuming.
+    #[serde(default)]
+    pub standing: Option<Standing>,
+}
+
+/// A standing agent's state. The memory is the files in its directory;
+/// this is only what Switchboard needs to restart it and to say when its
+/// instructions changed under it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Standing {
+    /// Hash of the instructions file as of the last launch; a different
+    /// current hash is "stale".
+    #[serde(default)]
+    pub seed_hash: Option<String>,
+    /// How many times it has been restarted into a fresh session.
+    #[serde(default)]
+    pub restart_count: u32,
+    /// Modified time of `handoff.md` when last seen.
+    #[serde(default)]
+    pub handoff_at: Option<SystemTime>,
+    /// The launch prompt is owed to the current session: set by each
+    /// launch, cleared when the prompt is sent. Persisted, so a relaunch
+    /// of the app between the spawn and the send does not lose it.
+    #[serde(default)]
+    pub brief_pending: bool,
 }
 
 /// How long background work may hold a stopped agent: a dev server or a

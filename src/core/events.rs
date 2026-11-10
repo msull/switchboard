@@ -91,6 +91,8 @@ impl AppCore {
             .filter(|a| a.at < event.at)
             .and_then(|a| a.answer.clone());
         let name = record.name.clone();
+        // Read before an event rebinds the record's session id.
+        let brief = self.brief_due(id, &event);
         if let Some(new) = Self::rebound_session(id, &event, record.resume.as_ref()) {
             self.edit_session(id, out, |s| {
                 s.resume = Some(ResumeHandle::ClaudeCode {
@@ -182,6 +184,12 @@ impl AppCore {
         }
         if stopped {
             self.deliver_answer(id, out);
+        }
+        if brief {
+            self.release_brief(id, false, out);
+        }
+        if typed {
+            self.brief_confirmed(id, out);
         }
     }
 

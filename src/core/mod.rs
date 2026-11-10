@@ -16,6 +16,7 @@ pub mod reconcile;
 pub mod remote;
 pub mod revision;
 mod sessions;
+pub mod standing;
 pub mod tickets;
 pub mod updates;
 pub mod window_fit;

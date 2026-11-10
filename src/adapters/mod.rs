@@ -22,6 +22,7 @@ pub mod project_config;
 pub mod remote;
 pub mod round_files;
 pub mod scrollback;
+pub mod standing;
 pub mod store;
 pub mod tmux;
 pub mod transcript;

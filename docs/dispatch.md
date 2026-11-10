@@ -2849,6 +2849,15 @@ Commands:
   conversation resumed from its handle with no terminal opened, a
   running pane left alone, and a session with no handle or one marked
   not resumable refused rather than launched fresh
+- `standing.new {name, agent?, instructions?, launch_flags?}` →
+  `session`: a standing agent in `<Switchboard data dir>/standing/<name>/`
+  (`agent` is `claude`, the default, or `codex`), in the "Standing
+  agents" project, launched with its launch prompt; `instructions`
+  replaces the owner's part of its instructions file, and an existing
+  file is kept when absent. `standing.restart {session}` kills it and
+  starts a fresh session there (never a resume; non-replayable);
+  `standing.remove {session}` kills it and removes the record, keeping
+  the directory. Both refuse a session that is not a standing agent
 - `service.new {project, name, argv, env}` → `session`: a service
   record Dispatch owns, killed and removed by it; whether it is
   listening is Dispatch's probe, not Switchboard's reply. Not built:

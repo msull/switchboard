@@ -89,6 +89,7 @@ fn record(project: ProjectId, kind: SessionKind, order: u32) -> SessionRecord {
         env: Vec::new(),
         env_sets: Vec::new(),
         token_hash: None,
+        standing: None,
         asking: None,
     }
 }
@@ -14300,6 +14301,596 @@ mod window_fit {
         assert_eq!(
             first_launch(&[laptop, other]),
             Some(frame(v.x, v.y, v.w, v.h - TITLE_BAR, "Built-in"))
+        );
+    }
+}
+
+// --- standing agents
+
+mod standing {
+    use super::*;
+    use crate::core::ControlAction;
+    use crate::core::standing::{STANDING_PROJECT, launch_prompt};
+    use crate::ports::standing::PreparedStanding;
+
+    const ROOT: &str = "/data/standing";
+
+    fn flags() -> Vec<String> {
+        vec!["--model".into(), "haiku".into()]
+    }
+
+    fn prepared(name: &str, hash: &str) -> PreparedStanding {
+        PreparedStanding {
+            dir: PathBuf::from(ROOT).join(name),
+            root: PathBuf::from(ROOT),
+            hash: hash.into(),
+        }
+    }
+
+    fn new_standing(name: &str, agent: AgentKind) -> AppAction {
+        AppAction::NewStanding {
+            name: name.into(),
+            agent,
+            instructions: None,
+            launch_flags: flags(),
+        }
+    }
+
+    fn standing_prepared(name: &str, agent: AgentKind, hash: &str) -> AppAction {
+        AppAction::StandingPrepared {
+            name: name.into(),
+            agent,
+            launch_flags: flags(),
+            result: Ok(prepared(name, hash)),
+        }
+    }
+
+    fn id_of(core: &AppCore, name: &str) -> RecordId {
+        core.workspaces()
+            .iter()
+            .flat_map(|w| &w.sessions)
+            .find(|s| s.name == name)
+            .map(|s| s.id)
+            .expect("the standing record")
+    }
+
+    /// A core that made the standing agent `name` in `core`; the effects
+    /// of its `StandingPrepared`.
+    fn make(core: &mut AppCore, name: &str, agent: AgentKind, at: u64) -> (RecordId, Vec<Effect>) {
+        let effects = core.dispatch(new_standing(name, agent), Clock::at(at));
+        assert_eq!(
+            effects,
+            vec![Effect::PrepareStanding {
+                name: name.into(),
+                agent,
+                instructions: None,
+                launch_flags: flags(),
+            }]
+        );
+        let effects = core.dispatch(standing_prepared(name, agent, "h1"), Clock::at(at + 1));
+        (id_of(core, name), effects)
+    }
+
+    fn fresh() -> AppCore {
+        loaded(vec![], vec![]).0
+    }
+
+    /// The prepared launch of a Claude Code standing agent through to its
+    /// spawn, under a new session id, which is returned.
+    fn launch_claude(core: &mut AppCore, id: RecordId, at: u64) -> Uuid {
+        let sid = Uuid::new_v4();
+        core.dispatch(
+            AppAction::LaunchPrepared {
+                id,
+                result: Ok(AgentLaunch {
+                    argv: vec!["claude".into()],
+                    env: vec![],
+                    resume: Some(ResumeHandle::ClaudeCode {
+                        session_id: sid,
+                        transcript: None,
+                    }),
+                }),
+            },
+            Clock::at(at),
+        );
+        core.dispatch(AppAction::Spawned { id, result: Ok(()) }, Clock::at(at + 1));
+        sid
+    }
+
+    fn start(core: &mut AppCore, id: RecordId, sid: Option<Uuid>, at: u64) -> Vec<Effect> {
+        core.dispatch(
+            AppAction::Events(vec![SessionEvent {
+                record_id: Some(id),
+                provider_session_id: sid.map(|s| s.to_string()),
+                ..event(EventKind::SessionStart, at)
+            }]),
+            Clock::at(at),
+        )
+    }
+
+    fn briefs(effects: &[Effect], agent: AgentKind) -> usize {
+        effects
+            .iter()
+            .filter(
+                |e| matches!(e, Effect::SendInput { text, .. } if *text == launch_prompt(agent)),
+            )
+            .count()
+    }
+
+    fn pending(core: &AppCore, id: RecordId) -> bool {
+        core.session(id)
+            .and_then(|s| s.standing.as_ref())
+            .expect("standing")
+            .brief_pending
+    }
+
+    #[test]
+    fn new_standing_makes_one_project_and_a_launched_record_for_each_kind() {
+        let mut core = fresh();
+        for (name, agent) in [("ops", AgentKind::ClaudeCode), ("rev", AgentKind::Codex)] {
+            let (id, effects) = make(&mut core, name, agent, 1_000);
+            let record = core.session(id).expect("record");
+            assert_eq!(record.kind, SessionKind::Agent(agent));
+            assert_eq!(record.cwd, PathBuf::from(ROOT).join(name));
+            assert_eq!(record.launch, Launch::Argv(flags()));
+            let standing = record.standing.clone().expect("standing");
+            assert_eq!(standing.seed_hash.as_deref(), Some("h1"));
+            assert_eq!(standing.restart_count, 0);
+            assert!(standing.brief_pending);
+            assert!(
+                effects.iter().any(|e| matches!(e, Effect::PrepareLaunch { id: i, kind, .. } if *i == id && *kind == agent)),
+                "{effects:?}"
+            );
+            assert!(!core.standing_stale(id));
+        }
+        let projects: Vec<_> = core
+            .workspaces()
+            .iter()
+            .filter(|w| w.project.root == std::path::Path::new(ROOT))
+            .collect();
+        assert_eq!(projects.len(), 1, "the second reuses the project");
+        assert_eq!(projects[0].project.name, STANDING_PROJECT);
+        assert_eq!(projects[0].sessions.len(), 2);
+    }
+
+    #[test]
+    fn a_duplicate_or_invalid_name_is_refused() {
+        let mut core = fresh();
+        make(&mut core, "ops", AgentKind::ClaudeCode, 1_000);
+        for name in ["ops", "../ops", "a/b", ".hidden", ""] {
+            let effects =
+                core.dispatch(new_standing(name, AgentKind::ClaudeCode), Clock::at(2_000));
+            assert!(effects.is_empty(), "{name:?}: {effects:?}");
+            assert!(core.notice().is_some_and(|n| n.is_error), "{name:?}");
+            core.dispatch(AppAction::DismissNotice, Clock::at(2_000));
+        }
+        let err = core.dispatch(
+            AppAction::StandingPrepared {
+                name: "new".into(),
+                agent: AgentKind::ClaudeCode,
+                launch_flags: vec![],
+                result: Err("disk full".into()),
+            },
+            Clock::at(3_000),
+        );
+        assert!(err.is_empty());
+        assert!(core.notice().is_some_and(|n| n.text.contains("disk full")));
+    }
+
+    #[test]
+    fn restart_kills_and_launches_fresh_with_a_new_session_and_the_brief_owed() {
+        let mut core = fresh();
+        let (id, _) = make(&mut core, "ops", AgentKind::ClaudeCode, 1_000);
+        let first = launch_claude(&mut core, id, 2_000);
+        assert!(!start(&mut core, id, Some(first), 5_000).is_empty());
+        assert!(!pending(&core, id));
+        let effects = core.dispatch(AppAction::RestartSession(id), Clock::at(10_000));
+        let kill = effects.iter().position(|e| matches!(e, Effect::Kill(_)));
+        let prepare = effects
+            .iter()
+            .position(|e| matches!(e, Effect::PrepareLaunch { .. }));
+        assert!(kill.is_some() && kill < prepare, "{effects:?}");
+        let record = core.session(id).expect("record");
+        assert_eq!(record.resume, None, "the old conversation is not resumed");
+        assert_eq!(record.standing.as_ref().map(|s| s.restart_count), Some(1));
+        assert!(pending(&core, id));
+        assert!(!core.first_prompts.iter().any(|(r, _)| *r == id));
+        let second = launch_claude(&mut core, id, 11_000);
+        assert_ne!(first, second);
+        assert_eq!(
+            core.session(id)
+                .and_then(|s| s.resume.as_ref())
+                .map(ResumeHandle::provider_id),
+            Some(second.to_string())
+        );
+    }
+
+    #[test]
+    fn the_new_sessions_start_sends_the_brief_once() {
+        let mut core = fresh();
+        let (id, _) = make(&mut core, "ops", AgentKind::ClaudeCode, 1_000);
+        let sid = launch_claude(&mut core, id, 2_000);
+        let effects = start(&mut core, id, Some(sid), 5_000);
+        assert_eq!(briefs(&effects, AgentKind::ClaudeCode), 1, "{effects:?}");
+        assert!(!pending(&core, id));
+        let effects = start(&mut core, id, Some(sid), 6_000);
+        assert_eq!(briefs(&effects, AgentKind::ClaudeCode), 0);
+    }
+
+    #[test]
+    fn an_old_session_or_no_id_does_not_release_the_brief() {
+        let mut core = fresh();
+        let (id, _) = make(&mut core, "ops", AgentKind::ClaudeCode, 1_000);
+        let old = launch_claude(&mut core, id, 2_000);
+        start(&mut core, id, Some(old), 3_000);
+        core.dispatch(AppAction::RestartSession(id), Clock::at(4_000));
+        launch_claude(&mut core, id, 5_000);
+        let effects = start(&mut core, id, Some(old), 7_000);
+        assert_eq!(briefs(&effects, AgentKind::ClaudeCode), 0);
+        let effects = start(&mut core, id, None, 8_000);
+        assert_eq!(briefs(&effects, AgentKind::ClaudeCode), 0);
+        assert!(pending(&core, id));
+    }
+
+    #[test]
+    fn a_start_at_the_trust_question_waits_and_the_answer_sends_the_brief() {
+        let mut core = fresh();
+        let (id, _) = make(&mut core, "ops", AgentKind::ClaudeCode, 1_000);
+        let sid = launch_claude(&mut core, id, 2_000);
+        core.dispatch(AppAction::PromptSeen { id, seen: true }, Clock::at(3_000));
+        let effects = start(&mut core, id, Some(sid), 4_000);
+        assert_eq!(briefs(&effects, AgentKind::ClaudeCode), 0);
+        assert!(pending(&core, id), "owed still");
+
+        // The usual order: the question, its answer, then the hooks.
+        let mut core = fresh();
+        let (id, _) = make(&mut core, "ops", AgentKind::ClaudeCode, 1_000);
+        let sid = launch_claude(&mut core, id, 2_000);
+        core.dispatch(AppAction::PromptSeen { id, seen: true }, Clock::at(3_000));
+        let effects = core.dispatch(AppAction::TrustFolder(id), Clock::at(4_000));
+        let keys = effects
+            .iter()
+            .position(|e| matches!(e, Effect::SendKeys { .. }));
+        let brief = effects
+            .iter()
+            .position(|e| matches!(e, Effect::SendInput { .. }));
+        assert!(keys.is_some() && keys < brief, "{effects:?}");
+        assert!(pending(&core, id), "owed until a prompt is seen submitted");
+        let effects = start(&mut core, id, Some(sid), 5_000);
+        assert_eq!(briefs(&effects, AgentKind::ClaudeCode), 0);
+        assert!(pending(&core, id));
+        core.dispatch(
+            AppAction::Events(vec![SessionEvent {
+                record_id: Some(id),
+                ..event(EventKind::PromptSubmitted, 6_000)
+            }]),
+            Clock::at(6_000),
+        );
+        assert!(!pending(&core, id));
+    }
+
+    #[test]
+    fn names_collide_without_case_and_across_the_undo_window() {
+        let mut core = fresh();
+        let (id, _) = make(&mut core, "ops", AgentKind::ClaudeCode, 1_000);
+        let effects = core.dispatch(new_standing("Ops", AgentKind::ClaudeCode), Clock::at(2_000));
+        assert!(effects.is_empty(), "{effects:?}");
+        assert!(core.notice().is_some_and(|n| n.is_error));
+        core.dispatch(AppAction::DismissNotice, Clock::at(2_000));
+        core.dispatch(AppAction::RemoveStanding(id), Clock::at(3_000));
+        let effects = core.dispatch(new_standing("ops", AgentKind::ClaudeCode), Clock::at(3_001));
+        assert!(effects.is_empty(), "{effects:?}");
+        // A second remove of the gone record is a quiet success.
+        core.notices.clear();
+        core.dispatch(AppAction::RemoveStanding(RecordId::new()), Clock::at(3_003));
+        assert!(!core.notice().is_some_and(|n| n.is_error));
+    }
+
+    #[test]
+    fn a_second_new_for_a_pending_name_is_refused() {
+        let mut core = fresh();
+        let new = |op: &str| AppAction::Control {
+            op: op.into(),
+            action: ControlAction::NewStanding {
+                name: "ops".into(),
+                agent: AgentKind::ClaudeCode,
+                instructions: None,
+                launch_flags: flags(),
+            },
+        };
+        core.dispatch(new("op-1"), Clock::at(1_000));
+        let effects = core.dispatch(new("op-2"), Clock::at(1_001));
+        assert!(effects.is_empty(), "{effects:?}");
+        core.dispatch(
+            standing_prepared("ops", AgentKind::ClaudeCode, "h1"),
+            Clock::at(1_002),
+        );
+        let first = core.take_control_outcome("op-1").expect("outcome");
+        assert_eq!(first.made.len(), 1);
+        let second = core.take_control_outcome("op-2").expect("outcome");
+        assert!(second.error.is_some());
+    }
+
+    #[test]
+    fn a_launch_before_the_first_poll_adopts_the_first_seen_hash() {
+        let mut core = fresh();
+        let (id, _) = make(&mut core, "ops", AgentKind::ClaudeCode, 1_000);
+        core.standing_hashes.clear();
+        core.dispatch(AppAction::RestartSession(id), Clock::at(2_000));
+        core.dispatch(
+            AppAction::StandingSeen {
+                id,
+                hash: Some("h1".into()),
+                handoff_at: None,
+            },
+            Clock::at(3_000),
+        );
+        assert!(!core.standing_stale(id));
+    }
+
+    #[test]
+    fn returning_by_resume_owes_no_brief() {
+        let mut core = fresh();
+        let (id, _) = make(&mut core, "ops", AgentKind::ClaudeCode, 1_000);
+        let sid = launch_claude(&mut core, id, 2_000);
+        start(&mut core, id, Some(sid), 2_500);
+        core.dispatch(AppAction::ReturnToSession(id), Clock::at(3_000));
+        assert!(!pending(&core, id));
+    }
+
+    #[test]
+    fn a_codex_brief_rides_the_command_line_and_binding_clears_it() {
+        let mut core = fresh();
+        let (id, _) = make(&mut core, "rev", AgentKind::Codex, 1_000);
+        assert!(
+            core.first_prompts
+                .iter()
+                .any(|(r, p)| *r == id && *p == launch_prompt(AgentKind::Codex))
+        );
+        let effects = core.dispatch(
+            AppAction::LaunchPrepared {
+                id,
+                result: Ok(AgentLaunch {
+                    argv: vec!["codex".into()],
+                    env: vec![],
+                    resume: None,
+                }),
+            },
+            Clock::at(2_000),
+        );
+        let Some(Effect::Spawn { spec, .. }) = effects.first() else {
+            panic!("{effects:?}");
+        };
+        let argv = spec.command.clone().expect("argv");
+        assert_eq!(argv.last(), Some(&launch_prompt(AgentKind::Codex)));
+        assert!(argv.contains(&"haiku".to_owned()));
+        core.dispatch(AppAction::Spawned { id, result: Ok(()) }, Clock::at(3_000));
+        let effects = start(&mut core, id, None, 4_000);
+        assert_eq!(briefs(&effects, AgentKind::Codex), 0);
+        core.dispatch(
+            AppAction::Discovered {
+                id,
+                result: Ok(None),
+            },
+            Clock::at(5_000),
+        );
+        assert!(pending(&core, id));
+        assert!(core.standing_brief_unsent(id));
+
+        core.dispatch(AppAction::RestartSession(id), Clock::at(6_000));
+        core.dispatch(
+            AppAction::LaunchPrepared {
+                id,
+                result: Ok(AgentLaunch {
+                    argv: vec!["codex".into()],
+                    env: vec![],
+                    resume: None,
+                }),
+            },
+            Clock::at(7_000),
+        );
+        core.dispatch(AppAction::Spawned { id, result: Ok(()) }, Clock::at(8_000));
+        core.dispatch(
+            AppAction::Discovered {
+                id,
+                result: Ok(Some(ResumeHandle::Codex {
+                    rollout_id: "r-1".into(),
+                    transcript: None,
+                })),
+            },
+            Clock::at(9_000),
+        );
+        assert!(!pending(&core, id));
+    }
+
+    #[test]
+    fn a_codex_standing_launch_waits_in_the_codex_queue() {
+        let mut core = fresh();
+        let (first, _) = make(&mut core, "one", AgentKind::Codex, 1_000);
+        let (second, effects) = make(&mut core, "two", AgentKind::Codex, 2_000);
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::PrepareLaunch { .. })),
+            "the first is still unbound: {effects:?}"
+        );
+        let effects = core.dispatch(
+            AppAction::Discovered {
+                id: first,
+                result: Ok(None),
+            },
+            Clock::at(3_000),
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::PrepareLaunch { id, .. } if *id == second))
+        );
+    }
+
+    #[test]
+    fn a_changed_file_is_stale_until_a_restart() {
+        let mut core = fresh();
+        let (id, _) = make(&mut core, "ops", AgentKind::ClaudeCode, 1_000);
+        launch_claude(&mut core, id, 2_000);
+        core.dispatch(
+            AppAction::StandingSeen {
+                id,
+                hash: Some("h1".into()),
+                handoff_at: None,
+            },
+            Clock::at(3_000),
+        );
+        assert!(!core.standing_stale(id));
+        let handoff = Clock::at(4_000).wall;
+        core.dispatch(
+            AppAction::StandingSeen {
+                id,
+                hash: Some("h2".into()),
+                handoff_at: Some(handoff),
+            },
+            Clock::at(4_000),
+        );
+        assert!(core.standing_stale(id));
+        assert_eq!(
+            core.session(id)
+                .and_then(|s| s.standing.as_ref())
+                .and_then(|s| s.handoff_at),
+            Some(handoff)
+        );
+        core.dispatch(AppAction::RestartSession(id), Clock::at(5_000));
+        assert!(!core.standing_stale(id));
+        assert_eq!(
+            core.session(id)
+                .and_then(|s| s.standing.as_ref())
+                .and_then(|s| s.seed_hash.clone()),
+            Some("h2".into())
+        );
+    }
+
+    #[test]
+    fn save_writes_the_file_and_marks_it_stale_at_once() {
+        let mut core = fresh();
+        let (id, _) = make(&mut core, "ops", AgentKind::ClaudeCode, 1_000);
+        let effects = core.dispatch(
+            AppAction::SaveStandingInstructions {
+                id,
+                text: "Watch the builds.".into(),
+            },
+            Clock::at(2_000),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::WriteStandingInstructions {
+                id,
+                agent: AgentKind::ClaudeCode,
+                dir: PathBuf::from(ROOT).join("ops"),
+                text: "Watch the builds.".into(),
+            }]
+        );
+        core.dispatch(
+            AppAction::StandingInstructionsWritten {
+                id,
+                result: Ok("h2".into()),
+            },
+            Clock::at(3_000),
+        );
+        assert!(core.standing_stale(id));
+        core.dispatch(
+            AppAction::StandingInstructionsWritten {
+                id,
+                result: Err("read-only".into()),
+            },
+            Clock::at(4_000),
+        );
+        assert!(
+            core.notices
+                .iter()
+                .any(|n| n.is_error && n.text.contains("read-only"))
+        );
+    }
+
+    #[test]
+    fn remove_standing_kills_and_drops_only_a_standing_record() {
+        let mut core = fresh();
+        let (id, _) = make(&mut core, "ops", AgentKind::ClaudeCode, 1_000);
+        launch_claude(&mut core, id, 2_000);
+        let effects = core.dispatch(AppAction::RemoveStanding(id), Clock::at(3_000));
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Kill(_))),
+            "{effects:?}"
+        );
+        assert!(core.session(id).is_none());
+
+        let (mut core, _, ids) = with_records(&[agent()], |_| None);
+        core.dispatch(AppAction::RemoveStanding(ids[0]), Clock::at(3_000));
+        assert!(core.session(ids[0]).is_some());
+        assert!(core.notice().is_some_and(|n| n.is_error));
+    }
+
+    #[test]
+    fn standing_new_on_the_control_port_reports_the_record_once_it_exists() {
+        let mut core = fresh();
+        let effects = core.dispatch(
+            AppAction::Control {
+                op: "op-1".into(),
+                action: ControlAction::NewStanding {
+                    name: "ops".into(),
+                    agent: AgentKind::ClaudeCode,
+                    instructions: Some("Watch.".into()),
+                    launch_flags: flags(),
+                },
+            },
+            Clock::at(1_000),
+        );
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::PrepareStanding { .. }]
+        ));
+        let effects = core.dispatch(
+            standing_prepared("ops", AgentKind::ClaudeCode, "h1"),
+            Clock::at(1_001),
+        );
+        let id = id_of(&core, "ops");
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LogOperation { kind, .. } if kind == "standing.new"))
+        );
+        let outcome = core.take_control_outcome("op-1").expect("outcome");
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.made.len(), 1);
+        assert_eq!(outcome.made[0].id, id.0.to_string());
+        assert_eq!(
+            core.session(id).and_then(|s| s.op.clone()).as_deref(),
+            Some("op-1")
+        );
+
+        // standing.restart refuses any other record.
+        let (mut core, _, ids) = with_records(&[agent()], |_| None);
+        core.dispatch(
+            AppAction::Control {
+                op: "op-2".into(),
+                action: ControlAction::RestartStanding(ids[0]),
+            },
+            Clock::at(1_000),
+        );
+        let outcome = core.take_control_outcome("op-2").expect("outcome");
+        assert!(
+            outcome
+                .error
+                .is_some_and(|e| e.contains("not a standing agent"))
+        );
+    }
+
+    #[test]
+    fn a_plain_agent_still_gets_no_restart() {
+        let (mut core, id) = resumable_agent();
+        let effects = core.dispatch(AppAction::RestartSession(id), Clock::at(5));
+        assert!(!effects.iter().any(|e| matches!(e, Effect::Kill(_))));
+        assert!(
+            matches!(effects.as_slice(), [Effect::CheckTranscript { .. }]),
+            "{effects:?}"
         );
     }
 }
