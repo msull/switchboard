@@ -14,6 +14,7 @@ pub mod project_config;
 pub mod remote;
 pub mod round_files;
 pub mod secrets;
+pub mod standing;
 pub mod store;
 pub mod transcript;
 pub mod updates;

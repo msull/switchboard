@@ -1,0 +1,1 @@
+Added: Standing agents, Claude Code or Codex sessions with instructions, notes, a ledger and a hand-off in a directory of their own, that Restart into a fresh session and show when their instructions changed.

@@ -79,6 +79,8 @@ pub struct Services {
     /// An `Arc`: the content worker resolves policies through it.
     pub secrets: Arc<dyn SecretStore>,
     pub project_config: Box<dyn ProjectConfigReader>,
+    /// Standing agents' directories under the data directory.
+    pub standing: Box<dyn crate::ports::standing::StandingFiles>,
     pub round_files: Box<dyn RoundFiles>,
     /// A branch's commits and files over its base, for the ticket page.
     /// An `Arc` rather than a `Box`: the page hands a clone to the thread
@@ -178,6 +180,9 @@ pub struct SwitchboardApp {
     /// Definition file mtimes as last seen, per project, so the poll
     /// re-reads only a changed file.
     config_seen: HashMap<ProjectId, Option<SystemTime>>,
+    /// What the last poll of each standing agent's directory saw, so
+    /// only a change is dispatched.
+    standing_seen: HashMap<RecordId, crate::ports::standing::StandingState>,
     last_config: Option<Instant>,
     /// Parsed transcripts with the version each was read at, for the
     /// views and a remote port alike.
@@ -448,6 +453,7 @@ impl SwitchboardApp {
             last_caption: None,
             discoveries: Vec::new(),
             config_seen: HashMap::new(),
+            standing_seen: HashMap::new(),
             last_config: None,
             conversations: ConversationCache::default(),
             ui_state: UiState::default(),
@@ -863,6 +869,29 @@ impl SwitchboardApp {
                 project,
                 result: s.project_config.write_text(&root, &text),
             }),
+            Effect::PrepareStanding {
+                name,
+                agent,
+                instructions,
+                launch_flags,
+            } => {
+                let result = s.standing.prepare(&name, agent, instructions.as_deref());
+                Some(AppAction::StandingPrepared {
+                    name,
+                    agent,
+                    launch_flags,
+                    result,
+                })
+            }
+            Effect::WriteStandingInstructions {
+                id,
+                agent,
+                dir,
+                text,
+            } => Some(AppAction::StandingInstructionsWritten {
+                id,
+                result: s.standing.write_instructions(&dir, agent, &text),
+            }),
             Effect::Kill(host) => {
                 self.host_gen += 1;
                 failed(self.services.host.kill(&host), || {
@@ -1156,6 +1185,36 @@ impl SwitchboardApp {
                 self.dispatch(AppAction::ProjectConfigRead {
                     project,
                     result: self.services.project_config.read(&root),
+                });
+            }
+        }
+    }
+
+    /// A standing agent's directory, read again on the poll tick: the
+    /// instructions file's hash (a stat and one small read) and the
+    /// hand-off's modified time. Only a change is dispatched.
+    fn poll_standing(&mut self) {
+        let records: Vec<(RecordId, AgentKind, PathBuf)> = self
+            .core
+            .workspaces()
+            .iter()
+            .flat_map(|w| &w.sessions)
+            .filter(|s| s.standing.is_some())
+            .filter_map(|s| match s.kind {
+                SessionKind::Agent(agent) => Some((s.id, agent, s.cwd.clone())),
+                _ => None,
+            })
+            .collect();
+        self.standing_seen
+            .retain(|id, _| records.iter().any(|(r, ..)| r == id));
+        for (id, agent, dir) in records {
+            let state = self.services.standing.inspect(&dir, agent);
+            if self.standing_seen.get(&id) != Some(&state) {
+                self.standing_seen.insert(id, state.clone());
+                self.dispatch(AppAction::StandingSeen {
+                    id,
+                    hash: state.hash,
+                    handoff_at: state.handoff_at,
                 });
             }
         }
@@ -1520,6 +1579,7 @@ impl SwitchboardApp {
         self.settle_host();
         self.poll_discoveries();
         self.poll_configs();
+        self.poll_standing();
         self.poll_panes();
         self.settle_host();
         self.await_conversations();
@@ -1562,6 +1622,7 @@ impl SwitchboardApp {
         {
             self.last_config = Some(Instant::now());
             self.poll_configs();
+            self.poll_standing();
         }
         if self
             .last_dispatch

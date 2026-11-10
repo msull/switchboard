@@ -106,6 +106,7 @@ fn record(project: ProjectId, name: &str, kind: SessionKind, order: u32) -> Sess
         env: Vec::new(),
         env_sets: Vec::new(),
         token_hash: None,
+        standing: None,
         asking: None,
     }
 }
@@ -8265,4 +8266,98 @@ fn remote_devices_dialog_lists_the_addresses_locked_out_of_pairing() {
             .is_none(),
         "one failure is not a lockout"
     );
+}
+
+/// A harness showing one standing Claude Code agent, `ops`, whose
+/// instructions file the fake holds as `text`, launched with
+/// `seed_hash`.
+fn standing_harness(
+    text: &str,
+    seed_hash: Option<&str>,
+) -> (
+    Harness<'static, SwitchboardApp>,
+    RecordId,
+    fakes::FakeStanding,
+) {
+    let standing = fakes::FakeStanding::default();
+    let dir = PathBuf::from(fakes::FakeStanding::ROOT).join("ops");
+    standing
+        .files
+        .lock()
+        .unwrap()
+        .insert(dir.clone(), text.to_owned());
+    let services = Services {
+        standing: Box::new(standing.clone()),
+        ..fakes::services()
+    };
+    let (mut harness, _) = harness_on(services);
+    let mut p = project("Standing agents", at(100));
+    p.root = PathBuf::from(fakes::FakeStanding::ROOT);
+    let mut r = record(p.id, "ops", SessionKind::Agent(AgentKind::ClaudeCode), 0);
+    r.cwd = dir;
+    r.standing = Some(switchboard::core::Standing {
+        seed_hash: seed_hash.map(str::to_owned),
+        restart_count: 2,
+        handoff_at: None,
+        brief_pending: false,
+    });
+    let id = r.id;
+    let mut ws = Workspace::new(p);
+    ws.sessions = vec![r];
+    harness
+        .state_mut()
+        .core_mut_for_seeding()
+        .seed(vec![ws], Vec::new());
+    showing(&mut harness, View::Session(id));
+    harness.state_mut().dispatched.clear();
+    (harness, id, standing)
+}
+
+#[test]
+fn a_standing_agent_has_restart_and_its_restart_count() {
+    let (mut harness, id, _) = standing_harness("Watch.", Some("hash-6"));
+    harness.get_by_label_contains("restarted 2×");
+    click(&mut harness, "Restart");
+    assert!(actions(&harness).contains(&AppAction::RestartSession(id)));
+}
+
+#[test]
+fn the_stale_chip_shows_only_when_the_instructions_changed() {
+    let (mut harness, id, standing) = standing_harness("Watch.", Some("hash-6"));
+    // The fake's hash is the text's length; the poll and the seen hash
+    // agree, whenever the poll runs.
+    harness.state_mut().dispatch(AppAction::StandingSeen {
+        id,
+        hash: Some("hash-6".into()),
+        handoff_at: None,
+    });
+    harness.run_steps(2);
+    assert!(harness.query_by_label("STALE").is_none());
+    standing.files.lock().unwrap().insert(
+        PathBuf::from(fakes::FakeStanding::ROOT).join("ops"),
+        "Watch the builds.".into(),
+    );
+    harness.state_mut().dispatch(AppAction::StandingSeen {
+        id,
+        hash: Some("hash-17".into()),
+        handoff_at: None,
+    });
+    harness.run_steps(2);
+    harness.get_by_label("STALE");
+}
+
+#[test]
+fn the_instructions_editor_saves_the_owners_text() {
+    let (mut harness, id, _) = standing_harness("Watch.", Some("hash-6"));
+    click(&mut harness, "Instructions");
+    let field = harness.get_by_label("Your instructions");
+    field.focus();
+    field.type_text(" Then report.");
+    harness.run_steps(2);
+    click(&mut harness, "Save");
+    assert!(harness.state().ui_state.standing_dialog.is_none());
+    assert!(actions(&harness).iter().any(|a| matches!(
+        a,
+        AppAction::SaveStandingInstructions { id: i, text } if *i == id && text.contains("Then report.")
+    )), "{:?}", actions(&harness));
 }

@@ -21,7 +21,7 @@ use crate::adapters::files::existing_file;
 use crate::core::file_refs;
 use crate::core::{
     AgentKind, AppAction, CardState, Composer, PinTarget, RecordId, ResumeHandle, SessionKind,
-    SessionRecord, View,
+    SessionRecord, Standing, View,
 };
 use crate::ports::host::HostId;
 use crate::ports::transcript::{
@@ -158,6 +158,9 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.label(theme::meta_text(ui, kind_label(record.kind)).color(p.n700));
         ui.label(theme::meta_text(ui, "·"));
+        if let Some(standing) = &record.standing {
+            standing_line(cx, ui, record.id, standing);
+        }
         let path = record.cwd.display().to_string();
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -224,6 +227,30 @@ fn header(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord) {
         });
     });
     super::runbar::show(cx, ui, record.project, true);
+}
+
+/// A standing agent's part of the meta line: how often it restarted,
+/// how old its hand-off is, and the chips that say a Restart is due or
+/// its launch prompt never went in.
+fn standing_line(cx: &DrawCtx<'_>, ui: &mut Ui, id: RecordId, standing: &Standing) {
+    let p = theme::palette(ui);
+    let mut text = format!("standing · restarted {}×", standing.restart_count);
+    if let Some(at) = standing.handoff_at {
+        text.push_str(" · hand-off ");
+        text.push_str(&super::cards::ago_text(at, SystemTime::now()));
+    }
+    ui.label(theme::meta_text(ui, text).color(p.n700));
+    if cx.core.standing_stale(id) {
+        theme::kicker(ui, "stale", p.accent_2_text)
+            .on_hover_text("Its instructions changed since it started; Restart to use them");
+    }
+    if cx.core.standing_brief_unsent(id) {
+        theme::kicker(ui, "brief not sent", p.accent_2_text).on_hover_text(
+            "Its launch prompt did not go in; Restart, or tell it to read its notes",
+        );
+    }
+    // The separator before the next meta item, which the caller draws.
+    ui.label(theme::meta_text(ui, "·"));
 }
 
 /// What waits on the owner above the title: Claude's folder trust
@@ -334,6 +361,7 @@ fn title_row(cx: &mut DrawCtx<'_>, ui: &mut Ui, record: &SessionRecord, state: &
 
 /// Open in terminal (or Return), Restart, Kill, Back. `reversed` draws
 /// them last to first, for a right-to-left row.
+#[allow(clippy::too_many_lines)] // one arm per button
 fn header_actions(
     cx: &mut DrawCtx<'_>,
     ui: &mut Ui,
@@ -349,9 +377,15 @@ fn header_actions(
         "Return"
     };
     let entry = matches!(record.kind, SessionKind::Command | SessionKind::Service);
+    let standing = record.standing.is_some();
     let mut order = vec![open, "Restart", "Kill", "Working sets", "Back"];
-    if agent {
+    // An agent's Restart would lose its conversation; a standing agent's
+    // memory is its directory, so it keeps one, and its instructions.
+    if agent && !standing {
         order.retain(|b| *b != "Restart");
+    }
+    if standing {
+        order.insert(2, "Instructions");
     }
     // A command's page speaks the card's language: ▶ Run (or Start) and
     // Stop, never Return or Restart, which read as something else.
@@ -400,9 +434,14 @@ fn header_actions(
     }
     for button in order {
         let response = match button {
+            "Restart" if standing => theme::ghost(ui, button).on_hover_text(
+                "Kill it if it runs, then start a fresh session that reads its instructions and notes",
+            ),
             "Restart" => {
                 theme::ghost(ui, button).on_hover_text("Stop it if it runs, then start it again")
             }
+            "Instructions" => theme::ghost_muted(ui, button)
+                .on_hover_text("Edit this standing agent's instructions; Restart to use them"),
             "Working sets" => {
                 let response = theme::ghost_muted(ui, button)
                     .on_hover_text("Which working sets show this session");
@@ -436,6 +475,10 @@ fn header_actions(
         match button {
             "Restart" | "▶ Run" | "▶ Start" => {
                 cx.dispatch(AppAction::RestartSession(record.id));
+            }
+            "Instructions" => {
+                cx.state.standing_dialog =
+                    super::config::StandingDraft::read(cx.core, cx.services, record.id);
             }
             "Review plan" => {
                 let draft = super::workflow::ReviewDraft::open(cx, record.id);

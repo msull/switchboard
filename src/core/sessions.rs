@@ -89,6 +89,7 @@ impl AppCore {
             env: Vec::new(),
             env_sets: Vec::new(),
             token_hash: None,
+            standing: None,
             asking: None,
         });
         out.touch(project);
@@ -231,6 +232,11 @@ impl AppCore {
                 match (record.kind, &record.resume) {
                     (SessionKind::Agent(_), Some(handle)) if !record.not_resumable => {
                         let handle = handle.clone();
+                        // The old conversation has read its files; no
+                        // launch prompt is owed to it.
+                        if record.standing.is_some() {
+                            self.set_brief_pending(id, false, out);
+                        }
                         self.start_flight(id, FlightKind::Preflight, now);
                         out.push(Effect::CheckTranscript { id, handle });
                     }
@@ -240,7 +246,11 @@ impl AppCore {
                         if record.not_resumable {
                             self.edit_session(id, out, |s| s.not_resumable = false);
                         }
-                        self.launch_fresh(id, now, out);
+                        if record.standing.is_some() {
+                            self.launch_standing(id, false, now, out);
+                        } else {
+                            self.launch_fresh(id, now, out);
+                        }
                     }
                 }
             }
@@ -272,7 +282,9 @@ impl AppCore {
 
     /// Kill the pane if there is one, then launch the record fresh.
     /// Agents are not restarted this way (a restart would lose the
-    /// conversation); for them it is a plain return.
+    /// conversation); for them it is a plain return. A standing agent is
+    /// the exception: its memory is its directory, so a restart is a
+    /// fresh session there with its launch prompt.
     pub(super) fn restart_session(&mut self, id: RecordId, now: Clock, out: &mut Out) {
         if self.is_in_flight(id) {
             return;
@@ -280,7 +292,8 @@ impl AppCore {
         let Some(record) = self.session(id) else {
             return;
         };
-        if matches!(record.kind, SessionKind::Agent(_)) {
+        let standing = record.standing.is_some();
+        if matches!(record.kind, SessionKind::Agent(_)) && !standing {
             self.return_to_session(id, now, out);
             return;
         }
@@ -289,7 +302,11 @@ impl AppCore {
             return;
         }
         self.kill_and_forget(id, out);
-        self.launch_fresh(id, now, out);
+        if standing {
+            self.launch_standing(id, true, now, out);
+        } else {
+            self.launch_fresh(id, now, out);
+        }
     }
 
     /// Whether the host process for this record is alive.
@@ -685,6 +702,7 @@ impl AppCore {
             outputs: Vec::new(),
             // The copy gets its own token at its own launch.
             token_hash: None,
+            standing: None,
             asking: None,
             // `env_sets` comes from the source on purpose: the owner asked
             // for this copy of the same conversation, which keeps the
@@ -751,6 +769,7 @@ impl AppCore {
             env: Vec::new(),
             env_sets,
             token_hash: None,
+            standing: None,
             asking: None,
             ..record
         });
@@ -972,7 +991,12 @@ impl AppCore {
                     "Codex session id unknown for {name}: the only new rollout belongs to another card"
                 ));
             }
-            Ok(Some(handle)) => self.edit_session(id, out, |s| s.resume = Some(handle)),
+            Ok(Some(handle)) => {
+                self.edit_session(id, out, |s| s.resume = Some(handle));
+                // A rollout exists only once the first prompt reached
+                // Codex, so a standing agent's brief has been delivered.
+                self.codex_brief_delivered(id, out);
+            }
             Ok(None) => {
                 let name = self.session_name(id);
                 self.error_about(id, format!("Codex session id unknown for {name}"));

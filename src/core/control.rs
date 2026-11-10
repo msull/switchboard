@@ -104,6 +104,17 @@ pub enum ControlAction {
     },
     /// Answer Claude's folder trust question in the pane with yes.
     TrustFolder(RecordId),
+    /// A standing agent in `<data dir>/standing/<name>/`.
+    NewStanding {
+        name: String,
+        agent: AgentKind,
+        instructions: Option<String>,
+        launch_flags: Vec<String>,
+    },
+    /// A fresh session for a standing agent; refused for any other.
+    RestartStanding(RecordId),
+    /// Kill a standing agent and drop its record; refused for any other.
+    RemoveStanding(RecordId),
     /// The project's directory moved.
     SetProjectRoot {
         id: ProjectId,
@@ -214,6 +225,7 @@ impl AppCore {
                 | ControlAction::NewSpace { .. }
                 | ControlAction::NewSet { .. }
                 | ControlAction::StartWorkflow { .. }
+                | ControlAction::NewStanding { .. }
         );
         let kind = control_kind(&action);
         let made = self.apply_control(action, now, out);
@@ -369,6 +381,34 @@ impl AppCore {
             }
             ControlAction::TrustFolder(id) => {
                 self.trust_folder(id, out);
+                Vec::new()
+            }
+            // The record is made when its directory is ready, and the
+            // outcome gains it then (`standing_prepared`).
+            ControlAction::NewStanding {
+                name,
+                agent,
+                instructions,
+                launch_flags,
+            } => {
+                self.standing_action(
+                    AppAction::NewStanding {
+                        name,
+                        agent,
+                        instructions,
+                        launch_flags,
+                    },
+                    now,
+                    out,
+                );
+                Vec::new()
+            }
+            ControlAction::RestartStanding(id) => {
+                self.restart_standing(id, now, out);
+                Vec::new()
+            }
+            ControlAction::RemoveStanding(id) => {
+                self.standing_action(AppAction::RemoveStanding(id), now, out);
                 Vec::new()
             }
             ControlAction::MoveSession { id, project } => {
@@ -1168,6 +1208,9 @@ fn control_kind(action: &ControlAction) -> String {
         ControlAction::SetWaiting { .. } => "session.waiting",
         ControlAction::Ask { .. } => "session.ask",
         ControlAction::TrustFolder(_) => "session.trust",
+        ControlAction::NewStanding { .. } => "standing.new",
+        ControlAction::RestartStanding(_) => "standing.restart",
+        ControlAction::RemoveStanding(_) => "standing.remove",
         ControlAction::MoveSession { .. } => "session.move",
         ControlAction::RenameProject { .. } => "project.rename",
         ControlAction::SetProjectRoot { .. } => "project.root",
@@ -1369,6 +1412,22 @@ impl TryFrom<wire::Body> for ControlAction {
                 choices,
             },
             wire::Body::SessionTrust { session: s } => Self::TrustFolder(session(&s)?),
+            wire::Body::StandingNew {
+                name,
+                agent,
+                instructions,
+                launch_flags,
+            } => Self::NewStanding {
+                name,
+                agent: match agent {
+                    None | Some(wire::AgentKind::Claude) => AgentKind::ClaudeCode,
+                    Some(wire::AgentKind::Codex) => AgentKind::Codex,
+                },
+                instructions,
+                launch_flags,
+            },
+            wire::Body::StandingRestart { session: s } => Self::RestartStanding(session(&s)?),
+            wire::Body::StandingRemove { session: s } => Self::RemoveStanding(session(&s)?),
             wire::Body::SessionMove {
                 session: s,
                 project: p,

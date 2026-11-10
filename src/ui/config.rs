@@ -2,13 +2,17 @@
 //! the options it takes listed beside it and the parse result shown as
 //! it is typed. Save is the one write Switchboard makes into a project
 //! directory, and only on the user's click.
+//!
+//! Beside it, a standing agent's instructions editor: the owner's part
+//! of the file in its directory, under Switchboard's base text.
 
 use egui::{Context, RichText, Ui};
 
 use super::{DrawCtx, GAP, theme};
 use crate::adapters::project_config::parse;
 use crate::app::Services;
-use crate::core::{AppAction, AppCore, ProjectId};
+use crate::core::standing::base_instructions;
+use crate::core::{AgentKind, AppAction, AppCore, ProjectId, RecordId, SessionKind};
 
 /// What a new file starts as.
 const TEMPLATE: &str =
@@ -196,5 +200,130 @@ fn status(ui: &mut Ui, text: &str) -> bool {
             );
             false
         }
+    }
+}
+
+/// A standing agent's instructions editor while it is open.
+#[derive(Debug, Clone)]
+pub struct StandingDraft {
+    pub id: RecordId,
+    pub name: String,
+    pub agent: AgentKind,
+    /// The owner's part of the file.
+    pub text: String,
+    /// The file could not be read; Save would replace whatever is there.
+    pub read_error: Option<String>,
+}
+
+impl StandingDraft {
+    /// The owner's text as the file holds it now; `None` for a record
+    /// that is not a standing agent. A synchronous read, on the click
+    /// that opens the editor: one small file in the data directory, and
+    /// the editor must show its text from its first frame.
+    #[must_use]
+    pub fn read(core: &AppCore, services: &Services, id: RecordId) -> Option<Self> {
+        let record = core.session(id)?;
+        record.standing.as_ref()?;
+        let SessionKind::Agent(agent) = record.kind else {
+            return None;
+        };
+        let (text, read_error) = match services.standing.read_instructions(&record.cwd, agent) {
+            Ok(text) => (text.unwrap_or_default(), None),
+            Err(e) => (String::new(), Some(e)),
+        };
+        Some(Self {
+            id,
+            name: record.name.clone(),
+            agent,
+            text,
+            read_error,
+        })
+    }
+}
+
+/// The standing agent's instructions editor, open while its draft is.
+pub fn show_standing(cx: &mut DrawCtx<'_>, ctx: &Context) {
+    let Some(mut draft) = cx.state.standing_dialog.take() else {
+        return;
+    };
+    let mut keep = true;
+    let mut save = false;
+    egui::Window::new("")
+        .id(egui::Id::unique("standing-instructions"))
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(720.0)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            let p = theme::palette(ui);
+            ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+            ui.label(
+                RichText::new(format!(
+                    "{} · {}",
+                    draft.name,
+                    draft.agent.instructions_file()
+                ))
+                .text_style(theme::brand()),
+            );
+            if let Some(e) = &draft.read_error {
+                ui.label(
+                    RichText::new(format!("Could not read the file: {e}. Save replaces it."))
+                        .color(p.accent_2_text),
+                );
+            }
+            theme::kicker(ui, "Switchboard's part", p.n600);
+            egui::ScrollArea::vertical()
+                .id_salt("standing-base-text")
+                .max_height(160.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(base_instructions(draft.agent))
+                                .text_style(theme::meta())
+                                .color(p.n700),
+                        )
+                        .wrap(),
+                    );
+                });
+            ui.add_space(4.0);
+            let label = ui
+                .label(theme::meta_text(ui, "Your instructions".to_owned()))
+                .id;
+            egui::ScrollArea::vertical()
+                .id_salt("standing-owner-text")
+                .max_height(360.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut draft.text)
+                            .desired_rows(12)
+                            .desired_width(f32::INFINITY),
+                    )
+                    .labelled_by(label);
+                });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Save writes the file; the agent reads it at its next Restart.")
+                        .small()
+                        .color(p.n600),
+                );
+                if theme::ghost_muted(ui, "Cancel").clicked() {
+                    keep = false;
+                }
+                if theme::primary(ui, "Save").clicked() {
+                    save = true;
+                    keep = false;
+                }
+            });
+        });
+    if save {
+        cx.dispatch(AppAction::SaveStandingInstructions {
+            id: draft.id,
+            text: draft.text.clone(),
+        });
+    }
+    if keep {
+        cx.state.standing_dialog = Some(draft);
     }
 }

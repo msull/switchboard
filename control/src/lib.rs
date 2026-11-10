@@ -207,6 +207,23 @@ pub enum Body {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         env_sets: Vec<String>,
     },
+    /// A standing agent: a session whose identity is the directory
+    /// `<data dir>/standing/<name>/`, which holds its instructions and
+    /// the notes, ledger and hand-off it keeps, in the app's "Standing
+    /// agents" project. `instructions` is the owner's text for its
+    /// instructions file (an existing file is kept when absent);
+    /// `launch_flags` are extra flags for the agent's command line.
+    #[serde(rename = "standing.new")]
+    StandingNew {
+        name: String,
+        /// Claude Code when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        launch_flags: Vec<String>,
+    },
     #[serde(rename = "space.new")]
     SpaceNew { name: String },
     #[serde(rename = "set.new")]
@@ -242,6 +259,10 @@ pub enum Body {
     SessionKill { session: String },
     #[serde(rename = "session.remove")]
     SessionRemove { session: String },
+    /// Kill a standing agent and remove its record; its directory, and
+    /// so its memory, stays.
+    #[serde(rename = "standing.remove")]
+    StandingRemove { session: String },
     #[serde(rename = "session.notes")]
     SessionNotes { session: String, text: String },
     #[serde(rename = "session.waiting")]
@@ -352,6 +373,11 @@ pub enum Body {
     /// repeated by recovery, since it starts a paid turn.
     #[serde(rename = "session.resume")]
     SessionResume { session: String },
+    /// Kill a standing agent's pane and start a fresh session in its
+    /// directory with its launch prompt; never a resume. It starts a
+    /// paid turn, so it is never repeated by recovery.
+    #[serde(rename = "standing.restart")]
+    StandingRestart { session: String },
     #[serde(rename = "workflow.continue")]
     WorkflowContinue { run: String },
     /// The owner's objection to a converged or capped plan review: opens
@@ -419,10 +445,12 @@ impl Body {
             | Self::SessionClone { .. }
             | Self::SpaceNew { .. }
             | Self::SetNew { .. }
-            | Self::WorkflowStart { .. } => Class::Creation,
+            | Self::WorkflowStart { .. }
+            | Self::StandingNew { .. } => Class::Creation,
             Self::ProjectRemove { .. }
             | Self::SessionKill { .. }
             | Self::SessionRemove { .. }
+            | Self::StandingRemove { .. }
             | Self::SessionNotes { .. }
             | Self::SessionWaiting { .. }
             | Self::SessionAsk { .. }
@@ -448,6 +476,7 @@ impl Body {
             | Self::SessionSend { .. }
             | Self::SessionPrompt { .. }
             | Self::SessionResume { .. }
+            | Self::StandingRestart { .. }
             | Self::WorkflowContinue { .. }
             | Self::WorkflowObject { .. } => Class::NonReplayable,
             Self::Projects { .. }
@@ -1574,5 +1603,37 @@ mod tests {
         let text = serde_json::to_string(&failed).unwrap();
         assert_eq!(text, r#"{"state":"paused","reason":"x","failed":true}"#);
         assert_eq!(serde_json::from_str::<RunState>(&text).unwrap(), failed);
+    }
+
+    #[test]
+    fn standing_commands_parse_with_defaults_and_classes() {
+        let req = Request::parse(r#"{"op":"o","kind":"standing.new","name":"ops"}"#).unwrap();
+        assert_eq!(
+            req.body,
+            Body::StandingNew {
+                name: "ops".into(),
+                agent: None,
+                instructions: None,
+                launch_flags: Vec::new(),
+            }
+        );
+        assert_eq!(req.body.class(), Class::Creation);
+        let codex = Body::StandingNew {
+            name: "rev".into(),
+            agent: Some(AgentKind::Codex),
+            instructions: Some("Review.".into()),
+            launch_flags: vec!["--model".into(), "o4".into()],
+        };
+        round_trip_request(codex);
+        let restart = Body::StandingRestart {
+            session: "s".into(),
+        };
+        assert_eq!(restart.kind(), "standing.restart");
+        assert_eq!(restart.class(), Class::NonReplayable);
+        let remove = Body::StandingRemove {
+            session: "s".into(),
+        };
+        assert_eq!(remove.kind(), "standing.remove");
+        assert_eq!(remove.class(), Class::Idempotent);
     }
 }

@@ -240,6 +240,9 @@ fn main() -> eframe::Result {
                 transcripts: std::sync::Arc::new(ClaudeTranscripts),
                 secrets: secret_store(),
                 project_config: Box::new(FileConfigReader::new()),
+                standing: Box::new(switchboard::adapters::standing::StandingDirs::new(
+                    data_dir.clone(),
+                )),
                 round_files: Box::new(switchboard::adapters::round_files::DiskRoundFiles),
                 changes: std::sync::Arc::new(GitChanges),
                 working: std::sync::Arc::new(GitChanges),

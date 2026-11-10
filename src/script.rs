@@ -94,6 +94,8 @@ const EXTRA_LINES: &[&str] = &[
     "prompt-box",
     "theme",
     "sleep",
+    "standing-new",
+    "standing-restart",
 ];
 
 /// The lines `review_step` handles.
@@ -550,6 +552,7 @@ fn working_set_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> 
                 PinTarget::File(id, PathBuf::from(rel)),
             )?;
         }
+        ["standing-new" | "standing-restart", ..] => standing_step(app, w)?,
         _ => return Err(format!("unknown line: {}", w.join(" "))),
     }
     Ok(())
@@ -574,6 +577,31 @@ fn show_file(app: &mut SwitchboardApp, n: &str, path: &str, line: &[&str]) -> Re
         path: cwd.join(path),
         line,
     });
+    Ok(())
+}
+
+/// The standing agents' lines, kept out of `step` for length.
+fn standing_step(app: &mut SwitchboardApp, w: &[&str]) -> Result<(), String> {
+    match w {
+        ["standing-new", n, rest @ ..] => {
+            let agent = match rest {
+                [] | ["claude"] => AgentKind::ClaudeCode,
+                ["codex"] => AgentKind::Codex,
+                _ => return Err("standing-new <name> [claude|codex]".into()),
+            };
+            app.dispatch(AppAction::NewStanding {
+                name: (*n).to_owned(),
+                agent,
+                instructions: None,
+                launch_flags: Vec::new(),
+            });
+        }
+        ["standing-restart", n] => {
+            let id = session(app, n)?;
+            app.dispatch(AppAction::RestartSession(id));
+        }
+        _ => return Err("standing-new <name> [claude|codex] | standing-restart <name>".into()),
+    }
     Ok(())
 }
 

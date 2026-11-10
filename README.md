@@ -112,8 +112,13 @@ or ends, and swept after a day),
 `wake.sock`, and
 `scrollback/` (one `<host>-r<n>.vt` per run of a command or service,
 the last 20 runs kept), `renders/` (first pages of PDFs shown on cards,
-rasterized by Quick Look), and `workflows/<run>/round-<n>/` (copies of
-the plan, feedback, and response at the end of each review round). Sessions run
+rasterized by Quick Look), `workflows/<run>/round-<n>/` (copies of
+the plan, feedback, and response at the end of each review round), and
+`standing/<name>/` (a standing agent's directory: its `CLAUDE.md` or
+`AGENTS.md`, Switchboard's base text above a marker line and the owner's
+instructions below it, with a `.bak` of the last save; and the
+`notes.md`, `ledger.md` and `handoff.md` the agent keeps, which
+Switchboard never reads; removing the agent leaves the directory). Sessions run
 on a private tmux server (`tmux -L switchboard`), never on your default
 one. Nothing is written into a project directory except what the Config
 editor saves on your click. Secret values live in the login Keychain,
@@ -359,7 +364,8 @@ Dev aids, all environment variables:
   `pop-out`, `close-pop-out`, `files-root`, `zoom`, `place-pop-out`,
   `place-card`, `new-workspace`, `workspace`, `workspace-global`,
   `move-project`, `move-working-set`, `controller`,
-  `open-terminal`, `update-check on|off`, `prompt-box`, `theme`, `sleep`).
+  `open-terminal`, `update-check on|off`, `prompt-box`, `theme`, `sleep`,
+  `standing-new <name> [claude|codex]`, `standing-restart <name>`).
 - `SWITCHBOARD_CONTROLLER=<device>`: the nunchuk's serial port (default: the
   `/dev/cu.usbmodem*` whose USB product name is Feather or MagTag, waited
   for if absent; no other board is ever opened, since a port that never answers
@@ -387,6 +393,7 @@ src/core/
   action.rs              AppAction, Effect, Clock, AppCore::dispatch, read model for the UI
   reconcile.rs           StoreLoaded / HostListed: card states, autostart services, spawn specs
   sessions.rs            launch, idempotent return, resume preflight, Codex serialization
+  standing.rs            standing agents: a record per `<data dir>/standing/<name>/`, Restart as a fresh launch there, the launch prompt owed to each new session and released by its `SessionStart` or the trust answer (Codex's on its command line), the stale marker, `standing.*` on the control port
   grid.rs                Working Set placement: default card sizes, first free spot, overlap, minimum size, the card a step away, a rule set's card size at its scale and flowed layout
   controller.rs          the hand controller's meaning: the selected card per working set, Z's radial menu, the session C holds open
   definitions.rs         .switchboard/project.json entries -> records; hash-keyed approval
@@ -404,7 +411,7 @@ src/core/
   dispatch.rs            Dispatch as the app shows it: the runner's last status as views, decisions answered as calls, a ticket's events and full view read once per change and its timeline, a project's supervisor chip, the console session; the stale-runner rule (an older build is restarted once no attempt is open, else named and offered Restart)
   window_fit.rs          a saved window frame fitted before a window is asked for it: to its display's visible frame and to 8192 device pixels a side; the first launch's frame from the primary display
   tests.rs               state-transition tests for the core
-src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, round_files, artifacts, changes (a branch's commits and files over its base, one file's diff), controller, control (the operations log), dispatch (Dispatch's port), remote (the identity and paired-device files, and the Bonjour advertisement), updates (the release source: the newest release, its bundle fetched and checked, the swap arranged)
+src/ports/               traits: store, host, events, agent, opener, transcript, secrets, project_config, standing (a standing agent's directory: prepare, inspect, read and write its instructions), round_files, artifacts, changes (a branch's commits and files over its base, one file's diff), controller, control (the operations log), dispatch (Dispatch's port), remote (the identity and paired-device files, and the Bonjour advertisement), updates (the release source: the newest release, its bundle fetched and checked, the swap arranged)
 src/adapters/
   store.rs               JSON store: atomic writes, .bak, flock
   updates.rs             GitHub Releases over `ureq`: the latest release parsed from the API by a conditional (`If-None-Match`), size-capped request that follows redirects only to two pinned hosts, the zip staged under `$TMPDIR/switchboard-update` and checked against its `.sha256` asset, unpacked with `ditto`, verified with `codesign` and pinned to the running app's Team ID; the swap helper that replaces the bundle after exit and relaunches, keeping the old one aside
@@ -424,6 +431,7 @@ src/adapters/
   keychain.rs            secrets as generic-password items in the login Keychain (tests use a temp keychain)
   dotenv.rs              .env parser (opt-in per project) and .env.example names
   project_config.rs      reads and validates .switchboard/project.json (capped, no symlinks)
+  standing.rs            standing agents' directories under <data dir>/standing/: the instructions file written through the store's atomic path (capped, no symlinks, only a direct child of the root), its hash, and `handoff.md`'s modified time
   round_files.rs         a workflow's round files on disk: probe, snapshot into the data dir, delete
   scrollback.rs          read the pipe-pane stream back as plain text (cold sessions); the masked tail with its overlap and the log's version for the remote port
   artifacts.rs           a run's declared outputs: glob under the cwd, modified since the run began

@@ -586,7 +586,8 @@ scrollback on disk. Added now:
 - **Restart** on the session header of a shell, command, or service:
   kills the pane if there is one and launches the record fresh; idempotent
   while the relaunch is in flight. Agents get no Restart (it would
-  discard the conversation); Return covers them.
+  discard the conversation), except a standing agent's (below,
+  "Standing agents"); Return covers them.
 - **Autostart** checkbox on a service's header; the reconcile on start
   already launched cold autostart services.
 - **Scrollback after the pane is gone.** The raw `pipe-pane` stream is
@@ -4683,6 +4684,71 @@ the user scrolls up, after which new content does not pull them back.
 Known gap: laying out every turn of a very long conversation on every
 frame is untouched. If a session stalls with the read off the frame
 thread, a virtualised turn list is the follow-up.
+
+## Standing agents (2026-11-09)
+
+A standing agent is a session record whose identity is its directory,
+`<data dir>/standing/<name>/`, of either agent kind. The directory holds
+its instructions, in the kind's file (`AgentKind::instructions_file`:
+`CLAUDE.md` for Claude Code, `AGENTS.md` for Codex), and the
+`notes.md`, `ledger.md` and `handoff.md` the agent keeps. Those files are
+the memory; nothing depends on the agent tool's own memory. Restart is a
+kill and a fresh launch in the same directory, never a resume, so a
+standing agent can run for months across fresh sessions.
+
+The record is an ordinary card in one project, "Standing agents", whose
+root is `<data dir>/standing/`, made by the first one. The record adds
+only `SessionRecord::standing` (schema v18): the instructions hash as of
+the last launch, the restart count, the hand-off's modified time, and
+`brief_pending`, which says the launch prompt is owed to the current
+session. The instructions file is Switchboard's base text, a marker line,
+and the owner's text; the card's Instructions editor shows the base read
+only and saves the owner's part through the store's atomic path, with a
+`.bak`. The launch prompt and the base text are built from one
+convention string, so they cannot disagree.
+
+The launch prompt is never on Claude Code's command line, because a
+positional prompt may not survive the folder-trust dialog. It is typed
+into the pane on the first of two releases: the new session's own
+`SessionStart` (its id matches the one the launch chose, and no trust
+question shows), or `session.trust` answering the dialog, which sends it
+after the keys. The first clears `brief_pending` as it sends; the second
+leaves it until a submitted prompt is seen, so a prompt the dialog ate
+still shows "brief not sent". A record returned by resume has nothing owed. Codex has no hooks and binds its rollout only after a
+first prompt, so its brief rides argv, and a bound rollout clears the
+flag. A poll on the tick hashes the instructions file and stats the
+hand-off; a hash other than the launched one shows a "stale" chip until a
+Restart, and a brief still owed when it should have gone shows "brief
+not sent".
+
+The control port gains `standing.new {name, agent?, instructions?,
+launch_flags?}` (a creation; the record is reported once its directory
+is ready, one action later), `standing.restart {session}`
+(non-replayable: it starts a paid turn) and `standing.remove {session}`
+(idempotent; the directory stays, so a standing agent made again under
+the name finds its memory).
+
+Known gaps:
+
+- No way to make a standing agent from the UI; only `standing.new` and
+  the `standing-new` script line.
+- No autostart: a standing agent comes back cold after the app restarts
+  and needs Restart, because the hard rule says agents are never resumed
+  or launched automatically.
+- Codex's instructions file name (`AGENTS.md` in its launch directory),
+  and whether a Codex trust dialog can swallow the argv brief, are not
+  verified; the recovery is the "brief not sent" chip and Restart.
+- Claude Code loads every ancestor `CLAUDE.md` of the data directory and
+  `~/.claude/CLAUDE.md` too; the stale marker covers only the
+  directory's own file.
+- When a `SessionStart` arrives while the card still holds the trust
+  mark (the owner answered the question in the terminal and the pane was
+  not read again yet), the brief is not sent: the hook clears the mark,
+  so no answer through the card follows. The "brief not sent" chip shows,
+  and Restart or a typed prompt recovers it.
+- Neither release has been watched on a live pane: when `SessionStart`
+  fires relative to the dialog, and whether the input box takes typed
+  text that early, are not measured.
 
 ## Open questions
 

@@ -346,7 +346,7 @@ pub fn migrate(value: serde_json::Value) -> Result<Workspace, String> {
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "missing schema_version".to_string())?;
     match version {
-        // v2 to v17 added optional fields and variants only (v8: the
+        // v2 to v18 added optional fields and variants only (v8: the
         // project's space; v9: the control port's operation id, the
         // outside waiting reason, the pending-launch mark and the last
         // stop time; v10: a session's launcher environment; v11: when a
@@ -355,9 +355,10 @@ pub fn migrate(value: serde_json::Value) -> Result<Workspace, String> {
         // hash; v13: whether a round is the owner's objection; v14: a
         // session's own ask; v15: an ask's kind and pending answer; v16:
         // a session's pending work at its last stop; v17: when a prompt
-        // last began a session's turn), so an older document reads with
+        // last began a session's turn; v18: a session's standing state),
+        // so an older document reads with
         // their defaults; it is written back at the current version.
-        1..=17 => serde_json::from_value(value)
+        1..=18 => serde_json::from_value(value)
             .map(|mut w: Workspace| {
                 w.schema_version = SCHEMA_VERSION;
                 w
@@ -510,6 +511,7 @@ mod tests {
             env: Vec::new(),
             env_sets: Vec::new(),
             token_hash: None,
+            standing: None,
             asking: None,
         };
         let mut agent = session(
@@ -1065,6 +1067,30 @@ mod tests {
         let loaded = migrate(value).unwrap();
         assert_eq!(loaded.schema_version, SCHEMA_VERSION);
         assert!(loaded.sessions.iter().all(|s| s.last_prompt_at.is_none()));
+    }
+
+    #[test]
+    fn v17_records_read_as_not_standing_and_a_standing_record_round_trips() {
+        let mut w = workspace("v17");
+        w.schema_version = 17;
+        let mut value = serde_json::to_value(&w).unwrap();
+        assert!(!value["sessions"].as_array().unwrap().is_empty());
+        for s in value["sessions"].as_array_mut().unwrap() {
+            s.as_object_mut().unwrap().remove("standing");
+        }
+        let loaded = migrate(value).unwrap();
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert!(loaded.sessions.iter().all(|s| s.standing.is_none()));
+
+        let mut w = workspace("standing");
+        w.sessions[0].standing = Some(crate::core::Standing {
+            seed_hash: Some("abc".into()),
+            restart_count: 3,
+            handoff_at: Some(w.sessions[0].created + Duration::from_mins(2)),
+            brief_pending: true,
+        });
+        let loaded = migrate(serde_json::to_value(&w).unwrap()).unwrap();
+        assert_eq!(loaded, w);
     }
 
     #[test]
