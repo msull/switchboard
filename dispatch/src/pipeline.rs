@@ -4260,6 +4260,7 @@ ports = [3100, 3199]
                 "review",
                 "implement",
                 "review-code",
+                "try",
                 "pr",
                 "ready",
                 "merge"
