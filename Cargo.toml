@@ -76,7 +76,6 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSResponder", "NSScreen"] }
 objc2-foundation = { version = "0.3", features = ["NSString"] }
 security-framework = "3"
-mdns-sd = "0.21"
 
 [dev-dependencies]
 switchboard-mcp = { path = "mcp" }
@@ -95,7 +94,7 @@ members = ["control", "dispatch", "dispatch-control", "mcp"]
 exclude = ["vendor/egui_term"]
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

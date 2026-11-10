@@ -9,6 +9,9 @@ pub mod controller;
 pub mod diff;
 pub mod dispatch;
 pub mod displays;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod dnssd;
 pub mod dock;
 pub mod dotenv;
 pub mod fakes;
