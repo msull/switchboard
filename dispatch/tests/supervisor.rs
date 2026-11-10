@@ -1949,3 +1949,192 @@ fn the_runner_pass_follows_and_delivers_in_the_same_pass() {
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert!(sent[0].1.contains("  decision  "), "{}", sent[0].1);
 }
+
+// --- the owner channel: an orchestrating agent's message to the pane
+
+impl Env {
+    fn owner_message(&mut self, text: &str) -> String {
+        let now = self.tick();
+        self.runner
+            .supervisor_ask(ORCHARD, text, "mcp:laptop", now)
+            .unwrap()
+            .id
+    }
+
+    fn ask_state(&self, id: &str) -> dispatch::ticket::Ask {
+        self.runner.ask_status(ORCHARD, id).unwrap()
+    }
+}
+
+#[test]
+fn an_ask_with_no_supervisor_is_refused() {
+    let mut env = Env::new();
+    let e = env
+        .runner
+        .supervisor_ask(ORCHARD, "hello", "mcp:laptop", 5)
+        .unwrap_err();
+    assert!(
+        e.to_string().starts_with(dispatch_control::NO_SUPERVISOR),
+        "{e}"
+    );
+}
+
+#[test]
+fn asks_waiting_to_be_typed_are_capped() {
+    let mut env = Env::new();
+    env.idle_supervisor();
+    for i in 0..dispatch::ticket::ASKS_KEPT {
+        env.runner
+            .supervisor_ask(ORCHARD, &format!("m{i}"), "mcp:laptop", 5)
+            .unwrap();
+    }
+    let e = env
+        .runner
+        .supervisor_ask(ORCHARD, "one more", "mcp:laptop", 6)
+        .unwrap_err();
+    assert!(
+        e.to_string().starts_with(dispatch_control::QUEUE_FULL),
+        "{e}"
+    );
+}
+
+#[test]
+fn a_queued_ask_is_typed_before_a_due_burst_with_its_header() {
+    let mut env = Env::new();
+    let sup = env.idle_supervisor();
+    let t = env.take(ORCHARD, 1);
+    env.subscribe(&t.id);
+    env.moved(&t.id);
+    let id = env.owner_message("Is #1 blocked?");
+    env.deliver();
+    let sent = env.sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].0, sup);
+    assert_eq!(
+        sent[0].1,
+        format!(
+            "Owner message {id} (from mcp:laptop):\nAn orchestrating session, not the owner, \
+             asks; answer in your next response.\nIs #1 blocked?"
+        )
+    );
+    let a = env.ask_state(&id);
+    assert_eq!(a.state, dispatch::ticket::AskState::Delivered);
+    assert_eq!(a.session.as_deref(), Some(sup.as_str()));
+    assert!(a.delivered_ms.is_some() && a.op.is_some());
+    // The burst goes on the next pass, once the pane is ready again.
+    env.sb().stop(&sup, 1);
+    env.deliver();
+    let sent = env.sent();
+    assert_eq!(sent.len(), 2);
+    assert!(
+        sent[1].1.starts_with("Dispatch subscription"),
+        "{}",
+        sent[1].1
+    );
+    // A delivered ask is never sent again.
+    env.sb().stop(&sup, 2);
+    env.deliver();
+    assert_eq!(env.sent().len(), 2);
+}
+
+#[test]
+fn an_ask_to_a_busy_pane_stays_queued_and_says_why() {
+    let mut env = Env::new();
+    let sup = env.fresh().unwrap().session;
+    let id = env.owner_message("Status?");
+    env.deliver();
+    assert!(env.prompts().is_empty());
+    assert_eq!(env.ask_state(&id).state, dispatch::ticket::AskState::Queued);
+    assert_eq!(env.supervision().delivery_waits.as_deref(), Some("busy"));
+    env.sb().stop(&sup, 1);
+    env.deliver();
+    assert_eq!(env.sent().len(), 1);
+    assert_eq!(
+        env.ask_state(&id).state,
+        dispatch::ticket::AskState::Delivered
+    );
+    assert_eq!(env.supervision().delivery_waits, None);
+}
+
+#[test]
+fn an_ask_whose_reply_was_lost_is_sent_again_under_its_op_and_typed_once() {
+    let mut env = Env::new();
+    env.idle_supervisor();
+    let id = env.owner_message("Status?");
+    env.sb().drop_reply_for = Some("session.prompt".into());
+    env.deliver();
+    let d = env.supervision().delivery.unwrap();
+    assert_eq!(d.ask.as_deref(), Some(id.as_str()));
+    assert_eq!(env.ask_state(&id).state, dispatch::ticket::AskState::Queued);
+    assert_eq!(env.ask_state(&id).op.as_deref(), Some(d.op.as_str()));
+    env.deliver();
+    let prompts = env.prompts();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[0], prompts[1], "the same op, to the same session");
+    assert_eq!(env.sent().len(), 1, "answered from the log");
+    assert_eq!(
+        env.ask_state(&id).state,
+        dispatch::ticket::AskState::Delivered
+    );
+}
+
+#[test]
+fn a_runner_restarted_mid_delivery_reads_the_ask_back_and_types_it_once() {
+    let mut env = Env::new();
+    env.idle_supervisor();
+    let id = env.owner_message("Status?");
+    env.sb().drop_reply_for = Some("session.prompt".into());
+    env.deliver();
+    // A new runner over the same records, as after a restart.
+    env.runner = Runner::new(
+        env.data.clone(),
+        Box::new(SharedPort(Arc::clone(&env.sb))),
+        Box::new(Arc::clone(&env.repo)),
+    );
+    env.deliver();
+    env.deliver();
+    assert_eq!(env.sent().len(), 1);
+    let ops: std::collections::BTreeSet<String> =
+        env.prompts().into_iter().map(|(op, _)| op).collect();
+    assert_eq!(ops.len(), 1, "one op for the one message");
+    assert_eq!(
+        env.ask_state(&id).state,
+        dispatch::ticket::AskState::Delivered
+    );
+}
+
+#[test]
+fn an_agents_decision_is_held_to_the_supervisor_table_and_logged_as_its() {
+    let mut env = Env::new();
+    let t = env.take(ORCHARD, 1);
+    let inspect = env.ask(&t.id, "inspect");
+    env.runner.actor = Some("mcp:laptop".into());
+    let now = env.tick();
+    let e = env
+        .runner
+        .decide(&t.id, &inspect, "inspect", None, now)
+        .unwrap_err();
+    assert!(
+        e.to_string()
+            .starts_with("mcp:laptop may not answer `inspect`"),
+        "{e}"
+    );
+    let d = env.ticket(&t.id).decisions[0].clone();
+    assert!(d.pending());
+    assert_eq!(d.refusals[0].by, "mcp:laptop");
+    let since = dispatch::events::last_seq(&dispatch::events::log_path(&env.data)).unwrap();
+    let finalize = env.ask(&t.id, "finalize");
+    env.runner.actor = Some("mcp:laptop".into());
+    let now = env.tick();
+    env.runner
+        .decide(&t.id, &finalize, "finalize", None, now)
+        .unwrap();
+    let d = env.ticket(&t.id).decisions[1].clone();
+    assert!(
+        matches!(&d.state, DecisionState::Answered { by, .. } if by == "mcp:laptop"),
+        "{d:?}"
+    );
+    let all = dispatch::events::read_since(&dispatch::events::log_path(&env.data), since).unwrap();
+    let answered = all.iter().find(|e| e.kind == Kind::Answered).unwrap();
+    assert_eq!(answered.actor.as_deref(), Some("mcp:laptop"));
+}

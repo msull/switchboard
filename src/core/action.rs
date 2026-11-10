@@ -293,6 +293,11 @@ pub enum AppAction {
     OpenPairing {
         code: String,
         scope: Scope,
+        /// The device paired in this window is an orchestrating agent:
+        /// it may message supervisors, and its decisions are marked as
+        /// an agent's and held to the supervisor's table. The owner's
+        /// choice, never the device's.
+        agent: bool,
     },
     ClosePairing,
     /// A `/pair` whose code or key did not match, from no known
@@ -672,6 +677,10 @@ pub enum AppAction {
     },
     /// A parked ticket back to active, through the port.
     DispatchResume(String),
+    /// A call to Dispatch's port as built: what an agent's device asks
+    /// for (a decision or close stamped with its `by`, a park, a brief,
+    /// an owner-channel message), sent as it is.
+    DispatchBody(dispatch_control::Body),
     /// A new supervisor session for the project, replacing the current
     /// one, through the port.
     DispatchSupervisorFresh(String),
@@ -1078,6 +1087,8 @@ pub struct PairingWindow {
     pub until: Duration,
     pub code: String,
     pub scope: Scope,
+    /// The device paired here is an agent (`PairedDevice::agent`).
+    pub agent: bool,
     pub failures: u32,
     pub sources: Vec<PairingSource>,
 }
@@ -1484,6 +1495,7 @@ impl AppCore {
             | AppAction::DispatchReadTicket { .. }
             | AppAction::DispatchReadUsage { .. }
             | AppAction::DispatchResume(_)
+            | AppAction::DispatchBody(_)
             | AppAction::DispatchSupervisorFresh(_)
             | AppAction::DispatchClose(_)
             | AppAction::DispatchWorktrees { .. }
@@ -2996,6 +3008,21 @@ impl AppCore {
     #[must_use]
     pub fn active_space(&self) -> SpaceId {
         self.settings.space
+    }
+    /// The space a new project lands in when its maker names none: the
+    /// one being worked in, or the first real space while the view is
+    /// the global one. `None` when only the global space exists.
+    #[must_use]
+    pub fn default_project_space(&self) -> Option<SpaceId> {
+        let active = self.active_space();
+        if active.is_global() {
+            self.spaces()
+                .iter()
+                .map(|s| s.id)
+                .find(|id| !id.is_global())
+        } else {
+            Some(active)
+        }
     }
     #[must_use]
     pub fn project_space(&self, id: ProjectId) -> Option<SpaceId> {

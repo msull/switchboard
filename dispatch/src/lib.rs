@@ -38,6 +38,8 @@
 //!   it.
 //! - `subscribe`: the tickets a supervisor follows, and the runner's
 //!   delivery of their events into its pane.
+//! - `brief`: a project's brief and a ticket's report, built from the
+//!   records, for the command line and the port alike.
 //! - `serve`: Dispatch's own port, tickets as views and the commands.
 
 // Tests assert emptiness with `assert!` throughout; the rest of the
@@ -46,6 +48,7 @@
 
 pub mod bitbucket;
 pub mod branch;
+pub mod brief;
 pub mod check;
 mod child;
 mod confine;

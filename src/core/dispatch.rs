@@ -1375,12 +1375,14 @@ impl AppCore {
                         decision,
                         answer,
                         note,
+                        by: None,
                     },
                 );
             }
             AppAction::DispatchResume(ticket) => {
                 self.dispatch_call(out, Body::Resume { ticket });
             }
+            AppAction::DispatchBody(body) => self.dispatch_call(out, body),
             AppAction::DispatchSupervisorFresh(project) => {
                 self.dispatch_call(out, Body::SupervisorFresh { project });
             }
@@ -1390,6 +1392,7 @@ impl AppCore {
                     Body::Close {
                         ticket,
                         reason: None,
+                        by: None,
                     },
                 );
             }
@@ -1685,6 +1688,15 @@ impl AppCore {
                 self.dispatch.connected = false;
                 self.error(format!("Dispatch did not answer: {e}"));
             }
+            // A device's own reads and owner-channel messages are
+            // answered to the device; the owner is not told.
+            (
+                Body::Brief { .. }
+                | Body::SupervisorAsk { .. }
+                | Body::SupervisorAskStatus { .. }
+                | Body::Report { .. },
+                Ok(Reply::Failed { .. }),
+            ) => {}
             (_, Ok(Reply::Failed { reason })) => self.error(format!("Dispatch: {reason}")),
             (Body::Artifact { path, .. }, Ok(Reply::Artifact { text })) => {
                 let asked_at = self

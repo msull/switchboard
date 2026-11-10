@@ -23,7 +23,7 @@ use crate::ticket::{ProjectState, Ticket};
 /// carried a version reads as 0 and is brought up by `migrate`. A
 /// record above it was written by a newer `dispatch` and is refused
 /// both ways, so this build never drops fields it does not know.
-pub const RECORD_VERSION: u32 = 31;
+pub const RECORD_VERSION: u32 = 32;
 
 /// A lock file held while this lives: the writer lock, the runner's
 /// claim, or a ticket's close.
@@ -625,6 +625,12 @@ pub fn migrate(mut value: Value) -> Value {
         // 30 to 31: a ticket's source gains `key`, absent from its serde
         // default, which is what every ticket taken before was: one with
         // no tracker key. Nothing is transformed.
+        //
+        // 31 to 32: a project's supervision gains `asks` and its
+        // delivery gains `ask`, empty and absent from their serde
+        // defaults. Nothing is transformed. A build that would drop them
+        // must refuse the record, or a queued owner message would be
+        // lost, or one already typed typed again.
         if version == 1 {
             settle_from_verdicts(&mut value);
         }
@@ -1045,6 +1051,27 @@ mod tests {
         assert_eq!(ps.supervisor.delivery, None);
         assert_eq!(ps.supervisor.delivery_waits, None);
         assert_eq!(ps.supervisor.current.unwrap().session, "s-1");
+    }
+
+    #[test]
+    fn a_version_thirty_one_project_reads_with_no_asks_and_a_newer_one_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("p.json");
+        let text = PROJECT_V0.replacen(
+            '{',
+            r#"{"version": 31, "supervisor": {"current": {"session": "s-1", "seed_hash": "h", "created_ms": 1}, "delivery": {"op": "o", "session": "s-1", "text": "x", "through": [], "closes": [], "parks": [], "at_ms": 2}},"#,
+            1,
+        );
+        fs::write(&project, text).unwrap();
+        let mut ps = read_project(&project).unwrap();
+        assert_eq!(ps.version, RECORD_VERSION);
+        assert!(ps.supervisor.asks.is_empty());
+        assert_eq!(ps.supervisor.delivery.as_ref().unwrap().ask, None);
+        write_project(&project, &ps).unwrap();
+        let value: Value = read_json(&project).unwrap();
+        assert!(value["supervisor"].get("asks").is_none());
+        ps.version = RECORD_VERSION + 1;
+        assert!(write_project(&project, &ps).is_err(), "never written back");
     }
 
     #[test]

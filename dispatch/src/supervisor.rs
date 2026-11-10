@@ -397,6 +397,11 @@ pub enum Actor {
     Owner,
     /// A supervisor session, current or past, of this project.
     Supervisor(String),
+    /// An orchestrating agent acting through Switchboard's remote port,
+    /// by its name (`mcp:<device name>`). It may act on any project, but
+    /// only as far as a supervisor with an empty table may: no
+    /// capability, no decision.
+    Agent(String),
 }
 
 impl Actor {
@@ -406,6 +411,7 @@ impl Actor {
         match self {
             Self::Owner => None,
             Self::Supervisor(_) => Some(BY_SUPERVISOR.to_owned()),
+            Self::Agent(name) => Some(name.clone()),
         }
     }
 }
@@ -587,30 +593,52 @@ pub fn live_pipeline(data: &DataDir, project: &str) -> Result<Pipeline> {
 /// Whether `actor` may run `args`; the owner always may. An error is the
 /// refusal, said to the supervisor.
 pub fn permit(actor: &Actor, args: &[&str], data: &DataDir) -> Result<()> {
-    let Actor::Supervisor(own) = actor else {
-        return Ok(());
+    // An agent has no project of its own: the own-project and
+    // own-ticket rules pass, and its table is empty.
+    let (who, own) = match actor {
+        Actor::Owner => return Ok(()),
+        Actor::Supervisor(own) => ("the supervisor".to_owned(), Some(own.as_str())),
+        Actor::Agent(name) => (format!("the agent {name}"), None),
     };
     let Some(&verb) = args.first() else {
         return Ok(());
     };
-    let refused = |form: &str| {
-        anyhow::anyhow!("the supervisor may not run `dispatch {form}`; the owner does")
-    };
+    let refused =
+        |form: &str| anyhow::anyhow!("{who} may not run `dispatch {form}`; the owner does");
     let own_project = |project: &str| -> Result<()> {
-        if project == own {
-            Ok(())
-        } else {
-            bail!("the supervisor of {own} may not act on {project}")
+        match own {
+            Some(own) if project != own => {
+                bail!("the supervisor of {own} may not act on {project}")
+            }
+            _ => Ok(()),
         }
     };
     // A ticket that cannot be read is left to the command to report.
     let own_ticket = |ticket: &str| -> Result<()> {
+        let Some(own) = own else {
+            return Ok(());
+        };
         match read_ticket(&data.ticket_file(ticket)) {
-            Ok(t) if t.project != *own => bail!(
+            Ok(t) if t.project != own => bail!(
                 "the supervisor of {own} may not act on {}'s tickets",
                 t.project
             ),
             _ => Ok(()),
+        }
+    };
+    let decides_own = || own.map(|o| decides(data, o)).unwrap_or_default();
+    let may_own = || own.map(|o| may(data, o)).unwrap_or_default();
+    // A capability refusal is saved on the supervisor's project; an
+    // agent has none to save it on, so it is a plain refusal.
+    let capability_refused = |capability: &str, action: String| -> anyhow::Error {
+        match own {
+            Some(own) => CapabilityRefused {
+                project: own.to_owned(),
+                capability: capability.to_owned(),
+                action,
+            }
+            .into(),
+            None => refused(&format!("{capability} {action}")),
         }
     };
     // A body file is a path the supervisor's session can read and the
@@ -627,22 +655,17 @@ pub fn permit(actor: &Actor, args: &[&str], data: &DataDir) -> Result<()> {
             if let Some(t) = args.get(1) {
                 own_ticket(t)?;
             }
-            if args.contains(&"--no-rerun") || decides(data, own).iter().any(|d| d == "rerun") {
+            if args.contains(&"--no-rerun") || decides_own().iter().any(|d| d == "rerun") {
                 Ok(())
             } else {
-                bail!("the supervisor may not resume with reruns; `--no-rerun`, or the owner does")
+                bail!("{who} may not resume with reruns; `--no-rerun`, or the owner does")
             }
         }
         Some(Rule::Runner) => match args {
             [capability, action @ ("stop" | "start" | "restart")]
-                if !may(data, own).iter().any(|m| m == capability) =>
+                if !may_own().iter().any(|m| m == capability) =>
             {
-                Err(CapabilityRefused {
-                    project: own.clone(),
-                    capability: (*capability).to_owned(),
-                    action: (*action).to_owned(),
-                }
-                .into())
+                Err(capability_refused(capability, (*action).to_owned()))
             }
             // Anything else is allowed or a usage error, which the
             // command reports without a refusal to save.
@@ -655,15 +678,10 @@ pub fn permit(actor: &Actor, args: &[&str], data: &DataDir) -> Result<()> {
             match target {
                 [capability, ticket, stage @ ..] if stage.len() <= 1 => {
                     own_ticket(ticket)?;
-                    if may(data, own).iter().any(|m| m == capability) {
+                    if may_own().iter().any(|m| m == capability) {
                         Ok(())
                     } else {
-                        Err(CapabilityRefused {
-                            project: own.clone(),
-                            capability: (*capability).to_owned(),
-                            action: target[1..].join(" "),
-                        }
-                        .into())
+                        Err(capability_refused(capability, target[1..].join(" ")))
                     }
                 }
                 // A malformed restart is the usage error's, never saved.
@@ -1231,6 +1249,26 @@ mod tests {
         assert!(s.contains("You may not move the worktrees"), "{s}");
         assert!(s.find("## Restarts") < s.find("## Commands"));
         assert_ne!(seed_hash("orchard", &sup), seed_hash("orchard", &table()));
+    }
+
+    #[test]
+    fn an_agent_is_refused_restart_and_allowed_decide_on_any_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::new(dir.path());
+        let agent = Actor::Agent("mcp:laptop".into());
+        assert_eq!(agent.by().as_deref(), Some("mcp:laptop"));
+        permit(&agent, &["decide", "a1b2c3d4", "d1", "go"], &data).unwrap();
+        permit(&agent, &["queue", "pear"], &data).unwrap();
+        let e = permit(&agent, &["restart", "a1b2c3d4"], &data).unwrap_err();
+        assert!(e.downcast_ref::<CapabilityRefused>().is_none());
+        assert!(
+            e.to_string().contains("the agent mcp:laptop may not"),
+            "{e}"
+        );
+        assert!(permit(&agent, &["runner", "stop"], &data).is_err());
+        assert!(permit(&agent, &["resume", "a1b2c3d4"], &data).is_err());
+        permit(&agent, &["resume", "a1b2c3d4", "--no-rerun"], &data).unwrap();
+        assert!(permit(&agent, &["run"], &data).is_err());
     }
 
     #[test]

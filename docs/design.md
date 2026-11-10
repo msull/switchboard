@@ -4750,6 +4750,44 @@ Known gaps:
   fires relative to the dialog, and whether the input box takes typed
   text that early, are not measured.
 
+## Switchboard MCP status (2026-11-09)
+
+Built: `switchboard-mcp` (`mcp/`, in the bundle), an MCP server an
+agent session runs on stdio to watch and drive paired hosts through
+their remote port, as the headset does. It answers both handshakes,
+lists the reads, `wait`, `new_session`, `run`, `decide`,
+`close_ticket`, `ask_supervisor`, `dispatch report|park`, `resume`
+(sent only with `confirm`) and `add_project`, and has no raw send and
+no shell. Its paired hosts and their tokens are in `hosts.json`, `0600`
+in its `0700` config directory. One event subscription per host serves
+every `wait`, `run` and `ask_supervisor` in the process.
+
+On the host: a pairing window carries an Agent choice the owner makes,
+and the device paired in it is marked (`PairedDevice.agent`); its
+decisions, closes and parks reach Dispatch as `mcp:<device>`, held to
+the project's supervisor table and logged as the event's actor
+(`Actor::Agent` for the command-line rules). The owner channel queues a
+message on the project's record (`Supervision.asks`, record version
+32) and the runner types it into the supervisor's pane before any
+subscription burst, once, through the same delivery record and
+`session.prompt` a subscription uses; its answer is read from the
+supervisor's transcript, not stored. The port gains a project's brief
+(`dispatch brief` as a view, `dispatch/src/brief.rs`), a ticket's
+report, park, `session.run` of an approved command, `POST projects`
+below a folder of the home directory, the `owner_channel` capability,
+and a per-source window on every `/api/v1/` path but `events`
+(docs/remote-client.md §4.3 and §4.6).
+
+Known gaps: `dispatch restart` through the MCP, which needs a `may`
+entry for an agent; `session kill` over the port, which needs a
+`confirm` on `SessionKill` first; a seed line naming `Owner message` in
+the supervisor guide, which would mark every supervisor's seed stale;
+whether `project add` roots should be an allow-list; whether a
+plaintext token file is acceptable beyond the owner's laptop. The live
+check (`tests/live.rs`, `owner_message_live`) reads a headed message
+back from a one-turn haiku session's transcript; the typing between
+turns in a real pane is checked only against the fake.
+
 ## Open questions
 
 - Shared project config runs with a hash-and-approve flow and no

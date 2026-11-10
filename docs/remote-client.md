@@ -169,7 +169,7 @@ Each host is authoritative for its own resources. The client aggregates views wi
 | GET | `/api/v1/info` | new: `info` | none (identity only, before pairing) |
 | POST | `/api/v1/pair` | pairing handshake (§5); `transport: "cookie"` asks for the token as a cookie | none, only inside the pairing window |
 | GET | `/`, `/app.js`, `/app.css` | the web page (`web/`), not JSON; answered on the connection thread | none |
-| GET | `/api/v1/me` | new: `{device_id, name, scope, server_id, server_name}` of the asking device; not in `capabilities` | read |
+| GET | `/api/v1/me` | new: `{device_id, name, scope, agent, server_id, server_name}` of the asking device; not in `capabilities` | read |
 | GET | `/api/v1/projects` | `projects`; `?scope=all` includes Dispatch's worker records | read |
 | GET | `/api/v1/spaces` | `spaces` | read |
 | GET | `/api/v1/spaces/{id}/sets` | `sets` | read |
@@ -199,11 +199,18 @@ Each host is authoritative for its own resources. The client aggregates views wi
 | POST | `/api/v1/dispatch/tickets/{id}/decide` | new: the Mac's `DispatchDecide` | control |
 | POST | `/api/v1/dispatch/tickets/{id}/resume` | new: the Mac's `DispatchResume` | control |
 | POST | `/api/v1/dispatch/tickets/{id}/close` | new: the Mac's `DispatchClose` | control |
+| POST | `/api/v1/dispatch/tickets/{id}/park` | new (2026-11-09): `{reason?}`, Dispatch's `park` on an active ticket | control |
+| GET | `/api/v1/dispatch/tickets/{id}/report` | new (2026-11-09): `{report}`, what `dispatch report <id> --json` prints, masked | read |
+| GET | `/api/v1/dispatch/projects/{project}/brief` | new (2026-11-09): `{brief}`, what `dispatch brief <project>` prints as a view, masked; `{project}` is Dispatch's name for it | read |
+| POST | `/api/v1/dispatch/projects/{project}/supervisor/ask` | new (2026-11-09): the owner channel (§4.6), `{op, text}` | control, agent |
+| GET | `/api/v1/dispatch/projects/{project}/supervisor/ask/{id}` | new (2026-11-09): `{id, state, reply}` of one owner-channel message | read |
+| POST | `/api/v1/sessions/{id}/run` | new (2026-11-09): `session.run`, `{op}`, a new run of a command session | control |
+| POST | `/api/v1/projects` | new (2026-11-09): `project.add`, `{op, name, root, space?}`, the root below a folder of the home directory | control |
 | GET | `/api/v1/dispatch/tickets/{id}/files/{key}` | new: the Mac's `DispatchReadArtifact`, or the disk for an image | read |
 | GET | `/api/v1/dispatch/tickets/{id}/events` | new: the Mac's `DispatchReadEvents` | read |
 | GET | `/api/v1/events` | WebSocket upgrade | read |
 
-Everything else on the wire is **refused before translation**, by an allowlist, not a denylist: `env.resolve` returns secret values; the `env.*` writes, `definition.install`, `project.add`, `project.root`, `set.sync`, `workflow.*`, `dispatch.runner`, `session.kill` and `session.remove` change what runs on the host or what it keeps. v1 remote is the table above and nothing more. Anything outside `/api/v1/` but the page's three files, `/favicon.ico` included, is the JSON `not_found`.
+Everything else on the wire is **refused before translation**, by an allowlist, not a denylist: `env.resolve` returns secret values; the `env.*` writes, `definition.install`, `project.add` with any other root, `project.root`, `set.sync`, `workflow.*`, `dispatch.runner`, `session.kill` and `session.remove` change what runs on the host or what it keeps. v1 remote is the table above and nothing more. Anything outside `/api/v1/` but the page's three files, `/favicon.ico` included, is the JSON `not_found`.
 
 **Redaction, one policy for every text that leaves the port, applied before any cut.** `session.screen` today masks the values of the project's secret variables and of the session's granted environment sets, and it reads slack lines above the window first so a value wrapped across the window's first line is still found whole. The port generalizes both halves of that: one `redact` function in `app.rs`, and the rule that **masking runs over complete source text, and every cut comes after**, since a value split by a cut no longer matches. Per kind:
   - **conversation**: the parser caps tool detail at `DETAIL_CAP` while parsing, so masking a parsed turn would miss a value crossing that cap. The transcript reader gains an additive `read_masked(handle, &dyn Fn(&str) -> String)` that applies the mask to every string field before `cap`; the port's conversation cache (§4.4) is populated through it, keyed by the secret set's fingerprint as well, and is separate from the UI's unmasked cache. The 256 KiB turn cut then runs on masked text.
@@ -304,6 +311,14 @@ Because the subscriber is registered on the frame thread before any later pass c
 ### 4.6 Dispatch and waiting
 
 "Waiting on you" on a card includes reasons set from outside: Dispatch marks a session through `session.waiting` when one of its tickets needs a decision. `SessionView.waiting_reason` is already on the wire; the client shows it. The `Dispatch · <project>` working sets are ordinary sets to the client.
+
+**Agents and the owner channel (2026-11-09).** `switchboard-mcp` (README, "Layout") is a client like the headset, run by an agent session on another Mac. Which devices are agents is the owner's choice, never the device's: the pairing dialog has an "Agent" box beside the scope, the window carries it (`PairingWindow.agent`), and the device paired in it is marked (`PairedDevice.agent`, `false` in a `devices.json` from before); nothing in the pairing body is read for it, and `/me` reports it. An agent device's `decide`, `close` and `park` reach Dispatch with `by: "mcp:<device name>"`, which Dispatch stamps on what it changes, logs as the event's actor, and holds to the project's `[supervisor]` table's `decides` as it holds a supervisor's answers; another device's are the owner's as before.
+
+`POST dispatch/projects/{project}/supervisor/ask` is the owner channel: under `control`, from an agent device only (`agent_only` otherwise), `{op, text}` with the text up to 16 KiB. Dispatch saves the message on the project's record (`no_supervisor`, 409, for a project without a supervisor session; `dispatch_off`, 503, without a runner) and its runner types it into the supervisor's pane the next time the pane is ready for a prompt, before any subscription burst, headed `Owner message <id> (from mcp:<device>):` and a line saying an orchestrating session, not the owner, asks. A repeat of the device's op is answered with the message it made. `GET .../supervisor/ask/{id}` answers `queued` until it is typed, `delivered` once it is, and `answered` with `reply`, the supervisor's response to that turn read from its transcript and masked as every conversation is, once the turn has ended. `/info` lists `owner_channel` among its `capabilities` on a host with these routes, the brief, the report, park, `run` and `POST projects`.
+
+`POST sessions/{id}/run` starts a new run of a command session: a command record the owner made, or a `.switchboard/project.json` entry the owner approved in the Run tab (`not_approved`, 409, otherwise), never an agent, shell or service (`not_a_command`), never while it runs (`running`). It goes through `serve` with the device's op as the key, logged before it runs as `send` is, and answers `{session, run}`, the new run's number; the run's end and exit are on `runs` and its output on `runs/{n}/output`. `POST projects` adds a project whose root, canonicalised, is a directory strictly below a direct child of the host user's home with no dot-component (`bad_root` otherwise), so the one thing a root grants a device, `file.read` under it, never reaches the home directory or its dotfiles.
+
+Every `/api/v1/` path but `events` shares one per-source window of 600 requests a minute, answered 429 past it.
 
 #### 4.7 Tickets
 

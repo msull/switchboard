@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
+use dispatch::brief::{cost_cell, report_of, span, supervisor_line};
 use dispatch::check;
 use dispatch::epoch_ms;
 use dispatch::events::{self, Burst, Event, For, Kind, base_name, clock, short};
@@ -103,7 +104,7 @@ fn with_actor(mut runner: Runner) -> Runner {
 /// owner types `dispatch`.
 fn decide_command() -> String {
     match actor() {
-        Actor::Owner => "dispatch decide".to_owned(),
+        Actor::Owner | Actor::Agent(_) => "dispatch decide".to_owned(),
         Actor::Supervisor(_) => std::env::current_exe().map_or_else(
             |_| "dispatch decide".to_owned(),
             |exe| format!("{} decide", exe.display()),
@@ -869,18 +870,6 @@ fn local_time(ms: u64) -> String {
     )
 }
 
-/// A duration for a person: `2h05m`, `4m10s`, `12s`.
-fn span(ms: u64) -> String {
-    let s = ms / 1000;
-    if s >= 3600 {
-        format!("{}h{:02}m", s / 3600, (s / 60) % 60)
-    } else if s >= 60 {
-        format!("{}m{:02}s", s / 60, s % 60)
-    } else {
-        format!("{s}s")
-    }
-}
-
 fn events(args: &[&str]) -> Result<()> {
     let f = Flags::parse(
         args,
@@ -1388,38 +1377,6 @@ fn print_pending(view: &dispatch_control::TicketView) -> Result<()> {
     Ok(())
 }
 
-/// A ticket's report, with git asked for the size of its PR's range in
-/// Dispatch's clone of the lane's repository.
-fn report_of(runner: &Runner, t: &dispatch::ticket::Ticket) -> TicketReport {
-    let names = events::stage_names(t);
-    let pipeline = runner.pipeline_of(t).ok();
-    let range = report::pr_range(t).and_then(|(lane, base, head)| {
-        let p = pipeline.as_ref()?;
-        let dir = runner.lane_clone(p, p.lane(&lane)?);
-        runner.git.range_size(&dir, &base, &head).ok()
-    });
-    let now = now_ms();
-    // The counts are read as far as they can be: a cache that cannot be
-    // brought up to date still says what it held.
-    let cache = dispatch::usage::bring_up_to_date(&runner.data, t, now).unwrap_or_else(|e| {
-        eprintln!("ticket {}: usage not read: {e:#}", t.id);
-        dispatch::store::read_usage(&runner.data.usage_file(&t.id)).unwrap_or_default()
-    });
-    let usage = dispatch::usage::of(t, pipeline.as_ref(), &cache, now);
-    let mut r = report::of(
-        t,
-        pipeline.as_ref(),
-        &names,
-        &|p| std::fs::read_to_string(p).ok(),
-        &report::plan_round_numbers,
-        range,
-        usage,
-        now,
-    );
-    r.cost = report::price(&r.tokens, &runner.rates_for(t));
-    r
-}
-
 /// `report --refresh`: each ticket's missing transcripts asked of
 /// Switchboard and recorded, a line for each session it no longer has.
 fn refresh_usage(tickets: &[String]) -> Result<()> {
@@ -1444,7 +1401,7 @@ fn report(args: &[&str]) -> Result<()> {
             if f.on("--refresh") {
                 refresh_usage(&[(*ticket).to_owned()])?;
             }
-            let r = report_of(&runner, &runner.load_ticket(ticket)?);
+            let r = report_of(&runner, &runner.load_ticket(ticket)?, now_ms());
             if json {
                 say!("{}", serde_json::to_string_pretty(&r)?);
             } else {
@@ -1473,7 +1430,10 @@ fn report(args: &[&str]) -> Result<()> {
                     .collect::<Result<_>>()?;
             }
             tickets.sort_by_key(|t| t.created_ms);
-            let rows: Vec<TicketReport> = tickets.iter().map(|t| report_of(&runner, t)).collect();
+            let rows: Vec<TicketReport> = tickets
+                .iter()
+                .map(|t| report_of(&runner, t, now_ms()))
+                .collect();
             let total = report::total(&rows);
             if json {
                 say!(
@@ -1686,16 +1646,6 @@ fn ticket_usage(r: &TicketReport) -> Result<()> {
     Ok(())
 }
 
-/// A cost in a table cell or a brief line: `$1.23`, with a `+` when a
-/// model's tokens or cache had no rate, and `-` when nothing was priced,
-/// so a ticket with no rate or no tokens is not read as costing nothing.
-fn cost_cell(c: &report::Cost) -> String {
-    if c.priced == 0 {
-        return "-".to_owned();
-    }
-    format!("{}{}", c.dollars(), if c.short() { "+" } else { "" })
-}
-
 /// One model's tokens on a line.
 fn tokens_line(t: &dispatch_control::Tokens) -> String {
     format!(
@@ -1787,146 +1737,9 @@ fn brief(args: &[&str]) -> Result<()> {
     let f = Flags::parse(args, &[], &[]);
     let project = f.one();
     let runner = offline_runner()?;
-    let now = now_ms();
-    match runner.supervisor_standing(project) {
-        Ok(s) => say!("{}", supervisor_line(project, &s, now)),
-        Err(e) => say!("supervisor: {e:#}"),
-    }
-    say!(
-        "{}",
-        health::build_line(
-            health::read_runner_file(&runner.data)
-                .as_ref()
-                .map(|f| &f.build),
-            &dispatch::own_build()
-        )
-    );
-    let tickets: Vec<Ticket> = runner
-        .tickets()?
-        .into_iter()
-        .filter(|t| t.project == project && !matches!(t.state, TicketState::Closed { .. }))
-        .collect();
-    say!("\ntickets:");
-    if tickets.is_empty() {
-        say!("  none");
-    }
-    for t in &tickets {
-        say!("  {}", ticket_line(&runner, t, now));
-    }
-    say!("\nwaiting on you:");
-    let mut any = false;
-    for t in &tickets {
-        for d in t.waiting_on_you() {
-            any = true;
-            say!(
-                "  {} {} [{}] {}: {}\n    options: {}\n    {} {} {} <answer> [--note <text> | --file <path>]",
-                t.id,
-                d.id,
-                d.stage,
-                d.name,
-                d.question,
-                d.options.join(" | "),
-                decide_command(),
-                t.id,
-                d.id
-            );
-        }
-    }
-    if !any {
-        say!("  nothing");
-    }
-    let log = events::log_path(&runner.data);
-    let all = events::read_since(&log, 0)?;
-    let gone = events::withdrawn(&all);
-    let mine: Vec<&Event> = all
-        .iter()
-        .filter(|e| e.project == project && e.kind != Kind::Void && !gone.contains(&e.seq))
-        .collect();
-    say!("\nlast events:");
-    for e in &mine[mine.len().saturating_sub(20)..] {
-        say!("  {}", events::line(e, false));
-    }
-    say!("  follow from seq {}", events::last_seq(&log)?);
-    let ps = runner.load_project(project)?;
-    if !ps.supervisor.subscriptions.is_empty() {
-        say!("\nsubscriptions (the runner types these into your pane when you are idle):");
-    }
-    for sub in &ps.supervisor.subscriptions {
-        let lines = subscribe::undelivered(&runner.data, sub)?;
-        say!(
-            "  {} from seq {}: {} undelivered",
-            sub.ticket,
-            sub.since,
-            lines.len()
-        );
-        for e in &lines[lines.len().saturating_sub(10)..] {
-            say!("    {}", events::line(e, false));
-        }
-    }
-    say!("\nopen worktrees:");
-    let mut trees = false;
-    for t in &tickets {
-        for lane in t.lanes.iter().filter(|l| !l.removed) {
-            trees = true;
-            say!("  {} {}: {}", t.id, lane.name, lane.worktree.display());
-        }
-    }
-    if !trees {
-        say!("  none");
-    }
-    let handoff = runner.data.supervisor_dir(project).join("handoff.md");
-    say!("\nhand-off ({}):", handoff.display());
-    if let Ok(text) = std::fs::read_to_string(&handoff) {
-        say!("{}", text.trim_end());
-    } else {
-        say!("(no hand-off yet)");
-    }
+    let view = dispatch::brief::build(&runner, project, &decide_command(), now_ms())?;
+    say!("{}", dispatch::brief::render(&view));
     Ok(())
-}
-
-/// An open ticket on one line: its source, stage, state and cost so far.
-/// The cost reads the project's pipeline file once per ticket
-/// (`running_cost`), so a brief of many tickets is that many file reads.
-fn ticket_line(runner: &Runner, t: &Ticket, now: u64) -> String {
-    let pipeline = runner.pipeline_of(t).ok();
-    let stage = pipeline
-        .as_ref()
-        .and_then(|p| p.stages.get(t.stage).map(|s| s.name.clone()))
-        .unwrap_or_else(|| "done".to_owned());
-    format!(
-        "{} {} {} · stage {stage} · {}{}",
-        t.id,
-        t.source.label(),
-        t.source.title,
-        t.state.label(),
-        running_cost(runner, t, pipeline.as_ref(), now)
-    )
-}
-
-/// ` · ~$1.23 so far` from the ticket's counts cache as it stands: no
-/// transcript is read, so a brief stays cheap and is as of the last
-/// report or Usage tab read. Nothing when nothing is counted.
-fn running_cost(
-    runner: &Runner,
-    t: &Ticket,
-    pipeline: Option<&dispatch::pipeline::Pipeline>,
-    now: u64,
-) -> String {
-    let Ok(cache) = dispatch::store::read_usage(&runner.data.usage_file(&t.id)) else {
-        return String::new();
-    };
-    let mut tokens = std::collections::BTreeMap::new();
-    for a in dispatch::usage::of(t, pipeline, &cache, now) {
-        dispatch_control::add_models(&mut tokens, &a.models);
-    }
-    if tokens.is_empty() {
-        return String::new();
-    }
-    let cost = report::price(&tokens, &runner.rates_for(t));
-    if cost.priced == 0 {
-        return format!(" · no rate for {}", cost.unpriced.join(", "));
-    }
-    format!(" · ~{} so far", cost_cell(&cost))
 }
 
 /// `dispatch subscribe <ticket> [--for move] [--since <seq>]`.
@@ -1936,6 +1749,7 @@ fn subscribe(args: &[&str]) -> Result<()> {
     let what = f.value("--for").unwrap_or("move");
     let by = match actor() {
         Actor::Owner => "owner".to_owned(),
+        Actor::Agent(name) => name.clone(),
         Actor::Supervisor(_) => {
             std::env::var("SWITCHBOARD_RECORD_ID").unwrap_or_else(|_| BY_SUPERVISOR.to_owned())
         }
@@ -1991,27 +1805,6 @@ fn subscriptions(project: &str) -> Result<()> {
         say!("waits: {why} (since {})", local_time(sup.delivery_waits_ms));
     }
     Ok(())
-}
-
-/// The supervisor in one line: its session, age and seed.
-fn supervisor_line(project: &str, s: &supervisor::Standing, now: u64) -> String {
-    if s.table.is_none() {
-        return format!("supervisor: none (no [supervisor] table in pipelines/{project}.toml)");
-    }
-    let Some(c) = &s.ps.supervisor.current else {
-        return format!("supervisor: none; `dispatch supervisor {project} --fresh` starts one");
-    };
-    let seed = if s.stale {
-        "stale: `[supervisor]` changed, `--fresh` to reseed"
-    } else {
-        "current"
-    };
-    format!(
-        "supervisor: session {}, {} old, seed {} ({seed})",
-        c.session,
-        span(now.saturating_sub(c.created_ms)),
-        c.seed_hash
-    )
 }
 
 /// `dispatch supervisor <project> [--fresh [--setup] | --resume | --kill

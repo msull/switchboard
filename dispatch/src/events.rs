@@ -880,7 +880,7 @@ fn revision_events(out: &mut Vec<Event>, old: &Ticket, new: &Ticket, at_ms: u64)
         };
         let text = format!("r{}: the owner's objection, by {}", r.round, r.by);
         out.push(Event {
-            actor: (r.by == scheduler::BY_SUPERVISOR).then(|| r.by.clone()),
+            actor: scheduler::bound_by_table(&r.by).then(|| r.by.clone()),
             ..Event::of_attempt(new, at_ms, Kind::Revised, a, text)
         });
     }
@@ -971,7 +971,7 @@ fn decision_events(
     {
         let note = note.as_ref().map_or(String::new(), |n| format!(" — {n}"));
         out.push(Event {
-            actor: (by == scheduler::BY_SUPERVISOR).then(|| by.clone()),
+            actor: scheduler::bound_by_table(by).then(|| by.clone()),
             ..Event::of_decision(
                 t,
                 at_ms,

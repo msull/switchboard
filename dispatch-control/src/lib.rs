@@ -63,6 +63,10 @@ pub enum Body {
         answer: String,
         #[serde(default)]
         note: Option<String>,
+        /// Who answers, when not the owner: `mcp:<device>` for an
+        /// orchestrating agent, held to the project's supervisor table.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
     },
     /// A project's queue, reordered when `order` is given.
     Queue {
@@ -85,6 +89,9 @@ pub enum Body {
         ticket: String,
         #[serde(default)]
         reason: Option<String>,
+        /// Who closes, when not the owner: `mcp:<device>`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
     },
     /// Where tickets' trees go: read it, set it (`path`), and with
     /// `migrate` move every idle ticket's tree there.
@@ -109,6 +116,30 @@ pub enum Body {
     /// A ticket's tokens by model and its agents' time, per session,
     /// attempt and stage, read from the transcripts its sessions wrote.
     Usage { ticket: String },
+    /// What `dispatch brief <project>` prints, as a view.
+    Brief { project: String },
+    /// A message to the project's current supervisor through the owner
+    /// channel, saved before it is typed; the runner types it into the
+    /// pane once it is ready. `by` is who sent it, `mcp:<device>`, set by
+    /// the app from the paired device, never by the device.
+    SupervisorAsk {
+        project: String,
+        text: String,
+        by: String,
+    },
+    /// Where an owner-channel message stands.
+    SupervisorAskStatus { project: String, id: String },
+    /// Park a ticket, as `dispatch park` does; the runner stops its work
+    /// on its next pass. `by` stamps who parked it.
+    Park {
+        ticket: String,
+        #[serde(default)]
+        reason: Option<String>,
+        #[serde(default)]
+        by: Option<String>,
+    },
+    /// One ticket's report, as `dispatch report <ticket> --json` prints.
+    Report { ticket: String },
 }
 
 impl Body {
@@ -128,6 +159,11 @@ impl Body {
             Self::Events { .. } => "events",
             Self::SupervisorFresh { .. } => "supervisor-fresh",
             Self::Usage { .. } => "usage",
+            Self::Brief { .. } => "brief",
+            Self::SupervisorAsk { .. } => "supervisor-ask",
+            Self::SupervisorAskStatus { .. } => "supervisor-ask-status",
+            Self::Park { .. } => "park",
+            Self::Report { .. } => "report",
         }
     }
 }
@@ -137,14 +173,118 @@ impl Body {
 pub enum Reply {
     Status(Status),
     Ticket(TicketView),
-    Artifact { text: String },
+    Artifact {
+        text: String,
+    },
     Decided(DecisionView),
-    Queue { order: Vec<String> },
+    Queue {
+        order: Vec<String>,
+    },
     Taken(TicketView),
     Worktrees(WorktreesView),
     Events(EventsView),
     Usage(UsageView),
-    Failed { reason: String },
+    Brief(BriefView),
+    Ask(AskView),
+    /// A ticket's report as `dispatch report --json` prints it.
+    Report(serde_json::Value),
+    Failed {
+        reason: String,
+    },
+}
+
+/// The first words of a refusal of an owner-channel message to a
+/// project with no supervisor session.
+pub const NO_SUPERVISOR: &str = "no supervisor";
+
+/// The first words of a refusal of an owner-channel message while the
+/// project already holds as many untyped ones as it keeps.
+pub const QUEUE_FULL: &str = "queue full";
+
+/// What `dispatch brief <project>` prints, as data: what a supervisor,
+/// or an agent driving the project, reads first.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BriefView {
+    pub project: String,
+    /// The supervisor's standing in one line.
+    pub supervisor: String,
+    /// Whether the runner runs the build on disk, in one line.
+    pub build: String,
+    /// The project's open tickets.
+    pub tickets: Vec<BriefTicket>,
+    /// Every decision waiting on the owner.
+    pub waiting: Vec<BriefDecision>,
+    /// The project's last events, as `dispatch events` prints them.
+    pub events: Vec<String>,
+    /// The event log's last seq, to follow from.
+    pub follow_from: u64,
+    pub subscriptions: Vec<BriefSubscription>,
+    pub worktrees: Vec<BriefWorktree>,
+    /// Where the supervisor keeps its hand-off, and its text if any.
+    pub handoff_path: PathBuf,
+    pub handoff: Option<String>,
+    /// Owner-channel messages not yet typed into the supervisor's pane.
+    pub asks: Vec<AskView>,
+}
+
+/// One open ticket in a brief.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BriefTicket {
+    pub id: String,
+    /// Its source, stage, state and cost so far, in one line.
+    pub line: String,
+}
+
+/// One decision waiting on the owner, in a brief.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BriefDecision {
+    pub ticket: String,
+    pub decision: String,
+    pub stage: String,
+    pub name: String,
+    pub question: String,
+    pub options: Vec<String>,
+    /// The exact command line that answers it, `<answer>` left open.
+    pub decide: String,
+}
+
+/// One subscription in a brief: what the runner has not typed yet.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BriefSubscription {
+    pub ticket: String,
+    pub since: u64,
+    pub undelivered: usize,
+    /// The last few undelivered lines.
+    pub lines: Vec<String>,
+}
+
+/// One open worktree in a brief.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BriefWorktree {
+    pub ticket: String,
+    pub lane: String,
+    pub path: PathBuf,
+}
+
+/// An owner-channel message to a project's supervisor.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AskView {
+    pub id: String,
+    pub project: String,
+    pub text: String,
+    pub by: String,
+    /// `queued` until it is typed into the pane, then `delivered`.
+    pub state: String,
+    /// The supervisor session it was typed into.
+    pub session: Option<String>,
+    pub created_ms: u64,
+    pub delivered_ms: Option<u64>,
 }
 
 /// Tokens one model spent, summed over the messages counted.
@@ -1285,6 +1425,51 @@ mod tests {
     }
 
     #[test]
+    fn the_owner_channel_and_agent_bodies_round_trip_through_a_line() {
+        let bodies = [
+            Body::Decide {
+                ticket: "t1".into(),
+                decision: "d1".into(),
+                answer: "go".into(),
+                note: None,
+                by: Some("mcp:laptop".into()),
+            },
+            Body::Brief {
+                project: "Orchard".into(),
+            },
+            Body::SupervisorAsk {
+                project: "Orchard".into(),
+                text: "Status?".into(),
+                by: "mcp:laptop".into(),
+            },
+            Body::SupervisorAskStatus {
+                project: "Orchard".into(),
+                id: "ask-0123456789ab".into(),
+            },
+            Body::Park {
+                ticket: "t1".into(),
+                reason: None,
+                by: Some("mcp:laptop".into()),
+            },
+            Body::Report {
+                ticket: "t1".into(),
+            },
+        ];
+        for body in bodies {
+            let request = Request::new("op-1", body);
+            assert_eq!(Request::parse(request.to_line().trim_end()), Ok(request));
+        }
+        let reply = Reply::Report(serde_json::json!({"id": "t1", "cost": {"priced": 0}}));
+        assert_eq!(Reply::parse(reply.to_line().trim_end()), Ok(reply));
+        let reply = Reply::Ask(AskView {
+            id: "ask-0123456789ab".into(),
+            state: "queued".into(),
+            ..AskView::default()
+        });
+        assert_eq!(Reply::parse(reply.to_line().trim_end()), Ok(reply));
+    }
+
+    #[test]
     fn every_request_and_reply_round_trips_through_a_line() {
         let bodies = [
             Body::Status,
@@ -1298,6 +1483,7 @@ mod tests {
                 decision: "d1".into(),
                 answer: "frontend".into(),
                 note: Some("only that".into()),
+                by: None,
             },
             Body::Queue {
                 project: "Orchard".into(),
@@ -1313,10 +1499,12 @@ mod tests {
             Body::Close {
                 ticket: "t1".into(),
                 reason: None,
+                by: None,
             },
             Body::Close {
                 ticket: "t1".into(),
                 reason: Some("done elsewhere".into()),
+                by: Some("mcp:laptop".into()),
             },
             Body::Worktrees {
                 path: Some("/wt2".into()),
@@ -1390,7 +1578,8 @@ mod tests {
             Request::parse(line).unwrap().body,
             Body::Close {
                 ticket: "t".into(),
-                reason: None
+                reason: None,
+                by: None,
             }
         );
     }

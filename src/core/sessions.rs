@@ -280,6 +280,33 @@ impl AppCore {
         self.return_to_session(id, now, out);
     }
 
+    /// A new run of a command record through the control port: refused
+    /// unless it is a runnable command whose pane is not running, so a
+    /// device can start only what the owner made or approved, and never
+    /// a second copy of a run in progress.
+    pub(super) fn control_run(&mut self, id: RecordId, now: Clock, out: &mut Out) {
+        let Some(record) = self.session(id) else {
+            self.error("no such session");
+            return;
+        };
+        if !matches!(record.kind, SessionKind::Command) {
+            self.error("not a command; only a command session is run");
+            return;
+        }
+        if !record.runnable() {
+            let name = record.name.clone();
+            self.error(format!(
+                "{name} comes from .switchboard/project.json and is not approved; approve it in the Run tab"
+            ));
+            return;
+        }
+        if self.is_running(id) || self.is_in_flight(id) {
+            self.error("running; wait for the run to end");
+            return;
+        }
+        self.restart_session(id, now, out);
+    }
+
     /// Kill the pane if there is one, then launch the record fresh.
     /// Agents are not restarted this way (a restart would lose the
     /// conversation); for them it is a plain return. A standing agent is

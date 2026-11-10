@@ -1817,6 +1817,50 @@ pub struct Supervision {
     /// When `delivery_waits` last changed, or the app last refused
     /// `session.prompt` as unknown, in Unix ms.
     pub delivery_waits_ms: u64,
+    /// Messages an orchestrating agent sent the supervisor through the
+    /// owner channel, newest last; only the last `ASKS_KEPT`. A queued
+    /// one is typed before any subscription burst.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub asks: Vec<Ask>,
+}
+
+/// How many owner-channel messages a project's supervision keeps.
+pub const ASKS_KEPT: usize = 20;
+
+/// One message to the supervisor through the owner channel: written
+/// when it is accepted, typed into the pane when the supervisor is
+/// ready, and final once typed. The reply is not kept here: the
+/// supervisor's transcript is its durable copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ask {
+    /// `ask-` and 12 hex digits; the pane sees it in the header.
+    pub id: String,
+    /// What the agent asked.
+    pub text: String,
+    /// Who sent it: `mcp:<device name>`.
+    pub by: String,
+    pub state: AskState,
+    /// The supervisor session it was typed into, once typed.
+    #[serde(default)]
+    pub session: Option<String>,
+    /// The delivery op it was typed under, once a delivery carries it.
+    #[serde(default)]
+    pub op: Option<String>,
+    /// When it was accepted, in Unix ms.
+    pub created_ms: u64,
+    /// When it was typed, in Unix ms.
+    #[serde(default)]
+    pub delivered_ms: Option<u64>,
+}
+
+/// Where an owner-channel message stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskState {
+    /// Accepted, not typed yet.
+    Queued,
+    /// Typed into the supervisor's pane; never typed again.
+    Delivered,
 }
 
 /// One ticket a supervisor follows: the runner types its settled bursts
@@ -1860,6 +1904,10 @@ pub struct Delivery {
     pub parks: Vec<String>,
     /// When it was written, in Unix ms.
     pub at_ms: u64,
+    /// The owner-channel message this delivery types, instead of
+    /// subscription lines; its settle marks the ask delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<String>,
 }
 
 /// How many refused commands a project's supervision keeps.

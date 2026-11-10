@@ -13,14 +13,19 @@
 //! before it is sent and sent again under the same op after a lost
 //! reply, which the app answers from its log without typing twice.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use switchboard_control::{self as wire, Body, Liveness, Reply, Request};
+
+use dispatch_control::{NO_SUPERVISOR, QUEUE_FULL};
 
 use crate::UsageError;
 use crate::events::{self, Event, Kind};
 use crate::scheduler::Runner;
 use crate::store::read_ticket;
-use crate::ticket::{Delivery, ProjectState, Subscription, Supervision, Ticket, TicketState};
+use crate::ticket::{
+    ASKS_KEPT, Ask, AskState, Delivery, ProjectState, Subscription, Supervision, Ticket,
+    TicketState,
+};
 
 /// A delivery stops taking tickets once it holds this many lines; the
 /// rest goes in on a later pass.
@@ -37,6 +42,21 @@ pub const DELIVERY_HEADER: &str = "Dispatch subscription";
 /// `delivery_waits` for an app that answered `session.prompt` as a bad
 /// request: it never parsed it, so nothing was typed.
 pub const UPDATE_THE_APP: &str = "Switchboard does not know session.prompt; update the app";
+
+/// The first words of an owner-channel message, then its id: the app
+/// finds the supervisor's answer after the turn that starts this way.
+pub const ASK_HEADER: &str = "Owner message";
+
+/// What an owner-channel message is typed as: the header with its id
+/// and sender, who it is from, then the text.
+#[must_use]
+pub fn ask_text(ask: &Ask) -> String {
+    format!(
+        "{ASK_HEADER} {} (from {}):\nAn orchestrating session, not the owner, asks; answer in \
+         your next response.\n{}",
+        ask.id, ask.by, ask.text
+    )
+}
 
 /// The `by` of a subscription the runner makes itself.
 pub const BY_RUNNER: &str = "runner";
@@ -226,6 +246,72 @@ impl Runner {
         })
     }
 
+    /// Queue an owner-channel message to the project's current
+    /// supervisor, saved before anything is typed; the delivery pass
+    /// types it once the pane is ready. Refused with `NO_SUPERVISOR`
+    /// when the project has no session, and with `QUEUE_FULL` while
+    /// `ASKS_KEPT` messages wait untyped, so a pane that never becomes
+    /// ready cannot grow the record without bound.
+    pub fn supervisor_ask(
+        &mut self,
+        project: &str,
+        text: &str,
+        by: &str,
+        now_ms: u64,
+    ) -> Result<Ask> {
+        if text.trim().is_empty() {
+            bail!("the message is empty");
+        }
+        self.transaction(|r| {
+            let mut ps = r.load_project(project)?;
+            if ps.supervisor.current.is_none() {
+                bail!("{NO_SUPERVISOR}: {project} has no supervisor session");
+            }
+            let waiting = ps
+                .supervisor
+                .asks
+                .iter()
+                .filter(|a| a.state == AskState::Queued)
+                .count();
+            if waiting >= ASKS_KEPT {
+                bail!("{QUEUE_FULL}: {project} has {waiting} messages the supervisor has not been sent");
+            }
+            let ask = Ask {
+                id: format!("ask-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]),
+                text: text.to_owned(),
+                by: by.to_owned(),
+                state: AskState::Queued,
+                session: None,
+                op: None,
+                created_ms: now_ms,
+                delivered_ms: None,
+            };
+            let asks = &mut ps.supervisor.asks;
+            asks.push(ask.clone());
+            // The oldest typed ones go first; a queued one is never
+            // dropped before it is typed, and `QUEUE_FULL` keeps them
+            // under the bound.
+            while asks.len() > ASKS_KEPT {
+                let Some(i) = asks.iter().position(|a| a.state == AskState::Delivered) else {
+                    break;
+                };
+                asks.remove(i);
+            }
+            r.save_project(&ps)?;
+            Ok(ask)
+        })
+    }
+
+    /// An owner-channel message of `project` by id.
+    pub fn ask_status(&self, project: &str, id: &str) -> Result<Ask> {
+        let ps = self.load_project(project)?;
+        ps.supervisor
+            .asks
+            .into_iter()
+            .find(|a| a.id == id)
+            .with_context(|| format!("{project} has no message {id}"))
+    }
+
     /// Type each subscribed ticket's settled burst into the supervisor's
     /// pane, once it is ready for a prompt. A delivery left on the record
     /// is settled before anything new is offered. Nothing is resumed or
@@ -234,7 +320,12 @@ impl Runner {
     pub fn deliver_subscriptions(&mut self, project: &str, now_ms: u64) -> Result<()> {
         let ps = self.load_project(project)?;
         let sup = &ps.supervisor;
-        if sup.subscriptions.is_empty() && sup.delivery.is_none() {
+        let queued = sup
+            .asks
+            .iter()
+            .find(|a| a.state == AskState::Queued)
+            .cloned();
+        if sup.subscriptions.is_empty() && sup.delivery.is_none() && queued.is_none() {
             return Ok(());
         }
         let Some(current) = sup.current.as_ref().map(|c| c.session.clone()) else {
@@ -272,7 +363,20 @@ impl Runner {
         {
             return Ok(());
         }
-        let (due, unparked) = self.due(&ps, now_ms);
+        // An owner-channel message goes before any burst; the bursts
+        // wait for the next pass.
+        let (due, unparked) = match &queued {
+            Some(ask) => (
+                Some(Due {
+                    text: ask_text(ask),
+                    through: Vec::new(),
+                    closes: Vec::new(),
+                    parks: Vec::new(),
+                }),
+                Vec::new(),
+            ),
+            None => self.due(&ps, now_ms),
+        };
         let Some(due) = due else {
             if !unparked.is_empty() {
                 self.settle_project(project, |sup| {
@@ -306,9 +410,15 @@ impl Runner {
             closes: due.closes,
             parks: due.parks,
             at_ms: now_ms,
+            ask: queued.as_ref().map(|a| a.id.clone()),
         };
         self.settle_project(project, |sup| {
             unpark(sup, &unparked);
+            if let Some(id) = &d.ask
+                && let Some(a) = sup.asks.iter_mut().find(|a| &a.id == id)
+            {
+                a.op = Some(d.op.clone());
+            }
             sup.delivery = Some(d.clone());
             true
         })?;
@@ -434,6 +544,16 @@ impl Runner {
                     // the first, or every pass after one retry sends again.
                     sup.delivery_waits_ms = now_ms;
                 }
+                return true;
+            }
+            if let Some(id) = &d.ask {
+                if let Some(a) = sup.asks.iter_mut().find(|a| &a.id == id) {
+                    a.state = AskState::Delivered;
+                    a.session = Some(d.session.clone());
+                    a.delivered_ms = Some(now_ms);
+                }
+                set_waits(sup, None, now_ms);
+                log::info!("{project}: delivered ask {id} as {} to {}", d.op, d.session);
                 return true;
             }
             for sub in &mut sup.subscriptions {

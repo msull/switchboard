@@ -4855,6 +4855,7 @@ dependencies = [
  "sha2",
  "similar",
  "switchboard-control",
+ "switchboard-mcp",
  "tempfile",
  "tungstenite",
  "ureq",
@@ -4867,6 +4868,20 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "switchboard-mcp"
+version = "0.1.0"
+dependencies = [
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tungstenite",
+ "uuid",
 ]
 
 [[package]]

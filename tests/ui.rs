@@ -8139,6 +8139,7 @@ fn remote_devices_dialog_opens_pairing_and_revokes_a_device() {
         token_sha256: "ab".repeat(32),
         created: at(0),
         last_seen: None,
+        agent: true,
     };
     harness.state_mut().dispatch(AppAction::IdentityLoaded {
         identity: Identity {
@@ -8158,13 +8159,20 @@ fn remote_devices_dialog_opens_pairing_and_revokes_a_device() {
     click(&mut harness, "Remote devices…");
     harness.get_by_label("Remote devices");
     harness.get_by_label("Vision Pro");
+    // Paired as an agent, the device carries the tag.
+    harness.get_by_label("agent");
     assert!(harness.query_by_label("Stop pairing").is_none());
+    click(
+        &mut harness,
+        "Agent (may message supervisors, decisions marked as an agent's)",
+    );
     click(&mut harness, "Allow pairing for 5 minutes");
     let code = actions(&harness)
         .into_iter()
         .find_map(|a| match a {
-            AppAction::OpenPairing { code, scope } => {
+            AppAction::OpenPairing { code, scope, agent } => {
                 assert_eq!(scope, Scope::Read);
+                assert!(agent, "the window pairs an agent");
                 Some(code)
             }
             _ => None,
@@ -8240,6 +8248,7 @@ fn remote_devices_dialog_lists_the_addresses_locked_out_of_pairing() {
     harness.state_mut().dispatch(AppAction::OpenPairing {
         code: "ABCD2345".into(),
         scope: Scope::Read,
+        agent: false,
     });
     let locked = "Locked out: 192.168.1.9 (3 failed attempts)";
     click(&mut harness, "Settings");

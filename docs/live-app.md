@@ -30,9 +30,15 @@ obeyed.
   control port, not `tmux send-keys` on the `switchboard` socket, not a
   script `send` line. The owner pastes feedback into a pane themselves,
   or it travels as a Dispatch decision. Keys may go only into panes on a
-  `switchboard-test-*` socket.
+  `switchboard-test-*` socket. The one sanctioned write into an agent
+  from another agent is `switchboard-mcp`'s: `ask_supervisor`, which
+  the runner types into a supervisor's pane headed `Owner message <id>
+  (from mcp:<device>)` and the host logs, and ticket decisions, which
+  Dispatch stamps `mcp:<device>` and holds to the supervisor's table.
 - **Never resume an agent.** A resume spends a turn; the owner decides.
-  If a kill stops an agent, say which one and leave it.
+  If a kill stops an agent, say which one and leave it. Through
+  `switchboard-mcp`, `resume` sends only with `confirm: true`, which an
+  agent sets only when the owner has said to resume that session.
 - **Ask questions as prose** in the reply, numbered, each with a
   recommendation. The owner reads sessions through Switchboard's own
   views, where `AskUserQuestion` pickers show nothing and arrow keys do
@@ -51,6 +57,24 @@ obeyed.
 - **Headset off means hands off.** When the owner says the headset is
   offline, do not install to it or push for it until they say it is
   back. Work that needs no headset goes on.
+
+## The MCP server
+
+`switchboard-mcp` is in the bundle beside `switchboard-ask`. An agent
+session on the owner laptop runs it as a stdio MCP server
+(`claude mcp add switchboard -- ~/Applications/Switchboard.app/Contents/MacOS/switchboard-mcp`)
+and reaches the agent box through the box's remote port as the headset
+does: pinned TLS and a bearer token. To pair, open Remote devices on
+the box, choose Control, tick Agent, allow pairing, and run
+`switchboard-mcp pair box --address <ip>:43187 --spki <key> --code <code>`
+on the laptop with the key and the code the dialog shows; `pair` says
+so when the window was not opened with Agent ticked. The config
+directory is `~/.config/switchboard-mcp` (`SWITCHBOARD_MCP_DIR`),
+`0700`, and `hosts.json` in it is `0600` with the token in plain text:
+any process of the laptop's user can read it, agent sessions included.
+A key rotation on the box drops every pairing; the next call says to
+pair again. Every write the server makes is in the box's
+`operations.log` or Dispatch's event log under `mcp:<device>`.
 
 ## The Swift client on the headset
 

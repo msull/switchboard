@@ -18,6 +18,8 @@ pub struct RemoteDraft {
     pub name: String,
     pub port: String,
     pub scope: Scope,
+    /// The window about to open pairs an orchestrating agent.
+    pub agent: bool,
     /// The QR texture for the payload it encodes.
     qr: Option<(String, egui::TextureHandle)>,
 }
@@ -32,6 +34,7 @@ impl RemoteDraft {
                 .map(|i| i.listen.port.to_string())
                 .unwrap_or_default(),
             scope: Scope::Read,
+            agent: false,
             qr: None,
         }
     }
@@ -191,8 +194,9 @@ fn pairing(cx: &mut DrawCtx<'_>, ui: &mut Ui, draft: &mut RemoteDraft) {
                 ui.label(theme::meta_text(
                     ui,
                     format!(
-                        "Scan, or type the key and the code. Grants {} scope. Open for five minutes. An address that sends {PAIRING_ATTEMPTS} wrong codes is locked out until you reopen pairing.",
-                        window.scope.word()
+                        "Scan, or type the key and the code. Grants {} scope{}. Open for five minutes. An address that sends {PAIRING_ATTEMPTS} wrong codes is locked out until you reopen pairing.",
+                        window.scope.word(),
+                        if window.agent { " to an agent" } else { "" }
                     ),
                 ));
                 for source in window.locked() {
@@ -225,10 +229,18 @@ fn pairing(cx: &mut DrawCtx<'_>, ui: &mut Ui, draft: &mut RemoteDraft) {
                 .on_hover_text("Every view and the screen; nothing is sent into a session");
             ui.radio_value(&mut draft.scope, Scope::Control, "Control")
                 .on_hover_text("Reads, and later the commands that type into a session");
+            ui.checkbox(
+                &mut draft.agent,
+                "Agent (may message supervisors, decisions marked as an agent's)",
+            )
+            .on_hover_text(
+                "For switchboard-mcp: the device may type into a project's supervisor through the owner channel, and Dispatch holds its decisions to the supervisor's table",
+            );
             if theme::primary(ui, "Allow pairing for 5 minutes").clicked() {
                 cx.dispatch(AppAction::OpenPairing {
                     code: remote::pairing_code(),
                     scope: draft.scope,
+                    agent: draft.agent,
                 });
             }
         });
@@ -248,7 +260,13 @@ fn devices(cx: &mut DrawCtx<'_>, ui: &mut Ui) {
         .spacing([GAP, GAP])
         .show(ui, |ui| {
             for device in devices {
-                ui.label(&device.name);
+                ui.horizontal(|ui| {
+                    ui.label(&device.name);
+                    if device.agent {
+                        ui.label(theme::meta_text(ui, "agent"))
+                            .on_hover_text("Paired as an orchestrating agent");
+                    }
+                });
                 let mut scope = device.scope;
                 egui::ComboBox::from_id_salt(("remote-scope", device.id))
                     .selected_text(scope.word())

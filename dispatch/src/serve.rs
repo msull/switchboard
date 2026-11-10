@@ -91,50 +91,17 @@ impl Handler {
                 ticket,
                 *since,
             )?),
-            Body::Artifact { ticket, path } => {
-                let dir = self.runner.data.ticket_dir(ticket);
-                let (dir, file) = (
-                    dir.canonicalize().unwrap_or(dir),
-                    path.canonicalize().unwrap_or_else(|_| path.clone()),
-                );
-                if !file.starts_with(&dir) {
-                    bail!("{} is not a file of ticket {ticket}", path.display());
-                }
-                let t = self.runner.load_ticket(ticket)?;
-                if let Some(name) = t.secret_at(&file) {
-                    bail!("{name} is secret; Dispatch never reads it");
-                }
-                // An agent fills its directories with whatever it likes,
-                // so every file is read only up to the bound, and no more
-                // than one byte past it is ever held. `Read::take(&f, ..)`
-                // borrows the file, so `f` is still ours to ask its length.
-                let f =
-                    fs::File::open(&file).with_context(|| format!("read {}", file.display()))?;
-                let mut buf = Vec::new();
-                Read::take(&f, FILE_TEXT_MAX + 1)
-                    .read_to_end(&mut buf)
-                    .with_context(|| format!("read {}", file.display()))?;
-                let read = buf.len() as u64;
-                if read > FILE_TEXT_MAX {
-                    // Report the real size; the file may have grown since the read.
-                    let len = f.metadata().map_or(read, |m| m.len().max(read));
-                    bail!("{}", too_large_reason(path, len));
-                }
-                // The length is checked first, so a character cut at the
-                // bound never reaches this conversion.
-                let text =
-                    String::from_utf8(buf).with_context(|| format!("read {}", file.display()))?;
-                Reply::Artifact { text }
-            }
+            Body::Artifact { ticket, path } => self.artifact(ticket, path)?,
             Body::Decide {
                 ticket,
                 decision,
                 answer,
                 note,
+                by,
             } => {
-                let d = self
-                    .runner
-                    .decide(ticket, decision, answer, note.as_deref(), now_ms)?;
+                let d = self.as_by(by.as_deref(), |r| {
+                    r.decide(ticket, decision, answer, note.as_deref(), now_ms)
+                })?;
                 let t = self.runner.load_ticket(ticket)?;
                 Reply::Decided(decision_view(&t, &d))
             }
@@ -154,11 +121,37 @@ impl Handler {
                 let t = self.runner.resume(ticket, now_ms)?.ticket;
                 Reply::Ticket(self.view(&t))
             }
-            Body::Close { ticket, reason } => {
-                let t = self
-                    .runner
-                    .request_close(ticket, reason.as_deref(), false, now_ms)?;
+            Body::Close { ticket, reason, by } => {
+                let t = self.as_by(by.as_deref(), |r| {
+                    r.request_close(ticket, reason.as_deref(), false, now_ms)
+                })?;
                 Reply::Ticket(self.view(&t))
+            }
+            Body::Park { ticket, reason, by } => {
+                let t = self.as_by(by.as_deref(), |r| {
+                    r.request_park(ticket, reason.as_deref(), now_ms)
+                })?;
+                Reply::Ticket(self.view(&t))
+            }
+            Body::Brief { project } => Reply::Brief(crate::brief::build(
+                &self.runner,
+                project,
+                "dispatch decide",
+                now_ms,
+            )?),
+            Body::SupervisorAsk { project, text, by } => {
+                agent_by(by)?;
+                let ask = self.runner.supervisor_ask(project, text, by, now_ms)?;
+                Reply::Ask(crate::brief::ask_view(project, &ask))
+            }
+            Body::SupervisorAskStatus { project, id } => {
+                let ask = self.runner.ask_status(project, id)?;
+                Reply::Ask(crate::brief::ask_view(project, &ask))
+            }
+            Body::Report { ticket } => {
+                let t = self.runner.load_ticket(ticket)?;
+                let r = crate::brief::report_of(&self.runner, &t, now_ms);
+                Reply::Report(serde_json::to_value(&r)?)
             }
             Body::Take { project, issue } => {
                 let t = take_issue(&mut self.runner, &*self.issues, project, issue, now_ms)?;
@@ -171,8 +164,73 @@ impl Handler {
         })
     }
 
+    /// The text of a file under a ticket's directory, bounded.
+    fn artifact(&self, ticket: &str, path: &Path) -> Result<Reply> {
+        let dir = self.runner.data.ticket_dir(ticket);
+        let (dir, file) = (
+            dir.canonicalize().unwrap_or(dir),
+            path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
+        );
+        if !file.starts_with(&dir) {
+            bail!("{} is not a file of ticket {ticket}", path.display());
+        }
+        let t = self.runner.load_ticket(ticket)?;
+        if let Some(name) = t.secret_at(&file) {
+            bail!("{name} is secret; Dispatch never reads it");
+        }
+        // An agent fills its directories with whatever it likes,
+        // so every file is read only up to the bound, and no more
+        // than one byte past it is ever held. `Read::take(&f, ..)`
+        // borrows the file, so `f` is still ours to ask its length.
+        let f = fs::File::open(&file).with_context(|| format!("read {}", file.display()))?;
+        let mut buf = Vec::new();
+        Read::take(&f, FILE_TEXT_MAX + 1)
+            .read_to_end(&mut buf)
+            .with_context(|| format!("read {}", file.display()))?;
+        let read = buf.len() as u64;
+        if read > FILE_TEXT_MAX {
+            // Report the real size; the file may have grown since the read.
+            let len = f.metadata().map_or(read, |m| m.len().max(read));
+            bail!("{}", too_large_reason(path, len));
+        }
+        // The length is checked first, so a character cut at the
+        // bound never reaches this conversion.
+        let text = String::from_utf8(buf).with_context(|| format!("read {}", file.display()))?;
+        Ok(Reply::Artifact { text })
+    }
+
+    /// Run `f` with the runner stamping `by` as who acted, when one is
+    /// given; the runner's own actor is back afterwards whatever `f`
+    /// returned. Only an agent's name is taken: anything else would let
+    /// a caller pass for the supervisor.
+    fn as_by<T>(
+        &mut self,
+        by: Option<&str>,
+        f: impl FnOnce(&mut Runner) -> Result<T>,
+    ) -> Result<T> {
+        let Some(by) = by else {
+            return f(&mut self.runner);
+        };
+        agent_by(by)?;
+        let before = self.runner.actor.replace(by.to_owned());
+        let out = f(&mut self.runner);
+        self.runner.actor = before;
+        out
+    }
+
     fn view(&self, t: &Ticket) -> TicketView {
         ticket_view(t, self.runner.pipeline_of(t).ok().as_ref())
+    }
+}
+
+/// A `by` the port takes: an agent's `mcp:<name>` with a name.
+fn agent_by(by: &str) -> Result<()> {
+    match by.strip_prefix(crate::scheduler::BY_AGENT_PREFIX) {
+        Some(name) if !name.trim().is_empty() => Ok(()),
+        _ => bail!(
+            "by must name an agent as {}<name>",
+            crate::scheduler::BY_AGENT_PREFIX
+        ),
     }
 }
 
@@ -1355,6 +1413,7 @@ slots = 1
                     decision: "d9".into(),
                     answer: "yes".into(),
                     note: None,
+                    by: None,
                 },
             ),
             5_000,
@@ -1496,6 +1555,7 @@ slots = 1
         let close = Body::Close {
             ticket: view.id.clone(),
             reason: Some("done elsewhere".into()),
+            by: None,
         };
         let reply = h.handle(&Request::new("2", close.clone()), 2_000);
         let Reply::Ticket(closing) = reply else {
@@ -1522,6 +1582,140 @@ slots = 1
             matches!(&again, Reply::Failed { reason } if reason.contains("already closed")),
             "{again:?}"
         );
+    }
+
+    fn ask(h: &mut Handler, by: &str) -> Reply {
+        h.handle(
+            &Request::new(
+                "a",
+                Body::SupervisorAsk {
+                    project: "P".into(),
+                    text: "Where does #7 stand?".into(),
+                    by: by.into(),
+                },
+            ),
+            2_000,
+        )
+    }
+
+    #[test]
+    fn an_ask_with_no_supervisor_is_refused_and_with_one_is_queued_and_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = handler(dir.path());
+        take(&mut h);
+        let refused = ask(&mut h, "mcp:laptop");
+        assert!(
+            matches!(&refused, Reply::Failed { reason } if reason.starts_with(dispatch_control::NO_SUPERVISOR)),
+            "{refused:?}"
+        );
+        let mut ps = h.runner.load_project("P").unwrap();
+        ps.supervisor.current = Some(crate::ticket::SupervisorRecord {
+            session: "s-1".into(),
+            seed_hash: "h".into(),
+            created_ms: 1,
+            model: None,
+        });
+        h.runner.save_project(&ps).unwrap();
+        let not_agent = ask(&mut h, "supervisor");
+        assert!(matches!(not_agent, Reply::Failed { .. }), "{not_agent:?}");
+        let Reply::Ask(a) = ask(&mut h, "mcp:laptop") else {
+            panic!("an ask")
+        };
+        assert!(a.id.starts_with("ask-") && a.id.len() == 16, "{}", a.id);
+        assert_eq!((a.state.as_str(), a.by.as_str()), ("queued", "mcp:laptop"));
+        // Saved before anything is typed: this test has no Switchboard.
+        let saved = h.runner.load_project("P").unwrap().supervisor.asks;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].state, crate::ticket::AskState::Queued);
+        let status = h.handle(
+            &Request::new(
+                "s",
+                Body::SupervisorAskStatus {
+                    project: "P".into(),
+                    id: a.id.clone(),
+                },
+            ),
+            3_000,
+        );
+        assert_eq!(status, Reply::Ask(a));
+        let Reply::Brief(b) = h.handle(
+            &Request::new(
+                "b",
+                Body::Brief {
+                    project: "P".into(),
+                },
+            ),
+            3_000,
+        ) else {
+            panic!("a brief")
+        };
+        assert_eq!(b.asks.len(), 1);
+        assert!(crate::brief::render(&b).contains("owner messages not typed yet:"));
+    }
+
+    #[test]
+    fn the_port_parks_a_ticket_as_the_agent_and_reports_like_the_command_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = handler(dir.path());
+        let t = take(&mut h);
+        let reply = h.handle(
+            &Request::new(
+                "p",
+                Body::Park {
+                    ticket: t.id.clone(),
+                    reason: Some("waits on a release".into()),
+                    by: Some("mcp:laptop".into()),
+                },
+            ),
+            2_000,
+        );
+        let Reply::Ticket(parked) = reply else {
+            panic!("{reply:?}")
+        };
+        assert_eq!(parked.state, "parking");
+        let rec = h.runner.load_ticket(&t.id).unwrap();
+        assert_eq!(rec.state_by.as_deref(), Some("mcp:laptop"));
+        assert_eq!(h.runner.actor, None, "the runner's own actor is back");
+        let Reply::Report(json) = h.handle(
+            &Request::new(
+                "r",
+                Body::Report {
+                    ticket: t.id.clone(),
+                },
+            ),
+            3_000,
+        ) else {
+            panic!("a report")
+        };
+        let want = crate::brief::report_of(&h.runner, &rec, 3_000);
+        assert_eq!(json, serde_json::to_value(&want).unwrap());
+    }
+
+    #[test]
+    fn the_brief_renders_as_the_command_line_printed_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = handler(dir.path());
+        let t = take(&mut h);
+        let b = crate::brief::build(&h.runner, "P", "dispatch decide", 5_000).unwrap();
+        let handoff = h.runner.data.supervisor_dir("P").join("handoff.md");
+        assert_eq!(b.events.len(), 1);
+        // What `dispatch brief` printed before it was built as a view.
+        let want = format!(
+            "supervisor: none (no [supervisor] table in pipelines/P.toml)\n{}\n\n\
+             tickets:\n  {id} #7 Seven · stage investigate · active\n\n\
+             waiting on you:\n  nothing\n\n\
+             last events:\n  {}\n  follow from seq 1\n\n\
+             subscriptions (the runner types these into your pane when you are idle):\n  \
+             {id} from seq 1: 0 undelivered\n\n\
+             open worktrees:\n  none\n\n\
+             hand-off ({}):\n(no hand-off yet)",
+            b.build,
+            b.events[0],
+            handoff.display(),
+            id = t.id,
+        );
+        assert_eq!(crate::brief::render(&b), want);
+        assert!(b.events[0].ends_with("investigate  taken  #7 Seven"));
     }
 
     fn take(h: &mut Handler) -> TicketView {

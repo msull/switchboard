@@ -104,6 +104,13 @@ pub struct PairedDevice {
     /// When the device last made an authenticated request.
     #[serde(default)]
     pub last_seen: Option<SystemTime>,
+    /// An orchestrating agent (`switchboard-mcp`), as the owner marked
+    /// the pairing window it paired in: it may message a project's
+    /// supervisor, and Dispatch holds its decisions to the supervisor's
+    /// table and logs them as `mcp:<name>`. A file from before reads as
+    /// `false`.
+    #[serde(default)]
+    pub agent: bool,
 }
 
 /// The two files on disk. A missing file reads as absent or empty; a

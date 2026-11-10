@@ -165,7 +165,8 @@ fn provider() -> Arc<CryptoProvider> {
 /// A client that trusts exactly one public key, by the hash of its
 /// `SubjectPublicKeyInfo`, and nothing else: no names, no dates, no
 /// chain. What a paired device does on every connection; here for the
-/// tests and for a Rust client.
+/// tests and for a Rust client. `mcp/src/pin.rs` holds a copy; a fix
+/// here goes there too.
 pub fn pinned_client(spki_sha256: &str) -> Result<Arc<ClientConfig>, String> {
     let provider = provider();
     let config = ClientConfig::builder_with_provider(Arc::clone(&provider))
@@ -759,6 +760,10 @@ const INBOX: usize = 64;
 /// past it, so one host on the network cannot spend another's.
 const PAIR_PER_MINUTE: usize = 6;
 const INFO_PER_MINUTE: usize = 60;
+/// Every other `/api/v1/` request per minute per source address but
+/// the event stream, so a looping client on a paired device cannot
+/// keep the frame busy.
+pub const API_PER_MINUTE: usize = 600;
 /// How many source addresses each of those windows tracks at once.
 const RATE_KEYS_MAX: usize = 256;
 /// The page's files per minute per listener: one load is three.
@@ -766,6 +771,8 @@ const PAGE_PER_MINUTE: usize = 120;
 
 const PAIR_PATH: &str = "/api/v1/pair";
 const INFO_PATH: &str = "/api/v1/info";
+const API_PREFIX: &str = "/api/v1/";
+const EVENTS_PATH: &str = "/api/v1/events";
 
 /// The deadlines of a connection that is not paired; the tests use
 /// short ones.
@@ -1052,16 +1059,31 @@ impl KeyedWindows {
 struct Limits {
     pair: Mutex<KeyedWindows>,
     info: Mutex<KeyedWindows>,
+    api: Mutex<KeyedWindows>,
     page: Mutex<RateWindow>,
 }
 
 impl Limits {
-    /// Whether a request for `path` from `ip` is over its window. Only
-    /// `/pair` and `/info` have one here; any other path is never over.
+    fn new() -> Self {
+        let minute = Duration::from_secs(60);
+        Self {
+            pair: Mutex::new(KeyedWindows::new(PAIR_PER_MINUTE, minute, RATE_KEYS_MAX)),
+            info: Mutex::new(KeyedWindows::new(INFO_PER_MINUTE, minute, RATE_KEYS_MAX)),
+            api: Mutex::new(KeyedWindows::new(API_PER_MINUTE, minute, RATE_KEYS_MAX)),
+            page: Mutex::new(RateWindow::new(PAGE_PER_MINUTE, minute)),
+        }
+    }
+
+    /// Whether a request for `path` from `ip` is over its window:
+    /// `/pair` and `/info` their own, every other `/api/v1/` path but
+    /// the event stream one shared per source. Anything else is never
+    /// over here.
     fn limited(&self, path: &str, ip: IpAddr) -> bool {
         let window = match path {
             PAIR_PATH => &self.pair,
             INFO_PATH => &self.info,
+            EVENTS_PATH => return false,
+            p if p.starts_with(API_PREFIX) => &self.api,
             _ => return false,
         };
         Self::over(window, |w| w.allow(ip, Instant::now()))
@@ -1130,19 +1152,7 @@ impl RemotePort {
             frames: frames_tx,
             wake: Arc::new(wake),
             pools: Arc::new(Pools::new()),
-            limits: Limits {
-                pair: Mutex::new(KeyedWindows::new(
-                    PAIR_PER_MINUTE,
-                    Duration::from_secs(60),
-                    RATE_KEYS_MAX,
-                )),
-                info: Mutex::new(KeyedWindows::new(
-                    INFO_PER_MINUTE,
-                    Duration::from_secs(60),
-                    RATE_KEYS_MAX,
-                )),
-                page: Mutex::new(RateWindow::new(PAGE_PER_MINUTE, Duration::from_secs(60))),
-            },
+            limits: Limits::new(),
             timeouts,
             next_subscriber: AtomicU64::new(1),
             rate_limited: Arc::clone(&rate_limited),
@@ -1557,6 +1567,7 @@ mod tests {
             token_sha256: token_sha256("t"),
             created: SystemTime::UNIX_EPOCH,
             last_seen: None,
+            agent: false,
         };
         files.save_devices(std::slice::from_ref(&device)).unwrap();
         assert_eq!(files.load_devices().unwrap(), vec![device]);
@@ -1725,6 +1736,28 @@ mod tests {
         assert_eq!(w.by_source.len(), 3);
         assert!(!w.by_source.contains_key(&ip("10.0.0.1")));
         assert!(w.by_source.contains_key(&ip("10.0.0.4")));
+    }
+
+    #[test]
+    fn the_api_window_answers_over_its_minute_per_source_and_never_for_events() {
+        let limits = Limits::new();
+        let a = ip("192.168.1.9");
+        for _ in 0..API_PER_MINUTE {
+            assert!(!limits.limited("/api/v1/projects", a));
+        }
+        assert!(limits.limited("/api/v1/sessions/x", a), "the 601st");
+        assert!(!limits.limited("/api/v1/events", a));
+        assert!(!limits.limited("/api/v1/projects", ip("192.168.1.20")));
+        assert!(!limits.limited("/", a), "the page has its own window");
+    }
+
+    #[test]
+    fn a_device_saved_before_the_agent_mark_reads_as_not_an_agent() {
+        let text = r#"{"id": "8a7b6c5d-0000-4000-8000-000000000001", "name": "Pad",
+            "scope": "read", "token_sha256": "ab", "created": {"secs_since_epoch": 0,
+            "nanos_since_epoch": 0}}"#;
+        let device: PairedDevice = serde_json::from_str(text).unwrap();
+        assert!(!device.agent);
     }
 
     /// The listener stamps each request with its peer, and counts each
