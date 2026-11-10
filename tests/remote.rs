@@ -1158,6 +1158,8 @@ fn spoken_chunk(text: &str, times: usize) -> (String, Vec<String>) {
     let mut frame = eframe::Frame::_new_kittest();
     eframe::App::logic(&mut port.app, &ctx, &mut frame);
     eframe::App::logic(&mut port.app, &ctx, &mut frame);
+    // The send runs on the host worker; wait for it as the other tests do.
+    port.app.settle_host();
     let written = port.host.state().written.clone();
     (draft, written.into_iter().map(|w| w.1).collect())
 }
