@@ -1,0 +1,1 @@
+Fixed: Dispatch restart no longer refuses a ticket because a lane's repo URL changed host within the same provider (for example Bitbucket's SSH host), and a refusal now names the lane field that differs with both values.

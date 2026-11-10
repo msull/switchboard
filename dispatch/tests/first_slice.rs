@@ -18169,6 +18169,95 @@ fn a_restart_is_refused_when_the_live_file_drops_a_lane() {
     assert!(e.contains("changes lane docs"), "{e}");
 }
 
+/// Bitbucket moves Git over SSH to `ssh.bitbucket.org`: a lane `repo`
+/// rewritten to the new host names the repository already cloned, so
+/// the restart goes ahead, while another repository is still refused.
+#[test]
+fn a_restart_accepts_a_lane_repo_on_another_host_of_the_same_repository() {
+    let mut env = Env::new();
+    let text = two_lane_pipeline(&env.worktrees).replace(
+        "git@github.com:msull/docs.git",
+        "git@bitbucket.org:example-org/docs.git",
+    );
+    let id = two_lanes(&mut env, &text);
+    let lanes = env.ticket(&id).lanes;
+    live_edit(
+        &env,
+        "git@bitbucket.org:example-org/docs.git",
+        "git@ssh.bitbucket.org:example-org/docs.git",
+    );
+    let t = restart_at(&mut env, &id, None);
+    assert_eq!(t.lanes, lanes);
+    env.steps_until(&id, "the restart applied", |t, _| t.restarts.len() == 1);
+    let t = env.ticket(&id);
+    assert!(
+        t.pipeline_file.ends_with("pipeline.2.toml"),
+        "{:?}",
+        t.pipeline_file
+    );
+    let copy = std::fs::read_to_string(&t.pipeline_file).unwrap();
+    assert!(
+        copy.contains("git@ssh.bitbucket.org:example-org/docs.git"),
+        "{copy}"
+    );
+    assert_eq!(t.lanes, lanes);
+    live_edit(
+        &env,
+        "git@ssh.bitbucket.org:example-org/docs.git",
+        "git@ssh.bitbucket.org:example-org/other.git",
+    );
+    let e = restart_refused(&mut env, &id, None);
+    assert!(e.contains("changes lane docs: repo"), "{e}");
+}
+
+/// A refusal names what differs and both values, with any credentials
+/// in a URL left out, since a refusal at apply is stored as the reason
+/// the ticket is parked.
+#[test]
+fn a_restart_refusal_names_the_field_and_both_values() {
+    let mut env = Env::new();
+    let text = two_lane_pipeline(&env.worktrees).replace(
+        "git@github.com:msull/docs.git",
+        "git@bitbucket.org:example-org/docs.git",
+    );
+    let id = two_lanes(&mut env, &text);
+    live_edit(&env, "path = \"docs\"", "path = \"documentation\"");
+    let e = restart_refused(&mut env, &id, None);
+    assert!(
+        e.contains("changes lane docs: path docs to documentation"),
+        "{e}"
+    );
+    std::fs::write(
+        env.data.pipeline(PROJECT),
+        text.replace(
+            "git@bitbucket.org:example-org/docs.git",
+            "git@github.com:example-org/docs.git",
+        ),
+    )
+    .unwrap();
+    let e = restart_refused(&mut env, &id, None);
+    assert!(
+        e.contains(
+            "changes lane docs: repo bitbucket.org:example-org/docs.git to github.com:example-org/docs.git"
+        ),
+        "{e}"
+    );
+    std::fs::write(
+        env.data.pipeline(PROJECT),
+        text.replace(
+            "git@bitbucket.org:example-org/docs.git",
+            "https://user:token@bitbucket.org/example-org/other.git",
+        ),
+    )
+    .unwrap();
+    let e = restart_refused(&mut env, &id, None);
+    assert!(
+        e.contains("to https://bitbucket.org/example-org/other.git"),
+        "{e}"
+    );
+    assert!(!e.contains("user") && !e.contains("token"), "{e}");
+}
+
 /// Someone else's branches are never reset: a ticket from pull requests
 /// restarts at an earlier stage only when no branch moved since it
 /// entered that stage, so nothing is moved back.
