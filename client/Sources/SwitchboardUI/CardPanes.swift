@@ -239,29 +239,89 @@ struct SideSlotPane: View {
 
 /// What an empty right-hand pane offers: the Markdown files the session
 /// wrote, then every other session, grouped by host.
+/// What the slot's chooser offers, narrowed and ordered: a host keeps
+/// every session it ever ran, so the whole list is hundreds of ended ones.
+enum SlotChoices {
+    /// The sessions to offer beside `owner`: never itself; only running
+    /// ones unless `ended`; those whose name or host has `query` in it;
+    /// the owner's project first (`here`), each group last active first.
+    static func sessions(
+        _ all: [UnifiedSession], owner: SessionRef, project: String, query: String, ended: Bool
+    ) -> (here: [UnifiedSession], elsewhere: [UnifiedSession]) {
+        let kept = all
+            .filter { $0.ref != owner && (ended || $0.session.liveness == .running) }
+            .filter { matches(query, $0.session.name) || matches(query, $0.serverName) }
+            .sorted { a, b in
+                let (at, bt) = (lastActive(a.session), lastActive(b.session))
+                return at != bt ? at > bt : a.session.name < b.session.name
+            }
+        let here = kept.filter { $0.ref.serverID == owner.serverID && $0.session.project == project }
+        return (here, kept.filter { !here.contains($0) })
+    }
+
+    /// How many sessions `ended` would add.
+    static func endedCount(_ all: [UnifiedSession], owner: SessionRef) -> Int {
+        all.filter { $0.ref != owner && $0.session.liveness != .running }.count
+    }
+
+    /// An empty query matches everything; otherwise `text` holds it, in any case.
+    static func matches(_ query: String, _ text: String) -> Bool {
+        let wanted = query.trimmingCharacters(in: .whitespaces)
+        return wanted.isEmpty || text.localizedCaseInsensitiveContains(wanted)
+    }
+
+    private static func lastActive(_ session: SessionView) -> UInt64 {
+        max(session.lastActivityMs ?? 0, session.lastStopAtMs ?? 0)
+    }
+}
+
 private struct SlotChooser: View {
     @Bindable var model: BrowserModel
     let owner: SessionRef
     let project: String
     let choose: (SidePane) -> Void
     @State private var documents: [EditedFile] = []
-
-    private var sessions: [UnifiedSession] {
-        model.store.sessions
-            .filter { $0.ref != owner }
-            .sorted { ($0.serverName, $0.session.name) < ($1.serverName, $1.session.name) }
-    }
+    @State private var query = ""
+    @State private var ended = false
 
     var body: some View {
+        let sessions = SlotChoices.sessions(
+            model.store.sessions, owner: owner, project: project, query: query, ended: ended)
+        let shownDocuments = documents.filter { SlotChoices.matches(query, $0.path) }
+        let endedCount = SlotChoices.endedCount(model.store.sessions, owner: owner)
         VStack(alignment: .leading, spacing: 8) {
             Label("Beside this card", systemImage: "sidebar.right").font(.headline)
             Text("A document to keep in view, or a second session to work in tandem.")
                 .font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Filter by name", text: $query)
+                    .textFieldStyle(.plain)
+                    .autocorrectionDisabled()
+                if !query.isEmpty {
+                    Button {
+                        query = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Clear the filter")
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+            if endedCount > 0 {
+                Toggle("Show \(endedCount) ended", isOn: $ended)
+                    .font(.caption)
+                    .controlSize(.mini)
+            }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
-                    if !documents.isEmpty {
+                    if !shownDocuments.isEmpty {
                         Text("Documents this session wrote").font(.subheadline.bold()).padding(.top, 4)
-                        ForEach(documents) { file in
+                        ForEach(shownDocuments) { file in
                             Button {
                                 choose(.document(FileRef(serverID: owner.serverID, projectID: project, path: file.path)))
                             } label: {
@@ -272,19 +332,11 @@ private struct SlotChooser: View {
                             .buttonStyle(.bordered)
                         }
                     }
-                    Text("Sessions").font(.subheadline.bold()).padding(.top, 8)
-                    ForEach(sessions) { item in
-                        Button {
-                            choose(.session(item.ref))
-                        } label: {
-                            HStack {
-                                Text(item.session.name).lineLimit(1)
-                                Spacer()
-                                Text(item.serverName).font(.caption).foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .buttonStyle(.bordered)
+                    group("This project", sessions.here)
+                    group(sessions.here.isEmpty ? "Sessions" : "Other projects", sessions.elsewhere)
+                    if sessions.here.isEmpty && sessions.elsewhere.isEmpty && shownDocuments.isEmpty {
+                        Text(query.isEmpty ? "No running session to put here." : "Nothing matches.")
+                            .font(.callout).foregroundStyle(.secondary).padding(.top, 8)
                     }
                 }
             }
@@ -292,6 +344,27 @@ private struct SlotChooser: View {
         .task(id: owner) {
             let files = (try? await model.readEditedFiles(owner))?.files ?? []
             documents = files.filter { $0.path.lowercased().hasSuffix(".md") }
+        }
+    }
+
+    @ViewBuilder
+    private func group(_ title: String, _ items: [UnifiedSession]) -> some View {
+        if !items.isEmpty {
+            Text(title).font(.subheadline.bold()).padding(.top, 8)
+            ForEach(items) { item in
+                Button {
+                    choose(.session(item.ref))
+                } label: {
+                    HStack {
+                        Text(item.session.name).lineLimit(1)
+                        Spacer()
+                        Text("\(item.session.card) · \(item.serverName)")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.bordered)
+            }
         }
     }
 }

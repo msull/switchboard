@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import SwitchboardClientCore
 import SwitchboardProtocol
 import XCTest
 
@@ -60,6 +61,38 @@ final class EditsTests: XCTestCase {
         XCTAssertEqual(SidePaneLayout.size(width: 360, height: 640, windowHeight: 0), CGSize(width: 360, height: 640))
         XCTAssertEqual(SidePaneLayout.size(width: 400, height: 600, windowHeight: 90), CGSize(width: 140, height: 210))
         XCTAssertEqual(SidePaneLayout.size(width: 400, height: 600, windowHeight: 9000), CGSize(width: 600, height: 900))
+    }
+
+    func testTheSlotOffersRunningSessionsThisProjectFirstAndLastActiveFirst() {
+        let host = ServerID("host")
+        func item(
+            _ id: String, project: String = "p", running: Bool = true, at: UInt64 = 0, on server: ServerID? = nil
+        ) -> UnifiedSession {
+            UnifiedSession(
+                ref: SessionRef(serverID: server ?? host, recordID: id),
+                session: SessionView(
+                    id: id, project: project, name: id, liveness: running ? .running : .missing, lastStopAtMs: at),
+                serverName: "Mini", stale: false)
+        }
+        let owner = SessionRef(serverID: host, recordID: "me")
+        let all = [
+            item("me"), item("old", at: 1), item("new", at: 9), item("ended", running: false, at: 99),
+            item("other", project: "q", at: 5), item("far", at: 7, on: ServerID("elsewhere")),
+        ]
+        var got = SlotChoices.sessions(all, owner: owner, project: "p", query: "", ended: false)
+        XCTAssertEqual(got.here.map(\.session.name), ["new", "old"])
+        // Another project, or the same project id on another host, is elsewhere.
+        XCTAssertEqual(got.elsewhere.map(\.session.name), ["far", "other"])
+        XCTAssertEqual(SlotChoices.endedCount(all, owner: owner), 1)
+
+        got = SlotChoices.sessions(all, owner: owner, project: "p", query: "", ended: true)
+        XCTAssertEqual(got.here.map(\.session.name), ["ended", "new", "old"])
+
+        got = SlotChoices.sessions(all, owner: owner, project: "p", query: " OTH ", ended: false)
+        XCTAssertEqual(got.here.map(\.session.name), [])
+        XCTAssertEqual(got.elsewhere.map(\.session.name), ["other"])
+        XCTAssertTrue(SlotChoices.matches("", "anything"))
+        XCTAssertFalse(SlotChoices.matches("zzz", "notes.md"))
     }
 
     func testClearingUnchangedLeavesOffOnlyFilesThatMatchTheBase() {
