@@ -5941,7 +5941,10 @@ fn a_device_adds_a_project_only_below_a_folder_of_the_home_directory() {
 /// reads it; a query that is missing or badly escaped is refused.
 #[test]
 fn a_file_in_another_project_is_listed_linked_found_and_read_there() {
-    let other_root = tempfile::tempdir().unwrap();
+    // Not the system's temporary directory: on Linux that is under
+    // `/tmp`, the root of the project `seed` makes, and a file under a
+    // session's own root is its own project's.
+    let other_root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let decisions = other_root.path().join("zq-decisions.md");
     std::fs::write(&decisions, "# Open decisions\n").unwrap();
     let mut port = port_working(

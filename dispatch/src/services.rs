@@ -1319,8 +1319,8 @@ impl Runner {
 fn undo_range(t: &mut Ticket, p: &Pipeline, resource: &str, now_ms: u64) -> Option<usize> {
     let (first, _) = p.hold_run_at(resource, t.stage)?;
     let mut back = None;
-    for i in first..t.stage {
-        let name = &p.stages[i].name;
+    for (i, stage) in p.stages.iter().enumerate().take(t.stage).skip(first) {
+        let name = &stage.name;
         for a in &mut t.attempts {
             if &a.stage == name && a.state == AttemptState::Complete {
                 a.state = AttemptState::Cancelled {
