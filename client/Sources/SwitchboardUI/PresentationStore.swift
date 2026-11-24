@@ -25,6 +25,11 @@ public struct PresentationState: Codable, Equatable, Sendable {
 
     /// How many opened files are remembered.
     public static let recentFilesCap = 40
+    /// The web pages opened on this device, last opened first.
+    public var recentPages: [URL] = []
+
+    /// How many opened pages are remembered.
+    public static let recentPagesCap = 30
 
     public struct PanesEntry: Codable, Equatable, Sendable {
         public var settings: PaneSettings
@@ -61,6 +66,7 @@ public struct PresentationState: Codable, Equatable, Sendable {
         boards = try c.decodeIfPresent([Board].self, forKey: .boards) ?? []
         panes = try c.decodeIfPresent([SessionRef: PanesEntry].self, forKey: .panes) ?? [:]
         recentFiles = try c.decodeIfPresent([FileRef].self, forKey: .recentFiles) ?? []
+        recentPages = try c.decodeIfPresent([URL].self, forKey: .recentPages) ?? []
     }
 
     public mutating func setMode(_ mode: ViewMode, for window: UUID, at: Date = Date()) {
@@ -94,6 +100,15 @@ public struct PresentationState: Codable, Equatable, Sendable {
         recentFiles.insert(file, at: 0)
         if recentFiles.count > Self.recentFilesCap {
             recentFiles.removeLast(recentFiles.count - Self.recentFilesCap)
+        }
+    }
+
+    /// `page` was opened: it goes to the head of the recent pages, once.
+    public mutating func notePage(_ page: URL) {
+        recentPages.removeAll { $0 == page }
+        recentPages.insert(page, at: 0)
+        if recentPages.count > Self.recentPagesCap {
+            recentPages.removeLast(recentPages.count - Self.recentPagesCap)
         }
     }
 

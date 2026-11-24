@@ -47,6 +47,8 @@ public struct Board: Codable, Equatable, Sendable, Identifiable {
 public enum BoardItem: Codable, Equatable, Hashable, Sendable {
     case session(SessionRef)
     case file(FileRef)
+    /// A web page, at the address it was pinned at.
+    case web(URL)
 }
 
 public struct BoardTile: Codable, Equatable, Sendable, Identifiable {
@@ -130,6 +132,8 @@ public struct BoardView: View {
     @Environment(\.openWindow) private var openWindow
     @State private var renaming = false
     @State private var newName = ""
+    @State private var addingPage = false
+    @State private var newPage = ""
     /// The tile being dragged, where its bar was taken, and how far it
     /// has moved; the others slide to show where it will land.
     @State private var drag: Drag?
@@ -202,6 +206,25 @@ public struct BoardView: View {
             Button("Rename") { model.renameBoard(request.board, to: newName) }
             Button("Cancel", role: .cancel) {}
         }
+        .alert("Add a web page", isPresented: $addingPage) {
+            TextField("Address", text: $newPage)
+                .autocorrectionDisabled()
+            Button("Add") {
+                if let url = WebAddress.parse(newPage) { pin(url) }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        // A link dragged here from Safari or another app is pinned.
+        .dropDestination(for: URL.self) { urls, _ in
+            let pages = urls.filter(WebAddress.isWeb)
+            pages.forEach(pin)
+            return !pages.isEmpty
+        }
+    }
+
+    private func pin(_ url: URL) {
+        model.notePage(url)
+        model.addTile(.web(url), to: request.board)
     }
 
     /// The tiles in the order they are shown: the saved order, with the
@@ -245,6 +268,13 @@ public struct BoardView: View {
             .frame(width: 150)
             .help("Tiles across")
             AddSessionMenu(model: model, board: request.board).equatable()
+            Button {
+                newPage = ""
+                addingPage = true
+            } label: {
+                Label("Add page", systemImage: "globe")
+            }
+            .help("Pin a web page to the board by its address")
             Button {
                 newName = board?.name ?? ""
                 renaming = true
@@ -308,6 +338,7 @@ struct TileView: View {
                 switch tile.item {
                 case .session(let ref): openWindow(value: model.windowRequest(for: ref))
                 case .file(let ref): openWindow(value: model.fileWindowRequest(for: ref, line: nil))
+                case .web(let url): openWindow(value: WebWindowRequest(url: url))
                 }
             } label: {
                 Image(systemName: "arrow.up.forward.square").font(.caption)
@@ -338,6 +369,8 @@ struct TileView: View {
             return model.store.sessions.first { $0.ref == ref }?.session.name ?? ref.recordID
         case .file(let ref):
             return ref.path.split(separator: "/").last.map(String.init) ?? ref.path
+        case .web(let url):
+            return WebAddress.label(url)
         }
     }
 
@@ -348,6 +381,8 @@ struct TileView: View {
             CardWindowView(model: model, request: CardWindowRequest(id: tile.id, ref: ref), embedded: true)
         case .file(let ref):
             FileWindowView(model: model, request: FileWindowRequest(id: tile.id, ref: ref), embedded: true)
+        case .web(let url):
+            WebPaneView(model: model, url: url).padding(6)
         }
     }
 }

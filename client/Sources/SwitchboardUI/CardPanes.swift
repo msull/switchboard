@@ -10,6 +10,8 @@ public enum SidePane: Hashable, Codable, Sendable {
     case session(SessionRef)
     /// The files the card's own session edited.
     case files
+    /// A web page, at the address it was last on.
+    case web(URL)
 }
 
 /// How long the files pane waits between reads while it is open. The
@@ -231,16 +233,31 @@ struct SideSlotPane: View {
             case .session(let ref):
                 header(model.store.sessions.first { $0.ref == ref }?.session.name ?? "Session")
                 CardWindowView(model: model, request: CardWindowRequest(id: inner, ref: ref), embedded: true)
+            case .web(let url):
+                WebPaneView(model: model, url: url) { moved in
+                    content = .web(moved)
+                } close: {
+                    content = nil
+                }
             case nil:
                 SlotChooser(model: model, owner: owner, project: project, files: files) { chosen in
                     inner = UUID()
                     if case .document(let ref) = chosen { model.noteOpened(ref) }
+                    if case .web(let url) = chosen { model.notePage(url) }
                     content = chosen
                 }
             }
         }
         // The files list pads itself.
         .padding(shown == nil ? 16 : shown == .files ? 0 : 8)
+        // A link dragged here from Safari or another app becomes the
+        // pane's page.
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let url = urls.first(where: WebAddress.isWeb) else { return false }
+            model.notePage(url)
+            content = .web(url)
+            return true
+        }
     }
 
     private func header(_ title: String) -> some View {
@@ -310,6 +327,13 @@ enum SlotChoices {
         opened.filter { $0.serverID == owner.serverID && matches(query, $0.path) && !shown.contains($0) }
     }
 
+    /// The pages opened on this device that `query` matches, less the
+    /// one the query itself names.
+    static func pages(_ opened: [URL], query: String) -> [URL] {
+        let typed = WebAddress.parse(query)
+        return opened.filter { $0 != typed && matches(query, $0.absoluteString) }
+    }
+
     /// The fewest characters a query has before the host is searched.
     static let searchFrom = 2
 
@@ -348,13 +372,15 @@ private struct SlotChooser: View {
         let recent = SlotChoices.recent(model.recentFiles, owner: owner, query: query, besides: wrote)
         let hits = found.filter { !wrote.contains($0) && !recent.contains($0) }
         let endedCount = SlotChoices.endedCount(model.store.sessions, owner: owner)
+        let typedPage = WebAddress.parse(query)
+        let pages = SlotChoices.pages(model.recentPages, query: query)
         VStack(alignment: .leading, spacing: 8) {
             Label("Beside this card", systemImage: "rectangle.split.3x1").font(.headline)
-            Text("A file to keep in view, or a second session to work in tandem.")
+            Text("A file or web page to keep in view, or a second session to work in tandem.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Find a file or session by name", text: $query)
+                TextField("A name to find, or a web address", text: $query)
                     .textFieldStyle(.plain)
                     .autocorrectionDisabled()
                 if searching { ProgressView().controlSize(.mini) }
@@ -388,16 +414,39 @@ private struct SlotChooser: View {
                         }
                         .buttonStyle(.bordered)
                     }
+                    if let typedPage {
+                        Button {
+                            choose(.web(typedPage))
+                        } label: {
+                            Label("Open \(WebAddress.label(typedPage))", systemImage: "globe")
+                                .lineLimit(1).truncationMode(.middle)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
                     documents("Written by this session", wrote)
                     documents("Opened before", recent)
                     documents("In this host's projects", hits)
                     if let searchNote {
                         Text(searchNote).font(.caption).foregroundStyle(.secondary).padding(.top, 4)
                     }
+                    if !pages.isEmpty {
+                        Text("Web pages opened before").font(.subheadline.bold()).padding(.top, 8)
+                        ForEach(pages, id: \.self) { page in
+                            Button {
+                                choose(.web(page))
+                            } label: {
+                                Label(WebAddress.label(page), systemImage: "globe")
+                                    .lineLimit(1).truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
                     group("This project", sessions.here)
                     group(sessions.here.isEmpty ? "Sessions" : "Other projects", sessions.elsewhere)
                     if !query.isEmpty, !searching, wrote.isEmpty, recent.isEmpty, hits.isEmpty,
-                        sessions.here.isEmpty, sessions.elsewhere.isEmpty
+                        typedPage == nil, pages.isEmpty, sessions.here.isEmpty, sessions.elsewhere.isEmpty
                     {
                         Text("Nothing matches.").font(.callout).foregroundStyle(.secondary).padding(.top, 8)
                     }
@@ -694,7 +743,7 @@ enum SidePaneLayout {
         switch pane {
         case .files: return CGSize(width: 360, height: 640)
         case nil: return CGSize(width: 380, height: 620)
-        case .document, .session: return CGSize(width: 540, height: 860)
+        case .document, .session, .web: return CGSize(width: 540, height: 860)
         }
     }
 

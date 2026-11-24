@@ -191,7 +191,11 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   presentation state (which are open, what each side holds, and the
   angle and each side's size from the header's "Card settings…");
   each side is a `SideSlotPane` holding one `SidePane`: the edited
-  files (the left side to begin with), a file, or another session;
+  files (the left side to begin with), a file, another session, or a
+  web page (`WebPaneView` in `WebPage.swift`: the system's web view
+  under a bar with back, forward, reload, a pin and a menu to open the
+  page in a window of its own or in Safari; a pane keeps the address
+  its page moved to, and takes a link dropped on it);
   `EditedFilesPane` lists the files the session wrote with
   their lines added and removed against the branch point (the host's
   `session.files`, read every few seconds while open), a tap opening
@@ -203,8 +207,13 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   list, the newest files the session wrote in any project, the files
   opened on this device before (`PresentationState.recentFiles`), the
   files of every project on the host that match what is typed (the
-  host's `files.find`, asked a moment after the typing stops), and the
-  running sessions, this project's first; the
+  host's `files.find`, asked a moment after the typing stops), the page
+  a typed address names (`WebAddress.parse`) and the pages opened
+  before (`PresentationState.recentPages`), and the running sessions,
+  this project's first; a web link tapped in a card asks where to open
+  it (either pane, a web window, Safari), and a page is pinned to a
+  board as a `BoardItem.web` tile from its bar, the board's "Add page"
+  or a link dropped on the board; the
   presentation model (`ViewMode`, `CardWindowRequest`, `CardStanding`,
   `BrowseMode`, `FocusCursor`) and `PresentationState` in a JSON file
   in the app's container: the layout (list, grid, or one session in
@@ -258,8 +267,9 @@ SIMCTL_CHILD_SWITCHBOARD_INVITE="$INVITE" xcrun simctl launch --terminate-runnin
 hosts at once. A second dev aid, `SWITCHBOARD_OPEN`, lists card windows to open once
 their sessions are listed, as `<record id>[:<mode>]` entries separated
 by commas (`SIMCTL_CHILD_SWITCHBOARD_OPEN="$ID:screen"`); the entry
-`prompt` opens the prompt window, `prompt:<seconds>` after a wait, and
-`keys` opens the keys panel the same way. A
+`prompt` opens the prompt window, `prompt:<seconds>` after a wait,
+`keys` opens the keys panel the same way, and `page=<address>` opens a
+web window on that page. A
 third, `SWITCHBOARD_CLOSE_WINDOWS_AFTER=<seconds>`, closes every window
 that long after launch, once per process: the state the app is in when
 its last window is closed by hand, so that a `simctl launch` of the

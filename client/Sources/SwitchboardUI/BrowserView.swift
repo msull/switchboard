@@ -677,6 +677,17 @@ public final class BrowserModel {
     /// The files opened on this device, last opened first.
     public var recentFiles: [FileRef] { presentation.recentFiles }
 
+    /// The web pages opened on this device, last opened first.
+    public var recentPages: [URL] { presentation.recentPages }
+
+    /// `page` was opened by the user: typed, chosen, dropped, or a link
+    /// sent to a pane or a window. Where a page then wanders is not noted.
+    public func notePage(_ page: URL) {
+        guard presentation.recentPages.first != page else { return }
+        presentation.notePage(page)
+        save()
+    }
+
     /// `file` was opened in a window or put in a side pane.
     public func noteOpened(_ file: FileRef) {
         guard presentation.recentFiles.first != file else { return }

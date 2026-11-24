@@ -15,6 +15,11 @@ public struct CardWindowView: View {
     @State private var screenScale = ScreenScale.initial
     @Environment(\.openWindow) private var openWindow
     @Environment(\.scenePhase) private var scenePhase
+    /// The system's way to open a link, which is Safari for a web page:
+    /// this view's own environment, not the one it hands its content.
+    @Environment(\.openURL) private var openInSystem
+    /// A web link tapped in the card, waiting on where to open it.
+    @State private var askedLink: URL?
     /// The window's height, which the side panes scale with.
     @State private var windowHeight: CGFloat = 0
     /// This card's side panes, kept for its session: saved as a pane
@@ -66,16 +71,34 @@ public struct CardWindowView: View {
         .padding()
         .navigationTitle(item?.session.name ?? "Session")
         // A tap on a file the agent named opens it in a file window,
-        // at the line named; other links go to the system.
+        // at the line named; a web link asks where to open; any other
+        // link goes to the system.
         .environment(\.openURL, OpenURLAction { url in
-            guard let link = FileLinks.parse(url), let project = item?.session.project else {
-                return .systemAction
+            if let link = FileLinks.parse(url), let project = item?.session.project {
+                let ref = FileRef(
+                    serverID: request.ref.serverID, projectID: link.project ?? project, path: link.path)
+                openWindow(value: model.fileWindowRequest(for: ref, line: link.line))
+                return .handled
             }
-            let ref = FileRef(
-                serverID: request.ref.serverID, projectID: link.project ?? project, path: link.path)
-            openWindow(value: model.fileWindowRequest(for: ref, line: link.line))
+            guard WebAddress.isWeb(url) else { return .systemAction }
+            askedLink = url
             return .handled
         })
+        .confirmationDialog(
+            askedLink.map(WebAddress.label) ?? "Open the link",
+            isPresented: Binding(get: { askedLink != nil }, set: { if !$0 { askedLink = nil } }),
+            titleVisibility: .visible, presenting: askedLink
+        ) { url in
+            if panes {
+                Button("In the left pane") { openBeside(url, leading: true) }
+                Button("In the right pane") { openBeside(url, leading: false) }
+            }
+            Button("In its own window") {
+                model.notePage(url)
+                openWindow(value: WebWindowRequest(url: url))
+            }
+            Button("In Safari") { openInSystem(url) }
+        }
         .onAppear {
             mode = model.mode(for: request.id)
             guard !embedded else { return }
@@ -123,6 +146,18 @@ public struct CardWindowView: View {
             hideUnchanged: $paneSettings.hideUnchanged
         )
         .frame(width: size.width, height: size.height)
+    }
+
+    /// Put a web page in one of the card's side panes and show the pane.
+    private func openBeside(_ url: URL, leading: Bool) {
+        model.notePage(url)
+        if leading {
+            paneSettings.leadingPane = .web(url)
+            paneSettings.filesOpen = true
+        } else {
+            paneSettings.slot = .web(url)
+            paneSettings.slotOpen = true
+        }
     }
 
     private func savePanes() {

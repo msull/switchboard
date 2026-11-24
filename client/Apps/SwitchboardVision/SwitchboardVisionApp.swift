@@ -62,6 +62,15 @@ struct SwitchboardVisionApp: App {
         }
         .defaultSize(width: 820, height: 700)
         .restorationBehavior(.disabled)
+        // A web window per request: one page, from a link in a card or
+        // popped out of a pane or a board tile.
+        WindowGroup(for: WebWindowRequest.self) { $request in
+            if let request {
+                WebWindowView(model: model, request: request)
+            }
+        }
+        .defaultSize(width: 1000, height: 760)
+        .restorationBehavior(.disabled)
         // A board window per board: the tiles of sessions and files
         // the user pinned, in their saved arrangement.
         WindowGroup("Board", for: BoardWindowRequest.self) { $request in
