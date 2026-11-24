@@ -124,6 +124,8 @@ public protocol HostAPI: Sendable {
     func ticketFile(_ ticket: String, key: String) async throws -> Envelope<TicketFileBody>
     func editedFiles(_ id: String) async throws -> Envelope<EditedFilesBody>
     func diff(_ id: String, base: String, path: String) async throws -> Envelope<FileDiffBody>
+    /// The files of every project on the host whose path matches `query`.
+    func findFiles(_ query: String) async throws -> Envelope<FindBody>
     func ticketEvents(_ ticket: String) async throws -> Envelope<TicketEventsBody>
 }
 
@@ -350,6 +352,13 @@ public final class HostClient: HostAPI, @unchecked Sendable {
 
     public func runs(_ id: String) async throws -> Envelope<RunsBody> {
         try await get("sessions/\(id)/runs", query: nil)
+    }
+
+    public func findFiles(_ query: String) async throws -> Envelope<FindBody> {
+        // The host reads `%XX` back in `q` and nothing else, so every
+        // byte that is not a letter or digit goes escaped.
+        let escaped = query.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        return try await get("files/find", query: "q=\(escaped)")
     }
 
     public func runOutput(_ id: String, run: Int, lines: Int?) async throws -> Envelope<RunOutputBody> {

@@ -36,9 +36,12 @@ public struct DiffBase: Codable, Sendable, Equatable, Hashable {
     }
 }
 
-/// One file the session wrote; `path` is under the project root.
+/// One file the session wrote; `path` is under the session's project
+/// root, or under the root of `project` when it names another one.
 public struct EditedFile: Decodable, Sendable, Equatable, Identifiable {
     public let path: String
+    /// Another project of the host the file is in; nil for the session's own.
+    public let project: String?
     /// In the checkout the base is from, so it has counts and a diff.
     public let inRepo: Bool
     /// Differs from the base; a file written back to what it was does not.
@@ -47,13 +50,14 @@ public struct EditedFile: Decodable, Sendable, Equatable, Identifiable {
     public let removed: Int
     public let binary: Bool
 
-    public var id: String { path }
+    public var id: String { "\(project ?? "")/\(path)" }
 
     public init(
-        path: String, inRepo: Bool = true, changed: Bool = true, added: Int = 0, removed: Int = 0,
-        binary: Bool = false
+        path: String, project: String? = nil, inRepo: Bool = true, changed: Bool = true, added: Int = 0,
+        removed: Int = 0, binary: Bool = false
     ) {
         self.path = path
+        self.project = project
         self.inRepo = inRepo
         self.changed = changed
         self.added = added
@@ -62,7 +66,7 @@ public struct EditedFile: Decodable, Sendable, Equatable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case path, changed, added, removed, binary
+        case path, project, changed, added, removed, binary
         case inRepo = "in_repo"
     }
 }
@@ -128,5 +132,29 @@ public struct DiffLine: Decodable, Sendable, Equatable {
         self.new = new
         self.text = text
         self.marks = marks
+    }
+}
+
+/// `GET files/find?q=`: the files of every project on the host whose
+/// path matches the query, best first.
+public struct FindBody: Decodable, Sendable, Equatable {
+    public let hits: [FileHit]
+    /// More matched than the reply holds, or a project's listing was cut.
+    public let truncated: Bool
+
+    public init(hits: [FileHit], truncated: Bool = false) {
+        self.hits = hits
+        self.truncated = truncated
+    }
+}
+
+/// One file a search found: its project and its path under that root.
+public struct FileHit: Decodable, Sendable, Equatable, Hashable {
+    public let project: String
+    public let path: String
+
+    public init(project: String, path: String) {
+        self.project = project
+        self.path = path
     }
 }

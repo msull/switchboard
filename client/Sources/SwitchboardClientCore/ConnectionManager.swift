@@ -627,6 +627,12 @@ public actor ConnectionManager {
         return try await connection.readDiff(ref.recordID, base: base, path: path)
     }
 
+    /// The files of every project on `host` whose path matches `query`.
+    public func findFiles(on host: ServerID, _ query: String) async throws -> FindBody {
+        guard let connection = connections[host] else { throw RemoteError.transport("no host") }
+        return try await connection.findFiles(query)
+    }
+
     /// One file of a ticket by its key.
     public func readTicketFile(_ ref: TicketRef, key: String) async throws -> TicketFileBody {
         guard let connection = connections[ref.serverID] else { throw RemoteError.transport("no host") }

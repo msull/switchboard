@@ -19,6 +19,12 @@ public struct PresentationState: Codable, Equatable, Sendable {
     /// Each session card's side panes, kept by session rather than by
     /// window: a card closed and opened again is a new window.
     public var panes: [SessionRef: PanesEntry] = [:]
+    /// The files opened on this device, last opened first, so one found
+    /// once can be put beside a card again without finding it again.
+    public var recentFiles: [FileRef] = []
+
+    /// How many opened files are remembered.
+    public static let recentFilesCap = 40
 
     public struct PanesEntry: Codable, Equatable, Sendable {
         public var settings: PaneSettings
@@ -54,6 +60,7 @@ public struct PresentationState: Codable, Equatable, Sendable {
         focused = try c.decodeIfPresent(SessionRef.self, forKey: .focused)
         boards = try c.decodeIfPresent([Board].self, forKey: .boards) ?? []
         panes = try c.decodeIfPresent([SessionRef: PanesEntry].self, forKey: .panes) ?? [:]
+        recentFiles = try c.decodeIfPresent([FileRef].self, forKey: .recentFiles) ?? []
     }
 
     public mutating func setMode(_ mode: ViewMode, for window: UUID, at: Date = Date()) {
@@ -81,6 +88,15 @@ public struct PresentationState: Codable, Equatable, Sendable {
         }
     }
 
+    /// `file` was opened: it goes to the head of the recent files, once.
+    public mutating func noteOpened(_ file: FileRef) {
+        recentFiles.removeAll { $0 == file }
+        recentFiles.insert(file, at: 0)
+        if recentFiles.count > Self.recentFilesCap {
+            recentFiles.removeLast(recentFiles.count - Self.recentFilesCap)
+        }
+    }
+
     public func panes(for session: SessionRef) -> PaneSettings? {
         panes[session]?.settings
     }
@@ -98,19 +114,62 @@ public struct PresentationState: Codable, Equatable, Sendable {
 /// well depends on where the window stands in the room.
 public struct PaneSettings: Codable, Equatable, Sendable {
     /// Degrees each pane turns in toward the viewer.
-    public var tilt: Double = 30
+    public var tilt: Double = 20
     /// Each side's size against what the window's height gives it.
     public var leading: Double = 1
     public var trailing: Double = 1
+    /// The left pane is open. (Named for what it first held.)
     public var filesOpen = false
     public var slotOpen = false
+    /// What the left pane holds, the edited files to begin with; nil is
+    /// its chooser.
+    public var leadingPane: SidePane? = .files
+    /// What the right pane holds; nil is its chooser.
     public var slot: SidePane?
+    /// The files pane leaves off files that match the base.
+    public var hideUnchanged = false
 
     public static let standard = PaneSettings()
     public static let tilts: ClosedRange<Double> = 0...45
     public static let sizes: ClosedRange<Double> = 0.5...1.5
 
     public init() {}
+
+    /// A card saved by an older client lacks what was added since.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let standard = Self.standard
+        tilt = try c.decodeIfPresent(Double.self, forKey: .tilt) ?? standard.tilt
+        leading = try c.decodeIfPresent(Double.self, forKey: .leading) ?? standard.leading
+        trailing = try c.decodeIfPresent(Double.self, forKey: .trailing) ?? standard.trailing
+        filesOpen = try c.decodeIfPresent(Bool.self, forKey: .filesOpen) ?? false
+        slotOpen = try c.decodeIfPresent(Bool.self, forKey: .slotOpen) ?? false
+        slot = try c.decodeIfPresent(SidePane.self, forKey: .slot)
+        hideUnchanged = try c.decodeIfPresent(Bool.self, forKey: .hideUnchanged) ?? false
+        // Absent is a card saved before the left pane could hold anything
+        // but the files; null is a left pane the user emptied.
+        leadingPane =
+            c.contains(.leadingPane) ? try c.decodeIfPresent(SidePane.self, forKey: .leadingPane) : .files
+    }
+
+    /// Written by hand so an emptied left pane is saved as null: the
+    /// synthesized form leaves a nil out, which would read back as the
+    /// files.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(tilt, forKey: .tilt)
+        try c.encode(leading, forKey: .leading)
+        try c.encode(trailing, forKey: .trailing)
+        try c.encode(filesOpen, forKey: .filesOpen)
+        try c.encode(slotOpen, forKey: .slotOpen)
+        try c.encode(leadingPane, forKey: .leadingPane)
+        try c.encodeIfPresent(slot, forKey: .slot)
+        try c.encode(hideUnchanged, forKey: .hideUnchanged)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case tilt, leading, trailing, filesOpen, slotOpen, leadingPane, slot, hideUnchanged
+    }
 
     /// The angle and sizes as they first were, the panes left as they are.
     public mutating func resetLayout() {

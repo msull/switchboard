@@ -1189,6 +1189,16 @@ public actor ServerConnection {
     }
 
     /// One file's diff against a base the files list named.
+    public func findFiles(_ query: String) async throws -> FindBody {
+        guard let api else { throw RemoteError.transport("not connected") }
+        do {
+            return try await api.findFiles(query).body
+        } catch RemoteError.refused(let status, let code, let message) {
+            if status == 401 { handle(.refused(status: status, code: code, message: message)) }
+            throw RemoteError.refused(status: status, code: code, message: message)
+        }
+    }
+
     public func readDiff(_ session: String, base: String, path: String) async throws -> FileDiffBody {
         guard let api else { throw RemoteError.transport("not connected") }
         do {

@@ -64,6 +64,8 @@ final class FakeHost: HostAPI, @unchecked Sendable {
     var edited: [String: EditedFilesBody] = [:]
     /// Each diff, by `base/path`.
     var diffs: [String: FileDiffBody] = [:]
+    /// What a search answers, by its query.
+    var found: [String: FindBody] = [:]
     var ticketEvents: [String: TicketEventsBody] = [:]
     /// The pinned files, by `project/path`; a missing one is `not_pinned`.
     var files: [String: FileBody] = [:]
@@ -454,6 +456,13 @@ final class FakeHost: HostAPI, @unchecked Sendable {
         return try answer("edited_files:\(id)") { held }
     }
 
+    func findFiles(_ query: String) async throws -> Envelope<FindBody> {
+        lock.lock()
+        let held = found[query] ?? FindBody(hits: [])
+        lock.unlock()
+        return try answer("find:\(query)") { held }
+    }
+
     func diff(_ id: String, base: String, path: String) async throws -> Envelope<FileDiffBody> {
         lock.lock()
         let held = diffs["\(base)/\(path)"]
@@ -713,6 +722,9 @@ struct Route: HostAPI {
     }
     func diff(_ id: String, base: String, path: String) async throws -> Envelope<FileDiffBody> {
         try await network.route(address, pin).diff(id, base: base, path: path)
+    }
+    func findFiles(_ query: String) async throws -> Envelope<FindBody> {
+        try await network.route(address, pin).findFiles(query)
     }
     func ticketEvents(_ ticket: String) async throws -> Envelope<TicketEventsBody> {
         try await network.route(address, pin).ticketEvents(ticket)

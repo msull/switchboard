@@ -3,11 +3,13 @@ import SwitchboardClientCore
 import SwitchboardProtocol
 import SwitchboardTransport
 
-/// What a card window's right-hand pane holds: one document, or a
-/// second session worked beside the first.
+/// What one of a card window's side panes holds: a document, a second
+/// session worked beside the first, or the files the session edited.
 public enum SidePane: Hashable, Codable, Sendable {
     case document(FileRef)
     case session(SessionRef)
+    /// The files the card's own session edited.
+    case files
 }
 
 /// How long the files pane waits between reads while it is open. The
@@ -24,6 +26,10 @@ struct EditedFilesPane: View {
     @Bindable var model: BrowserModel
     let ref: SessionRef
     let project: String
+    /// Files that no longer differ from the base are left off the list.
+    @Binding var hideUnchanged: Bool
+    /// Empties the pane it is in, back to that pane's chooser.
+    var close: (() -> Void)?
     @State private var body_: EditedFilesBody?
     @State private var failure: String?
     @Environment(\.openWindow) private var openWindow
@@ -34,20 +40,38 @@ struct EditedFilesPane: View {
                 Label("Files", systemImage: "doc.on.doc").font(.headline)
                 Spacer()
                 if let files = body_?.files, !files.isEmpty {
-                    Text(totals(files)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    Text(totals(Self.shown(files, hideUnchanged: hideUnchanged)))
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                if let close {
+                    Button(action: close) {
+                        Image(systemName: "xmark").font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.circle)
+                    .controlSize(.mini)
+                    .accessibilityLabel("Empty the pane")
+                    .help("Put something else in this pane")
                 }
             }
             if let base = body_?.base {
                 Text(base.label).font(.caption).foregroundStyle(.secondary)
             }
+            if let files = body_?.files {
+                unchangedButton(files)
+            }
             if let body_ {
+                let shown = Self.shown(body_.files, hideUnchanged: hideUnchanged)
                 if body_.files.isEmpty {
                     Text("No files written yet.").foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                } else if shown.isEmpty {
+                    Text("Every file is back as it was.").foregroundStyle(.secondary)
                     Spacer(minLength: 0)
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 2) {
-                            ForEach(body_.files) { file in
+                            ForEach(shown) { file in
                                 row(file, base: body_.base)
                             }
                         }
@@ -84,6 +108,33 @@ struct EditedFilesPane: View {
         }
     }
 
+    /// An unchanged file is one in the checkout that matches the base; a
+    /// file git could not read is kept, since nothing says it matches.
+    static func unchanged(_ file: EditedFile) -> Bool {
+        file.inRepo && !file.changed
+    }
+
+    /// The list as shown: unchanged files left off when hidden, so one
+    /// that changes again comes back on its own.
+    static func shown(_ files: [EditedFile], hideUnchanged: Bool) -> [EditedFile] {
+        hideUnchanged ? files.filter { !unchanged($0) } : files
+    }
+
+    @ViewBuilder
+    private func unchangedButton(_ files: [EditedFile]) -> some View {
+        let count = files.filter(Self.unchanged).count
+        if count > 0 {
+            Button(hideUnchanged ? "Show \(count) unchanged" : "Clear \(count) unchanged") {
+                hideUnchanged.toggle()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+            .help(hideUnchanged
+                ? "List the files that match the base again"
+                : "Leave off the files that match the base; one that changes again comes back")
+        }
+    }
+
     private func totals(_ files: [EditedFile]) -> String {
         let added = files.reduce(0) { $0 + $1.added }
         let removed = files.reduce(0) { $0 + $1.removed }
@@ -95,7 +146,8 @@ struct EditedFilesPane: View {
         let dir = file.path.count > name.count ? String(file.path.dropLast(name.count + 1)) : ""
         return HStack(spacing: 8) {
             Button {
-                let fileRef = FileRef(serverID: ref.serverID, projectID: project, path: file.path)
+                let fileRef = FileRef(
+                    serverID: ref.serverID, projectID: file.project ?? project, path: file.path)
                 openWindow(value: model.fileWindowRequest(for: fileRef, line: nil))
             } label: {
                 VStack(alignment: .leading, spacing: 0) {
@@ -129,7 +181,9 @@ struct EditedFilesPane: View {
 
     @ViewBuilder
     private func counts(_ file: EditedFile) -> some View {
-        if !file.inRepo {
+        if file.project != nil {
+            Text("other project").font(.caption2).foregroundStyle(.tertiary)
+        } else if !file.inRepo {
             Text("no repo").font(.caption2).foregroundStyle(.tertiary)
         } else if file.binary {
             Text("binary").font(.caption2).foregroundStyle(.secondary)
@@ -152,109 +206,285 @@ struct SideSlotPane: View {
     @Bindable var model: BrowserModel
     let owner: SessionRef
     let project: String
+    /// The session has edited files to list (a Claude session does).
+    let files: Bool
     @Binding var content: SidePane?
+    @Binding var hideUnchanged: Bool
     /// The embedded card's or file's own id, so its mode and watch
     /// belong to this pane and not to another window on the same thing.
     @State private var inner = UUID()
 
+    /// What is shown: a session with no files list has the chooser where
+    /// that list would be.
+    private var shown: SidePane? { content == .files && !files ? nil : content }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let content {
-                HStack {
-                    Text(title(content)).font(.headline).lineLimit(1)
-                    Spacer()
-                    Button {
-                        self.content = nil
-                    } label: {
-                        Image(systemName: "xmark").font(.caption)
-                    }
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.circle)
-                    .controlSize(.mini)
-                    .accessibilityLabel("Empty the pane")
-                    .help("Empty this pane")
+            switch shown {
+            case .files:
+                EditedFilesPane(model: model, ref: owner, project: project, hideUnchanged: $hideUnchanged) {
+                    content = nil
                 }
-                switch content {
-                case .document(let ref):
-                    FileWindowView(model: model, request: FileWindowRequest(id: inner, ref: ref), embedded: true)
-                case .session(let ref):
-                    CardWindowView(model: model, request: CardWindowRequest(id: inner, ref: ref), embedded: true)
-                }
-            } else {
-                SlotChooser(model: model, owner: owner, project: project) { chosen in
+            case .document(let ref):
+                header(ref.path.split(separator: "/").last.map(String.init) ?? ref.path)
+                FileWindowView(model: model, request: FileWindowRequest(id: inner, ref: ref), embedded: true)
+            case .session(let ref):
+                header(model.store.sessions.first { $0.ref == ref }?.session.name ?? "Session")
+                CardWindowView(model: model, request: CardWindowRequest(id: inner, ref: ref), embedded: true)
+            case nil:
+                SlotChooser(model: model, owner: owner, project: project, files: files) { chosen in
                     inner = UUID()
+                    if case .document(let ref) = chosen { model.noteOpened(ref) }
                     content = chosen
                 }
             }
         }
-        .padding(content == nil ? 16 : 8)
+        // The files list pads itself.
+        .padding(shown == nil ? 16 : shown == .files ? 0 : 8)
     }
 
-    private func title(_ pane: SidePane) -> String {
-        switch pane {
-        case .document(let ref):
-            return ref.path.split(separator: "/").last.map(String.init) ?? ref.path
-        case .session(let ref):
-            return model.store.sessions.first { $0.ref == ref }?.session.name ?? "Session"
+    private func header(_ title: String) -> some View {
+        HStack {
+            Text(title).font(.headline).lineLimit(1)
+            Spacer()
+            Button {
+                content = nil
+            } label: {
+                Image(systemName: "xmark").font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.circle)
+            .controlSize(.mini)
+            .accessibilityLabel("Empty the pane")
+            .help("Empty this pane")
         }
     }
 }
 
 /// What an empty right-hand pane offers: the Markdown files the session
 /// wrote, then every other session, grouped by host.
+/// What the slot's chooser offers, narrowed and ordered: a host keeps
+/// every session it ever ran, so the whole list is hundreds of ended ones.
+enum SlotChoices {
+    /// The sessions to offer beside `owner`: never itself; only running
+    /// ones unless `ended`; those whose name or host has `query` in it;
+    /// the owner's project first (`here`), each group last active first.
+    static func sessions(
+        _ all: [UnifiedSession], owner: SessionRef, project: String, query: String, ended: Bool
+    ) -> (here: [UnifiedSession], elsewhere: [UnifiedSession]) {
+        let kept = all
+            .filter { $0.ref != owner && (ended || $0.session.liveness == .running) }
+            .filter { matches(query, $0.session.name) || matches(query, $0.serverName) }
+            .sorted { a, b in
+                let (at, bt) = (lastActive(a.session), lastActive(b.session))
+                return at != bt ? at > bt : a.session.name < b.session.name
+            }
+        let here = kept.filter { $0.ref.serverID == owner.serverID && $0.session.project == project }
+        return (here, kept.filter { !here.contains($0) })
+    }
+
+    /// How many sessions `ended` would add.
+    static func endedCount(_ all: [UnifiedSession], owner: SessionRef) -> Int {
+        all.filter { $0.ref != owner && $0.session.liveness != .running }.count
+    }
+
+    /// How many of the files the session wrote are offered before a
+    /// filter is typed: the newest, so older ones fall off as it works.
+    static let writtenShown = 12
+
+    /// The files the session wrote, as documents to put in a pane: the
+    /// newest [`writtenShown`] of them, or every one `query` matches.
+    static func written(
+        _ files: [EditedFile], owner: SessionRef, project: String, query: String
+    ) -> [FileRef] {
+        let asked = !query.trimmingCharacters(in: .whitespaces).isEmpty
+        return files
+            .filter { matches(query, $0.path) }
+            .prefix(asked ? files.count : writtenShown)
+            .map { FileRef(serverID: owner.serverID, projectID: $0.project ?? project, path: $0.path) }
+    }
+
+    /// The files opened on this device from the owner's host that
+    /// `query` matches, less those `shown` already lists.
+    static func recent(_ opened: [FileRef], owner: SessionRef, query: String, besides shown: [FileRef]) -> [FileRef] {
+        opened.filter { $0.serverID == owner.serverID && matches(query, $0.path) && !shown.contains($0) }
+    }
+
+    /// The fewest characters a query has before the host is searched.
+    static let searchFrom = 2
+
+    /// An empty query matches everything; otherwise `text` holds it, in any case.
+    static func matches(_ query: String, _ text: String) -> Bool {
+        let wanted = query.trimmingCharacters(in: .whitespaces)
+        return wanted.isEmpty || text.localizedCaseInsensitiveContains(wanted)
+    }
+
+    private static func lastActive(_ session: SessionView) -> UInt64 {
+        max(session.lastActivityMs ?? 0, session.lastStopAtMs ?? 0)
+    }
+}
+
 private struct SlotChooser: View {
     @Bindable var model: BrowserModel
     let owner: SessionRef
     let project: String
+    /// The edited-files list is offered.
+    let files: Bool
     let choose: (SidePane) -> Void
-    @State private var documents: [EditedFile] = []
-
-    private var sessions: [UnifiedSession] {
-        model.store.sessions
-            .filter { $0.ref != owner }
-            .sorted { ($0.serverName, $0.session.name) < ($1.serverName, $1.session.name) }
-    }
+    @State private var written: [EditedFile] = []
+    @State private var query = ""
+    @State private var ended = false
+    /// What the host found for the query, and why it found nothing.
+    @State private var found: [FileRef] = []
+    @State private var searchNote: String?
+    @State private var searching = false
+    /// The host's project names, for a file in another project.
+    @State private var projects: [String: String] = [:]
 
     var body: some View {
+        let sessions = SlotChoices.sessions(
+            model.store.sessions, owner: owner, project: project, query: query, ended: ended)
+        let wrote = SlotChoices.written(written, owner: owner, project: project, query: query)
+        let recent = SlotChoices.recent(model.recentFiles, owner: owner, query: query, besides: wrote)
+        let hits = found.filter { !wrote.contains($0) && !recent.contains($0) }
+        let endedCount = SlotChoices.endedCount(model.store.sessions, owner: owner)
         VStack(alignment: .leading, spacing: 8) {
-            Label("Beside this card", systemImage: "sidebar.right").font(.headline)
-            Text("A document to keep in view, or a second session to work in tandem.")
+            Label("Beside this card", systemImage: "rectangle.split.3x1").font(.headline)
+            Text("A file to keep in view, or a second session to work in tandem.")
                 .font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Find a file or session by name", text: $query)
+                    .textFieldStyle(.plain)
+                    .autocorrectionDisabled()
+                if searching { ProgressView().controlSize(.mini) }
+                if !query.isEmpty {
+                    Button {
+                        query = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Clear the filter")
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+            if endedCount > 0 {
+                Toggle("Show \(endedCount) ended", isOn: $ended)
+                    .font(.caption)
+                    .controlSize(.mini)
+            }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
-                    if !documents.isEmpty {
-                        Text("Documents this session wrote").font(.subheadline.bold()).padding(.top, 4)
-                        ForEach(documents) { file in
-                            Button {
-                                choose(.document(FileRef(serverID: owner.serverID, projectID: project, path: file.path)))
-                            } label: {
-                                Label(file.path, systemImage: "doc.richtext")
-                                    .lineLimit(1).truncationMode(.head)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                    }
-                    Text("Sessions").font(.subheadline.bold()).padding(.top, 8)
-                    ForEach(sessions) { item in
+                    if files && SlotChoices.matches(query, "edited files") {
                         Button {
-                            choose(.session(item.ref))
+                            choose(.files)
                         } label: {
-                            HStack {
-                                Text(item.session.name).lineLimit(1)
-                                Spacer()
-                                Text(item.serverName).font(.caption).foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            Label("Edited files, with their diffs", systemImage: "doc.on.doc")
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .buttonStyle(.bordered)
+                    }
+                    documents("Written by this session", wrote)
+                    documents("Opened before", recent)
+                    documents("In this host's projects", hits)
+                    if let searchNote {
+                        Text(searchNote).font(.caption).foregroundStyle(.secondary).padding(.top, 4)
+                    }
+                    group("This project", sessions.here)
+                    group(sessions.here.isEmpty ? "Sessions" : "Other projects", sessions.elsewhere)
+                    if !query.isEmpty, !searching, wrote.isEmpty, recent.isEmpty, hits.isEmpty,
+                        sessions.here.isEmpty, sessions.elsewhere.isEmpty
+                    {
+                        Text("Nothing matches.").font(.callout).foregroundStyle(.secondary).padding(.top, 8)
                     }
                 }
             }
         }
         .task(id: owner) {
-            let files = (try? await model.readEditedFiles(owner))?.files ?? []
-            documents = files.filter { $0.path.lowercased().hasSuffix(".md") }
+            written = (try? await model.readEditedFiles(owner))?.files ?? []
+            let listed = await model.catalog(for: owner.serverID)?.projects ?? []
+            projects = Dictionary(listed.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+        }
+        // Searched a moment after the typing stops; a new letter cancels
+        // the search before it.
+        .task(id: query) {
+            let asked = query.trimmingCharacters(in: .whitespaces)
+            guard asked.count >= SlotChoices.searchFrom else {
+                found = []
+                searchNote = nil
+                searching = false
+                return
+            }
+            searching = true
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            do {
+                let body = try await model.findFiles(on: owner.serverID, asked)
+                guard !Task.isCancelled else { return }
+                found = body.hits.map { FileRef(serverID: owner.serverID, projectID: $0.project, path: $0.path) }
+                searchNote = nil
+            } catch RemoteError.refused(_, "not_found", _) {
+                found = []
+                searchNote = "Searching every project needs a newer Switchboard on this host."
+            } catch {
+                guard !Task.isCancelled else { return }
+                found = []
+                searchNote = "The host did not answer the search."
+            }
+            searching = false
+        }
+    }
+
+    @ViewBuilder
+    private func documents(_ title: String, _ refs: [FileRef]) -> some View {
+        if !refs.isEmpty {
+            Text(title).font(.subheadline.bold()).padding(.top, 8)
+            ForEach(refs, id: \.self) { ref in
+                let name = ref.path.split(separator: "/").last.map(String.init) ?? ref.path
+                let folder = ref.path.count > name.count ? String(ref.path.dropLast(name.count + 1)) : ""
+                // A file outside the card's own project says which it is in.
+                let place = [ref.projectID == project ? nil : projects[ref.projectID] ?? "another project", folder]
+                    .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+                Button {
+                    choose(.document(ref))
+                } label: {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Label(name, systemImage: name.lowercased().hasSuffix(".md") ? "doc.richtext" : "doc.text")
+                            .lineLimit(1).truncationMode(.middle)
+                        if !place.isEmpty {
+                            Text(place).font(.caption2).foregroundStyle(.secondary)
+                                .lineLimit(1).truncationMode(.head)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func group(_ title: String, _ items: [UnifiedSession]) -> some View {
+        if !items.isEmpty {
+            Text(title).font(.subheadline.bold()).padding(.top, 8)
+            ForEach(items) { item in
+                Button {
+                    choose(.session(item.ref))
+                } label: {
+                    HStack {
+                        Text(item.session.name).lineLimit(1)
+                        Spacer()
+                        Text("\(item.session.card) · \(item.serverName)")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.bordered)
+            }
         }
     }
 }
@@ -369,7 +599,9 @@ public struct DiffWindowView: View {
         case "empty":
             note(diff.status == "renamed" ? "Renamed, with no line changed." : "No line changed.")
         default:
-            ScrollView([.vertical, .horizontal]) {
+            // Up and down only, as the file window: a lazy stack that also
+            // scrolls sideways wraps every line narrow.
+            ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array((diff.body.hunks ?? []).enumerated()), id: \.offset) { i, hunk in
                         if i > 0 {
@@ -412,6 +644,7 @@ private struct DiffLineRow: View {
                 .foregroundStyle(tint == .clear ? Color.secondary : tint)
             Text(DiffMarks.attributed(line.text, marks: line.marks, tint: tint))
                 .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .font(.system(size: 14, design: .monospaced))
         .padding(.vertical, 1)
@@ -454,6 +687,16 @@ public enum DiffMarks {
 enum SidePaneLayout {
     /// The card window's default height, which the panes' sizes are drawn for.
     static let designHeight: CGFloat = 900
+
+    /// The size a pane is drawn at beside a window of the default height:
+    /// the files list and a chooser narrow, a document or a session wide.
+    static func drawn(_ pane: SidePane?) -> CGSize {
+        switch pane {
+        case .files: return CGSize(width: 360, height: 640)
+        case nil: return CGSize(width: 380, height: 620)
+        case .document, .session: return CGSize(width: 540, height: 860)
+        }
+    }
 
     /// A pane's size for a window `height` tall: its height follows the
     /// window's and its width follows its height, so it keeps its shape.
@@ -506,8 +749,6 @@ extension View {
 /// the panes live; `save` runs when one is let go.
 struct CardSettings: View {
     @Binding var settings: PaneSettings
-    /// The session has a files pane (Claude sessions do).
-    let files: Bool
     let save: () -> Void
     let done: () -> Void
 
@@ -521,10 +762,8 @@ struct CardSettings: View {
             }
             row("Pane angle", value: $settings.tilt, in: PaneSettings.tilts,
                 shown: "\(Int(settings.tilt.rounded()))°")
-            if files {
-                row("Files pane size", value: $settings.leading, in: PaneSettings.sizes,
-                    shown: "\(Int((settings.leading * 100).rounded()))%")
-            }
+            row("Left pane size", value: $settings.leading, in: PaneSettings.sizes,
+                shown: "\(Int((settings.leading * 100).rounded()))%")
             row("Right pane size", value: $settings.trailing, in: PaneSettings.sizes,
                 shown: "\(Int((settings.trailing * 100).rounded()))%")
             Button("Reset") {

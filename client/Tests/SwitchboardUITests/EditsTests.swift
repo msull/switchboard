@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import SwitchboardClientCore
 import SwitchboardProtocol
 import XCTest
 
@@ -62,6 +63,138 @@ final class EditsTests: XCTestCase {
         XCTAssertEqual(SidePaneLayout.size(width: 400, height: 600, windowHeight: 9000), CGSize(width: 600, height: 900))
     }
 
+    func testTheSlotOffersRunningSessionsThisProjectFirstAndLastActiveFirst() {
+        let host = ServerID("host")
+        func item(
+            _ id: String, project: String = "p", running: Bool = true, at: UInt64 = 0, on server: ServerID? = nil
+        ) -> UnifiedSession {
+            UnifiedSession(
+                ref: SessionRef(serverID: server ?? host, recordID: id),
+                session: SessionView(
+                    id: id, project: project, name: id, liveness: running ? .running : .missing, lastStopAtMs: at),
+                serverName: "Mini", stale: false)
+        }
+        let owner = SessionRef(serverID: host, recordID: "me")
+        let all = [
+            item("me"), item("old", at: 1), item("new", at: 9), item("ended", running: false, at: 99),
+            item("other", project: "q", at: 5), item("far", at: 7, on: ServerID("elsewhere")),
+        ]
+        var got = SlotChoices.sessions(all, owner: owner, project: "p", query: "", ended: false)
+        XCTAssertEqual(got.here.map(\.session.name), ["new", "old"])
+        // Another project, or the same project id on another host, is elsewhere.
+        XCTAssertEqual(got.elsewhere.map(\.session.name), ["far", "other"])
+        XCTAssertEqual(SlotChoices.endedCount(all, owner: owner), 1)
+
+        got = SlotChoices.sessions(all, owner: owner, project: "p", query: "", ended: true)
+        XCTAssertEqual(got.here.map(\.session.name), ["ended", "new", "old"])
+
+        got = SlotChoices.sessions(all, owner: owner, project: "p", query: " OTH ", ended: false)
+        XCTAssertEqual(got.here.map(\.session.name), [])
+        XCTAssertEqual(got.elsewhere.map(\.session.name), ["other"])
+        XCTAssertTrue(SlotChoices.matches("", "anything"))
+        XCTAssertFalse(SlotChoices.matches("zzz", "notes.md"))
+    }
+
+    func testAFileInAnotherProjectDecodesLinksAndIsOfferedThere() throws {
+        let json = """
+            {"base":null,"files":[
+              {"path":"decisions.md","project":"other","in_repo":false,"changed":false,"added":0,"removed":0,"binary":false},
+              {"path":"src/a.rs","project":null,"in_repo":true,"changed":true,"added":1,"removed":0,"binary":false}]}
+            """
+        let files = try JSONDecoder().decode(EditedFilesBody.self, from: Data(json.utf8)).files
+        XCTAssertEqual(files.map(\.project), ["other", nil])
+        let owner = SessionRef(serverID: ServerID("host"), recordID: "me")
+        XCTAssertEqual(
+            SlotChoices.written(files, owner: owner, project: "mine", query: ""),
+            [
+                FileRef(serverID: ServerID("host"), projectID: "other", path: "decisions.md"),
+                FileRef(serverID: ServerID("host"), projectID: "mine", path: "src/a.rs"),
+            ])
+
+        // A link into another project carries it, and one into the
+        // session's own carries none.
+        let url = try XCTUnwrap(FileLinks.url(path: "docs/open decisions.md", line: 3, project: "0a1b-2c"))
+        let parsed = try XCTUnwrap(FileLinks.parse(try XCTUnwrap(URL(string: url))))
+        XCTAssertEqual(parsed.path, "docs/open decisions.md")
+        XCTAssertEqual(parsed.line, 3)
+        XCTAssertEqual(parsed.project, "0a1b-2c")
+        let own = try XCTUnwrap(FileLinks.url(path: "plan.md", line: nil))
+        XCTAssertNil(FileLinks.parse(try XCTUnwrap(URL(string: own)))?.project)
+        let link = try JSONDecoder().decode(
+            LinkView.self, from: Data(#"{"start":0,"end":4,"path":"a.md","line":null,"project":"p2"}"#.utf8))
+        XCTAssertEqual(link.project, "p2")
+
+        let found = try JSONDecoder().decode(
+            FindBody.self, from: Data(#"{"hits":[{"project":"p2","path":"a.md"}],"truncated":true}"#.utf8))
+        XCTAssertEqual(found.hits, [FileHit(project: "p2", path: "a.md")])
+        XCTAssertTrue(found.truncated)
+    }
+
+    func testTheChooserOffersTheNewestWrittenFilesAndTheOnesOpenedBefore() {
+        let host = ServerID("host")
+        let owner = SessionRef(serverID: host, recordID: "me")
+        let files = (1...20).map { EditedFile(path: "f\($0).txt") }
+        // The newest dozen until a filter is typed, then every match.
+        XCTAssertEqual(SlotChoices.written(files, owner: owner, project: "p", query: "").count, SlotChoices.writtenShown)
+        XCTAssertEqual(
+            SlotChoices.written(files, owner: owner, project: "p", query: "f2").map(\.path), ["f2.txt", "f20.txt"])
+
+        var state = PresentationState()
+        let a = FileRef(serverID: host, projectID: "p", path: "a.md")
+        let b = FileRef(serverID: host, projectID: "q", path: "b.md")
+        let far = FileRef(serverID: ServerID("elsewhere"), projectID: "p", path: "c.md")
+        for file in [a, b, far, a] { state.noteOpened(file) }
+        XCTAssertEqual(state.recentFiles, [a, far, b])
+        // Only the owner's host, and not what another list already shows.
+        XCTAssertEqual(SlotChoices.recent(state.recentFiles, owner: owner, query: "", besides: [b]), [a])
+        XCTAssertEqual(SlotChoices.recent(state.recentFiles, owner: owner, query: "b.m", besides: []), [b])
+        for i in 0..<(PresentationState.recentFilesCap + 5) {
+            state.noteOpened(FileRef(serverID: host, projectID: "p", path: "n\(i).md"))
+        }
+        XCTAssertEqual(state.recentFiles.count, PresentationState.recentFilesCap)
+        XCTAssertFalse(state.recentFiles.contains(a))
+    }
+
+    func testEachSideKeepsWhatItHoldsAndAnEmptiedLeftPaneStaysEmpty() throws {
+        // A card saved before the left pane could hold anything has the files there.
+        let old = try JSONDecoder().decode(
+            PaneSettings.self, from: Data(#"{"tilt":20,"leading":1,"trailing":1,"filesOpen":true,"slotOpen":false}"#.utf8))
+        XCTAssertEqual(old.leadingPane, .files)
+
+        var panes = PaneSettings()
+        XCTAssertEqual(panes.leadingPane, .files)
+        panes.leadingPane = nil
+        panes.slot = .files
+        var back = try JSONDecoder().decode(PaneSettings.self, from: JSONEncoder().encode(panes))
+        XCTAssertNil(back.leadingPane)
+        XCTAssertEqual(back.slot, .files)
+        panes.leadingPane = .document(FileRef(serverID: ServerID("host"), projectID: "p", path: "decisions.md"))
+        back = try JSONDecoder().decode(PaneSettings.self, from: JSONEncoder().encode(panes))
+        XCTAssertEqual(back, panes)
+
+        XCTAssertEqual(SidePaneLayout.drawn(.files).width, 360)
+        XCTAssertGreaterThan(SidePaneLayout.drawn(panes.leadingPane).width, SidePaneLayout.drawn(nil).width)
+    }
+
+    func testClearingUnchangedLeavesOffOnlyFilesThatMatchTheBase() {
+        let files = [
+            EditedFile(path: "same.rs", changed: false),
+            EditedFile(path: "edited.rs", changed: true, added: 2),
+            EditedFile(path: "outside.md", inRepo: false, changed: false),
+        ]
+        XCTAssertEqual(EditedFilesPane.shown(files, hideUnchanged: false).map(\.path), ["same.rs", "edited.rs", "outside.md"])
+        XCTAssertEqual(EditedFilesPane.shown(files, hideUnchanged: true).map(\.path), ["edited.rs", "outside.md"])
+    }
+
+    func testACardSavedBefore0_14_1KeepsItsPanesAndShowsEveryFile() throws {
+        let json = #"{"tilt":30,"leading":1,"trailing":0.8,"filesOpen":true,"slotOpen":false}"#
+        let panes = try JSONDecoder().decode(PaneSettings.self, from: Data(json.utf8))
+        XCTAssertEqual(panes.tilt, 30)
+        XCTAssertEqual(panes.trailing, 0.8)
+        XCTAssertTrue(panes.filesOpen)
+        XCTAssertFalse(panes.hideUnchanged)
+    }
+
     func testACardsPanesAreKeptForItsSessionAndAnOlderStateHasNone() throws {
         let ref = SessionRef(serverID: ServerID("host"), recordID: "rec")
         var panes = PaneSettings()
@@ -85,7 +218,7 @@ final class EditsTests: XCTestCase {
 
         // Reset puts the angle and sizes back and leaves the panes open.
         panes.resetLayout()
-        XCTAssertEqual(panes.tilt, 30)
+        XCTAssertEqual(panes.tilt, 20)
         XCTAssertEqual(panes.trailing, 1)
         XCTAssertTrue(panes.slotOpen)
     }

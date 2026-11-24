@@ -24,7 +24,7 @@ public enum FileLinks {
                 let lower = utf8.index(utf8.startIndex, offsetBy: link.start, limitedBy: utf8.endIndex),
                 let upper = utf8.index(utf8.startIndex, offsetBy: link.end, limitedBy: utf8.endIndex),
                 let start = lower.samePosition(in: text), let end = upper.samePosition(in: text),
-                let url = url(path: link.path, line: link.line)
+                let url = url(path: link.path, line: link.line, project: link.project)
             else { continue }
             let shown = String(text[start..<end])
             out.replaceSubrange(start..<end, with: "[\(shown)](\(url))")
@@ -32,22 +32,25 @@ public enum FileLinks {
         return out
     }
 
-    /// The URL of a file link.
-    public static func url(path: String, line: Int?) -> String? {
+    /// The URL of a file link; a file in another project carries that
+    /// project's id as the URL's host.
+    public static func url(path: String, line: Int?, project: String? = nil) -> String? {
         var allowed = CharacterSet.urlPathAllowed
         // Parentheses and spaces would end or break the Markdown link.
         allowed.remove(charactersIn: "()")
         guard let encoded = path.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
-        return "\(scheme):///\(encoded)" + (line.map { "#L\($0)" } ?? "")
+        return "\(scheme)://\(project ?? "")/\(encoded)" + (line.map { "#L\($0)" } ?? "")
     }
 
-    /// The file and line a tapped link names, or nil for any other URL.
-    public static func parse(_ url: URL) -> (path: String, line: Int?)? {
+    /// The file and line a tapped link names, with the other project
+    /// it is in if it named one, or nil for any other URL.
+    public static func parse(_ url: URL) -> (path: String, line: Int?, project: String?)? {
         guard url.scheme == scheme else { return nil }
         let path = String(url.path.drop(while: { $0 == "/" }))
         guard !path.isEmpty else { return nil }
         let line = url.fragment.flatMap { $0.hasPrefix("L") ? Int($0.dropFirst()) : nil }
-        return (path, line)
+        let project = url.host.flatMap { $0.isEmpty ? nil : $0 }
+        return (path, line, project)
     }
 }
 
@@ -134,7 +137,10 @@ public struct FileWindowView: View {
             }
         } else {
             ScrollViewReader { proxy in
-                ScrollView([.vertical, .horizontal]) {
+                // Up and down only: a lazy stack that also scrolls sideways
+                // is never told the window's width and wraps every line
+                // narrow. Lines fill the width and only a longer one wraps.
+                ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         let lines = file.text.split(separator: "\n", omittingEmptySubsequences: false)
                         ForEach(Array(lines.enumerated()), id: \.offset) { i, line in
@@ -146,6 +152,7 @@ public struct FileWindowView: View {
                                 Text(String(line))
                                     .font(.system(size: 14, design: .monospaced))
                                     .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             .padding(.vertical, 1)
                             .background(marked == i + 1 ? Color.accentColor.opacity(0.18) : Color.clear)
