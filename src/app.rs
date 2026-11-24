@@ -25,9 +25,10 @@ use crate::adapters::scrollback::scrollback_dir;
 use crate::cadence::{self, Cadence, Step};
 use crate::content::{
     self, ACTIVITY_BYTES_CAP, ContentJob, ContentKey, ContentVersion, ContentView, ContentWorker,
-    ConversationCache, FILE_BYTES_CAP, Observed, PAGE_TURNS_CAP, PAGE_TURNS_DEFAULT, PageFrom,
-    Policy, PolicySpec, RUN_LINES_CAP, SCREEN_LINES_CAP, SCREEN_SLACK_LINES, Source,
-    TURN_BYTES_CAP, TicketPart, WATCH_CAP, WATCH_IDLE, Watch, redact,
+    ConversationCache, FILE_BYTES_CAP, FIND_HITS, FIND_HITS_CAP, FIND_QUERY_CAP, Observed,
+    PAGE_TURNS_CAP, PAGE_TURNS_DEFAULT, PageFrom, Policy, PolicySpec, RUN_LINES_CAP,
+    SCREEN_LINES_CAP, SCREEN_SLACK_LINES, Source, TURN_BYTES_CAP, TicketPart, WATCH_CAP,
+    WATCH_IDLE, Watch, redact,
 };
 use crate::core::revision::Fingerprints;
 use crate::core::{
@@ -2294,7 +2295,7 @@ impl SwitchboardApp {
                 ContentKey::File(..) => ContentView::Whole,
                 // Ticket text and a diff are read once per request,
                 // never watched.
-                ContentKey::TicketText(..) | ContentKey::Diff(..) => continue,
+                ContentKey::TicketText(..) | ContentKey::Diff(..) | ContentKey::Find(_) => continue,
             };
             if let Ok(job) = self.content_job(&key, view, None) {
                 jobs.push(job);
@@ -2361,6 +2362,13 @@ impl SwitchboardApp {
                             .map(|w| w.project.root.clone())
                             .unwrap_or_default(),
                         cwd: record.cwd.clone(),
+                        others: self
+                            .core
+                            .workspaces()
+                            .iter()
+                            .filter(|w| w.project.id != record.project)
+                            .map(|w| (w.project.id, w.project.root.clone()))
+                            .collect(),
                     },
                     _ => {
                         return Err((
@@ -2390,8 +2398,11 @@ impl SwitchboardApp {
                 base: base.clone(),
                 relative: relative.clone(),
             },
-            // A file is handled above, and ticket text has no record.
-            ContentKey::File(..) | ContentKey::TicketText(..) => unreachable!("no record"),
+            // A file is handled above, and ticket text and a search
+            // have no record.
+            ContentKey::File(..) | ContentKey::TicketText(..) | ContentKey::Find(_) => {
+                unreachable!("no record")
+            }
         };
         Ok(ContentJob {
             key: key.clone(),
@@ -2678,6 +2689,70 @@ impl SwitchboardApp {
             ContentView::Whole,
             reply,
         )
+    }
+
+    /// `files.find`: the files of every project whose path matches `q`,
+    /// best first, each with its project, so a device can open a file
+    /// it cannot otherwise name. Only paths the file route would serve
+    /// are listed (under a project's root, not ignored). The walk runs
+    /// on the content worker.
+    fn remote_find(
+        &mut self,
+        request: &RemoteRequest,
+        reply: &mpsc::SyncSender<RemoteReply>,
+    ) -> Served {
+        let query = request
+            .param("q")
+            .and_then(content::percent_decoded)
+            .map(|q| q.trim().to_owned())
+            .filter(|q| !q.is_empty() && q.chars().count() <= FIND_QUERY_CAP);
+        let Some(query) = query else {
+            return Served::Now(self.refuse(
+                request,
+                400,
+                "bad_request",
+                "q is the text to look for, percent-encoded, at most 200 characters",
+                true,
+            ));
+        };
+        let limit = request
+            .param("limit")
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(FIND_HITS)
+            .clamp(1, FIND_HITS_CAP);
+        let roots = self
+            .core
+            .workspaces()
+            .iter()
+            .map(|w| content::FindRoot {
+                project: w.project.id,
+                root: w.project.root.clone(),
+                shown: w.project.shown.clone(),
+            })
+            .collect();
+        let job = ContentJob {
+            key: ContentKey::Find(query.clone()),
+            source: Source::Find {
+                roots,
+                query,
+                limit,
+            },
+            view: ContentView::Find,
+            // Paths are not masked, but every job names a policy.
+            policies: vec![self.policy_spec(ProjectId(uuid::Uuid::nil()), None)],
+            reply: Some(reply.clone()),
+        };
+        let submitted = self.content.as_ref().is_some_and(|c| c.submit(job));
+        if !submitted {
+            return Served::Now(self.refuse(
+                request,
+                503,
+                "busy",
+                "the content worker is behind; try again",
+                true,
+            ));
+        }
+        Served::Deferred
     }
 
     /// A device's content read: the frame checks the record and
@@ -4313,6 +4388,7 @@ impl SwitchboardApp {
             ("GET", ["dispatch", "tickets", ticket, "files", key]) => {
                 return self.remote_ticket_file(request, ticket, key, reply);
             }
+            ("GET", ["files", "find"]) => return self.remote_find(request, reply),
             (
                 "GET",
                 [

@@ -513,6 +513,11 @@ public final class BrowserModel {
         try await manager.readDiff(ref, base: base, path: path)
     }
 
+    /// The files of every project on `host` whose path matches `query`.
+    public func findFiles(on host: ServerID, _ query: String) async throws -> FindBody {
+        try await manager.findFiles(on: host, query)
+    }
+
     /// One file of a ticket by its key.
     public func readTicketFile(_ ref: TicketRef, key: String) async throws -> TicketFileBody {
         try await manager.readTicketFile(ref, key: key)
@@ -665,7 +670,18 @@ public final class BrowserModel {
             let n = (lineRequests[ref]?.n ?? 0) + 1
             lineRequests[ref] = LineRequest(line: line, n: n)
         }
+        noteOpened(ref)
         return FileWindowRequest.open(on: ref, among: openFiles) ?? FileWindowRequest(ref: ref)
+    }
+
+    /// The files opened on this device, last opened first.
+    public var recentFiles: [FileRef] { presentation.recentFiles }
+
+    /// `file` was opened in a window or put in a side pane.
+    public func noteOpened(_ file: FileRef) {
+        guard presentation.recentFiles.first != file else { return }
+        presentation.noteOpened(file)
+        save()
     }
 
     // MARK: Boards

@@ -188,17 +188,23 @@ scripts/sim.sh run               # the visionOS app on the simulator (below)
   a board tile): ornaments on its left and right edges that move with
   it, opened from two buttons in its header, turned in toward the
   viewer, scaled with the window's height, and kept per session in the
-  presentation state (which are open, what the slot holds, and the
+  presentation state (which are open, what each side holds, and the
   angle and each side's size from the header's "Card settings…");
-  on the left `EditedFilesPane`, the files the session wrote with
+  each side is a `SideSlotPane` holding one `SidePane`: the edited
+  files (the left side to begin with), a file, or another session;
+  `EditedFilesPane` lists the files the session wrote with
   their lines added and removed against the branch point (the host's
   `session.files`, read every few seconds while open), a tap opening
   the file and a button the diff in a `DiffWindowView` (one per
   `DiffWindowRequest`, removed lines red and added green, the words
-  that changed marked by `DiffMarks`); on the right `SideSlotPane`, a
-  slot that offers the Markdown files the session wrote and every
-  other session, and holds the one chosen as an embedded file window
-  or card; the
+  that changed marked by `DiffMarks`), a file in another project of
+  the host opening from that project; an empty side shows its chooser
+  (`SlotChooser`, its lists made by `SlotChoices`): the edited-files
+  list, the newest files the session wrote in any project, the files
+  opened on this device before (`PresentationState.recentFiles`), the
+  files of every project on the host that match what is typed (the
+  host's `files.find`, asked a moment after the typing stops), and the
+  running sessions, this project's first; the
   presentation model (`ViewMode`, `CardWindowRequest`, `CardStanding`,
   `BrowseMode`, `FocusCursor`) and `PresentationState` in a JSON file
   in the app's container: the layout (list, grid, or one session in

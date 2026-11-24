@@ -57,6 +57,12 @@ pub const SCREEN_SLACK_LINES: usize = 8;
 pub const SCREEN_LINES_CAP: usize = 200;
 /// The most lines a run output read returns.
 pub const RUN_LINES_CAP: usize = 500;
+/// How many files a search answers with when the device names no limit.
+pub const FIND_HITS: usize = 40;
+/// The most files a search answers with.
+pub const FIND_HITS_CAP: usize = 100;
+/// The longest search query, in characters.
+pub const FIND_QUERY_CAP: usize = 200;
 /// One turn's JSON is cut to this: the final text kept where possible,
 /// the tool detail and the notes dropped first.
 pub const TURN_BYTES_CAP: usize = 256 * 1024;
@@ -74,6 +80,14 @@ pub const PAGE_TURNS_DEFAULT: usize = 20;
 pub const FILE_BYTES_CAP: u64 = dispatch_control::FILE_TEXT_MAX;
 /// How many jobs may wait for the worker.
 const JOBS: usize = 64;
+
+/// How long a project's file listing answers searches before its root
+/// is walked again.
+const LISTING_TTL: Duration = Duration::from_secs(30);
+
+/// The most entries a search lists under one project root, as the
+/// app's own file index stops.
+const FIND_INDEX_ENTRIES: usize = 50_000;
 
 /// One piece of content a device can read and watch.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -95,6 +109,9 @@ pub enum ContentKey {
     /// Read once per request, never watched: a device re-reads it when
     /// the files list moves.
     Diff(RecordId, String, PathBuf),
+    /// The files of every project whose path matches a query. Read once
+    /// per request, never watched.
+    Find(String),
 }
 
 /// Which of a ticket's texts a [`ContentKey::TicketText`] read is.
@@ -128,6 +145,7 @@ impl ContentKey {
             Self::File(..) => "file",
             Self::TicketText(..) => "ticket",
             Self::Diff(..) => "diff",
+            Self::Find(_) => "find",
         }
     }
 
@@ -140,6 +158,7 @@ impl ContentKey {
             Self::RunOutput(id, n) => format!("{}/{n}", id.0),
             Self::File(project, path) => format!("{}/{}", project.0, path.display()),
             Self::Diff(id, base, path) => format!("{}/{base}/{}", id.0, path.display()),
+            Self::Find(query) => query.clone(),
             Self::TicketText(ticket, part) => {
                 let ticket = ticket.as_deref().unwrap_or("");
                 match part {
@@ -183,7 +202,7 @@ impl ContentKey {
             | Self::Conversation(id)
             | Self::RunOutput(id, _)
             | Self::Diff(id, ..) => Some(*id),
-            Self::File(..) | Self::TicketText(..) => None,
+            Self::File(..) | Self::TicketText(..) | Self::Find(_) => None,
         }
     }
 }
@@ -358,11 +377,13 @@ pub enum Source {
     Pane(HostId),
     /// A Claude Code transcript, with the project root and the
     /// session's working directory the paths in its prose are resolved
-    /// against for the links on the wire.
+    /// against for the links on the wire, and the other projects' roots
+    /// a file outside its own is served from.
     Transcript {
         handle: ResumeHandle,
         root: PathBuf,
         cwd: PathBuf,
+        others: Vec<(ProjectId, PathBuf)>,
     },
     Log(PathBuf),
     /// A pinned file: the project root and the path under it.
@@ -380,6 +401,68 @@ pub enum Source {
         base: String,
         relative: PathBuf,
     },
+    /// Every project's files, to be matched against a query.
+    Find {
+        roots: Vec<FindRoot>,
+        query: String,
+        limit: usize,
+    },
+}
+
+/// `text` with its `%XX` escapes read back, as a device sends a search
+/// query; `None` for a cut escape or bytes that are not UTF-8. The port
+/// leaves every other part of a request as sent, ids and numbers only.
+#[must_use]
+pub fn percent_decoded(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// One project a [`Source::Find`] looks in: its root, and the folders
+/// under it listed even where its ignore rules hide them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindRoot {
+    pub project: ProjectId,
+    pub root: PathBuf,
+    pub shown: Vec<PathBuf>,
+}
+
+/// Where the paths a session names resolve and are served from: its
+/// project's root, its working directory, and the other projects' roots.
+#[derive(Debug, Clone, Copy)]
+pub struct Roots<'a> {
+    pub root: &'a std::path::Path,
+    pub cwd: &'a std::path::Path,
+    pub others: &'a [(ProjectId, PathBuf)],
+}
+
+impl Roots<'_> {
+    /// Where the port serves `path` from: under the session's own root
+    /// (no project named), or else under another project's, the deepest
+    /// root that holds it. A path under no project is not served.
+    #[must_use]
+    pub fn place(&self, path: &std::path::Path) -> Option<(Option<ProjectId>, PathBuf)> {
+        if let Ok(under) = path.strip_prefix(self.root) {
+            return Some((None, under.to_path_buf()));
+        }
+        self.others
+            .iter()
+            .filter_map(|(id, root)| Some((id, root, path.strip_prefix(root).ok()?)))
+            .max_by_key(|(_, root, _)| root.components().count())
+            .map(|(id, _, under)| (Some(*id), under.to_path_buf()))
+    }
 }
 
 /// Where a page is anchored. A page anchored at its start runs
@@ -427,6 +510,8 @@ pub enum ContentView {
     Files,
     /// One file's diff against a base, as hunks.
     Diff,
+    /// The files matching a query.
+    Find,
 }
 
 /// One read for the worker: what to read, what names the policy to
@@ -625,6 +710,9 @@ struct Cache {
     transcripts: HashMap<RecordId, ParsedEntry>,
     files: HashMap<ContentKey, FileEntry>,
     tickets: HashMap<ContentKey, TextEntry>,
+    /// Each project root's file listing, by the root, with when it was
+    /// scanned: a search a moment after another does not walk the disk.
+    listings: HashMap<PathBuf, (Instant, files::Listing)>,
 }
 
 impl Cache {
@@ -636,6 +724,7 @@ impl Cache {
             transcripts: HashMap::new(),
             files: HashMap::new(),
             tickets: HashMap::new(),
+            listings: HashMap::new(),
         }
     }
 
@@ -645,6 +734,7 @@ impl Cache {
         self.transcripts.clear();
         self.files.clear();
         self.tickets.clear();
+        self.listings.clear();
     }
 }
 
@@ -671,13 +761,17 @@ struct ParsedEntry {
 
 /// A file an agent named in its prose, as the wire carries it: the
 /// byte range of the token in the text as sent, the path under the
-/// project root, and the line the token named.
+/// project root, and the line the token named. `project` names another
+/// project whose root the path is under; without it the path is under
+/// the session's own.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Link {
     pub start: usize,
     pub end: usize,
     pub path: String,
     pub line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// The links of every piece of prose in a conversation, by
@@ -688,15 +782,10 @@ pub type Links = HashMap<u64, Vec<Link>>;
 
 /// The links of `conversation`'s prose, resolved as the app's own
 /// view resolves them (the project root, then the session's working
-/// directory), kept only for files under the root, since that is what
-/// the port serves; entries of `previous` are reused by text.
+/// directory), kept only for files under a project's root, since that
+/// is what the port serves; entries of `previous` are reused by text.
 #[must_use]
-pub fn link_map(
-    conversation: &Conversation,
-    root: &std::path::Path,
-    cwd: &std::path::Path,
-    previous: &Links,
-) -> Links {
+pub fn link_map(conversation: &Conversation, roots: Roots<'_>, previous: &Links) -> Links {
     let mut out = Links::new();
     for text in file_refs::prose_texts(conversation) {
         let key = file_refs::text_key(text);
@@ -704,18 +793,21 @@ pub fn link_map(
             continue;
         }
         let links = previous.get(&key).cloned().unwrap_or_else(|| {
-            file_refs::resolve(text, |r| files::existing_file(&r.path, root, cwd))
-                .into_iter()
-                .filter_map(|(r, path)| {
-                    let relative = path.strip_prefix(root).ok()?;
-                    Some(Link {
-                        start: r.range.start,
-                        end: r.range.end,
-                        path: relative.to_string_lossy().into_owned(),
-                        line: r.line,
-                    })
+            file_refs::resolve(text, |r| {
+                files::existing_file(&r.path, roots.root, roots.cwd)
+            })
+            .into_iter()
+            .filter_map(|(r, path)| {
+                let (project, relative) = roots.place(&path)?;
+                Some(Link {
+                    start: r.range.start,
+                    end: r.range.end,
+                    path: relative.to_string_lossy().into_owned(),
+                    line: r.line,
+                    project: project.map(|p| p.0.to_string()),
                 })
-                .collect()
+            })
+            .collect()
         });
         out.insert(key, links);
     }
@@ -802,8 +894,7 @@ impl Cache {
         transcripts: &dyn TranscriptReader,
         record: RecordId,
         handle: &ResumeHandle,
-        root: &std::path::Path,
-        cwd: &std::path::Path,
+        roots: Roots<'_>,
         policy: &Policy,
     ) -> Result<(u64, &Conversation, &Links), ContentError> {
         let version = transcripts
@@ -817,7 +908,7 @@ impl Cache {
                 .read_masked(handle, &|s| policy.mask(s))
                 .map_err(ContentError::Failed)?;
             let previous = self.transcripts.remove(&record).map(|e| e.links);
-            let links = link_map(&conversation, root, cwd, &previous.unwrap_or_default());
+            let links = link_map(&conversation, roots, &previous.unwrap_or_default());
             self.transcripts.insert(
                 record,
                 ParsedEntry {
@@ -838,21 +929,19 @@ impl Cache {
         Ok((h.finish(), &entry.conversation, &entry.links))
     }
 
-    /// The files `record`'s session wrote under the project root, newest
+    /// The files `record`'s session wrote under a project's root, newest
     /// first, with their counts against the checkout's base, made once
     /// per version of the transcript. A checkout git cannot read lists
     /// the files without counts or a base.
-    #[allow(clippy::too_many_arguments)]
     fn edited_files(
         &mut self,
         transcripts: &dyn TranscriptReader,
         record: RecordId,
         handle: &ResumeHandle,
-        root: &std::path::Path,
-        cwd: &std::path::Path,
+        roots: Roots<'_>,
         policy: &Policy,
     ) -> Result<(u64, serde_json::Value), ContentError> {
-        let (version, _, _) = self.conversation(transcripts, record, handle, root, cwd, policy)?;
+        let (version, _, _) = self.conversation(transcripts, record, handle, roots, policy)?;
         let Some(entry) = self.transcripts.get(&record) else {
             return Err(ContentError::Failed(
                 "the transcript was not kept".to_owned(),
@@ -861,11 +950,57 @@ impl Cache {
         if let Some(body) = &entry.files {
             return Ok((version, body.clone()));
         }
-        let body = files_body(&*self.working, &entry.conversation, root, cwd);
+        let body = files_body(&*self.working, &entry.conversation, roots);
         if let Some(entry) = self.transcripts.get_mut(&record) {
             entry.files = Some(body.clone());
         }
         Ok((version, body))
+    }
+
+    /// The files under `roots` whose path matches `query`, best first,
+    /// at most `limit`. A root is walked again once its listing is older
+    /// than [`LISTING_TTL`]; one that cannot be read has no hits.
+    fn find(&mut self, roots: &[FindRoot], query: &str, limit: usize) -> (u64, serde_json::Value) {
+        self.listings.retain(|root, (at, _)| {
+            at.elapsed() < LISTING_TTL && roots.iter().any(|r| &r.root == root)
+        });
+        let mut hits: Vec<(i64, ProjectId, PathBuf)> = Vec::new();
+        let mut truncated = false;
+        for found in roots {
+            if !self.listings.contains_key(&found.root) {
+                let Ok(listing) = files::scan(&found.root, FIND_INDEX_ENTRIES, &found.shown) else {
+                    continue;
+                };
+                self.listings
+                    .insert(found.root.clone(), (Instant::now(), listing));
+            }
+            let Some((_, listing)) = self.listings.get(&found.root) else {
+                continue;
+            };
+            truncated |= listing.truncated;
+            hits.extend(
+                files::fuzzy(&listing.entries, query, limit, false)
+                    .into_iter()
+                    .map(|hit| (hit.score, found.project, hit.entry.rel.clone())),
+            );
+        }
+        // Best first; the path breaks a tie so a repeat reads the same.
+        hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
+        truncated |= hits.len() > limit;
+        hits.truncate(limit);
+        let body = serde_json::json!({
+            "hits": hits
+                .iter()
+                .map(|(_, project, path)| serde_json::json!({
+                    "project": project.0.to_string(),
+                    "path": path.to_string_lossy(),
+                }))
+                .collect::<Vec<_>>(),
+            "truncated": truncated,
+        });
+        let mut h = DefaultHasher::new();
+        body.to_string().hash(&mut h);
+        (h.finish(), body)
     }
 
     /// One file's diff against `base`, masked line by line. A masked
@@ -1020,14 +1155,31 @@ fn observe(
                 let redacted = policy.mask(&text);
                 (h.finish(), tail_body(&redacted, lines))
             }),
-        (Source::Transcript { handle, root, cwd }, ContentView::Files) => cache.edited_files(
+        (
+            Source::Transcript {
+                handle,
+                root,
+                cwd,
+                others,
+            },
+            view,
+        ) => observe_transcript(
             transcripts,
+            cache,
             job.key.record().unwrap_or(RecordId(uuid::Uuid::nil())),
             handle,
-            root,
-            cwd,
+            Roots { root, cwd, others },
+            view,
             &policy,
         ),
+        (
+            Source::Find {
+                roots,
+                query,
+                limit,
+            },
+            ContentView::Find,
+        ) => Ok(cache.find(roots, query, *limit)),
         (
             Source::Diff {
                 root,
@@ -1036,27 +1188,6 @@ fn observe(
             },
             ContentView::Diff,
         ) => cache.diff(root, base, relative, &policy),
-        (Source::Transcript { handle, root, cwd }, view) => cache
-            .conversation(
-                transcripts,
-                job.key.record().unwrap_or(RecordId(uuid::Uuid::nil())),
-                handle,
-                root,
-                cwd,
-                &policy,
-            )
-            .map(|(source, conversation, links)| {
-                let resume_id = handle.provider_id();
-                let body = match view {
-                    ContentView::Page { from, limit } => {
-                        conversation_page(conversation, links, &resume_id, from, limit)
-                    }
-                    ContentView::Turn { n } => turn_body(conversation, links, &resume_id, n),
-                    ContentView::AskReply { id } => ask_reply(conversation, id),
-                    _ => last_response(conversation, links, &resume_id),
-                };
-                (source, body)
-            }),
         (Source::File { root, relative }, ContentView::Whole) => {
             cache.file(&job.key, root, relative, &policy)
         }
@@ -1086,6 +1217,36 @@ fn observe(
     }
 }
 
+/// A transcript read on the worker: the files its tool calls wrote, or
+/// the conversation cut to `view`.
+fn observe_transcript(
+    transcripts: &dyn TranscriptReader,
+    cache: &mut Cache,
+    record: RecordId,
+    handle: &ResumeHandle,
+    roots: Roots<'_>,
+    view: ContentView,
+    policy: &Policy,
+) -> Result<(u64, serde_json::Value), ContentError> {
+    if view == ContentView::Files {
+        return cache.edited_files(transcripts, record, handle, roots, policy);
+    }
+    cache
+        .conversation(transcripts, record, handle, roots, policy)
+        .map(|(source, conversation, links)| {
+            let resume_id = handle.provider_id();
+            let body = match view {
+                ContentView::Page { from, limit } => {
+                    conversation_page(conversation, links, &resume_id, from, limit)
+                }
+                ContentView::Turn { n } => turn_body(conversation, links, &resume_id, n),
+                ContentView::AskReply { id } => ask_reply(conversation, id),
+                _ => last_response(conversation, links, &resume_id),
+            };
+            (source, body)
+        })
+}
+
 /// `path` with its links resolved, so paths from a transcript, a
 /// session's directory and git compare. A file that is gone is
 /// resolved through its directory.
@@ -1099,32 +1260,44 @@ fn canonical(path: &std::path::Path) -> PathBuf {
     }
 }
 
-/// The files list on the wire: each file the session wrote under the
-/// project root, newest first, with its counts against the base of the
-/// checkout the session works in. A file in no repository, or in
-/// another one, has no counts.
+/// The files list on the wire: each file the session wrote under a
+/// project's root, newest first, with its counts against the base of
+/// the checkout the session works in. A file in no repository, or in
+/// another one, has no counts; one under another project's root names
+/// that project, and its path is under that root.
 fn files_body(
     working: &dyn WorkingChanges,
     conversation: &Conversation,
-    root: &std::path::Path,
-    cwd: &std::path::Path,
+    roots: Roots<'_>,
 ) -> serde_json::Value {
-    let root = canonical(root);
-    let written: Vec<(String, PathBuf)> = file_refs::written_files(conversation, cwd)
-        .into_iter()
-        .filter_map(|p| {
-            let c = canonical(&p);
-            let under = c.strip_prefix(&root).ok()?.to_string_lossy().into_owned();
-            Some((under, c))
-        })
+    let cwd = roots.cwd;
+    let root = canonical(roots.root);
+    let others: Vec<(ProjectId, PathBuf)> = roots
+        .others
+        .iter()
+        .map(|(id, root)| (*id, canonical(root)))
         .collect();
+    let resolved = Roots {
+        root: &root,
+        cwd,
+        others: &others,
+    };
+    let written: Vec<(String, PathBuf, Option<ProjectId>)> =
+        file_refs::written_files(conversation, cwd)
+            .into_iter()
+            .filter_map(|p| {
+                let c = canonical(&p);
+                let (project, under) = resolved.place(&c)?;
+                Some((under.to_string_lossy().into_owned(), c, project))
+            })
+            .collect();
     let base = working.work_base(cwd, conversation.start).ok();
     let top = base.as_ref().map(|b| canonical(&b.top));
     let mut stats = HashMap::new();
     if let (Some(base), Some(top)) = (&base, &top) {
         let in_top: Vec<String> = written
             .iter()
-            .filter_map(|(_, c)| Some(c.strip_prefix(top).ok()?.to_string_lossy().into_owned()))
+            .filter_map(|(_, c, _)| Some(c.strip_prefix(top).ok()?.to_string_lossy().into_owned()))
             .collect();
         if let Ok(found) = working.work_stats(&base.top, &base.sha, &in_top) {
             for f in found {
@@ -1134,10 +1307,11 @@ fn files_body(
     }
     let files: Vec<serde_json::Value> = written
         .iter()
-        .map(|(under, c)| {
+        .map(|(under, c, project)| {
             let stat = stats.get(c);
             serde_json::json!({
                 "path": under,
+                "project": project.map(|p| p.0.to_string()),
                 "in_repo": top.as_ref().is_some_and(|t| c.starts_with(t)),
                 "changed": stat.is_some(),
                 "added": stat.map_or(0, |s| s.added),
@@ -1768,6 +1942,113 @@ mod tests {
     }
 
     #[test]
+    fn a_search_query_is_read_back_from_its_escapes() {
+        assert_eq!(
+            percent_decoded("open%20d%C3%A9c").as_deref(),
+            Some("open déc")
+        );
+        assert_eq!(percent_decoded("plain.md").as_deref(), Some("plain.md"));
+        assert_eq!(percent_decoded("cut%2"), None);
+        assert_eq!(percent_decoded("%zz"), None);
+        assert_eq!(percent_decoded("%ff"), None);
+    }
+
+    #[test]
+    fn a_path_under_another_projects_root_links_into_that_project() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let nested = other.path().join("nested");
+        std::fs::create_dir_all(nested.join("docs")).unwrap();
+        std::fs::write(other.path().join("decisions.md"), "").unwrap();
+        std::fs::write(nested.join("docs").join("deep.md"), "").unwrap();
+        let nowhere = tempfile::tempdir().unwrap();
+        std::fs::write(nowhere.path().join("stray.md"), "").unwrap();
+        let (outer, inner) = (
+            ProjectId(uuid::Uuid::from_u128(1)),
+            ProjectId(uuid::Uuid::from_u128(2)),
+        );
+        let others = [(outer, other.path().to_path_buf()), (inner, nested.clone())];
+        let roots = Roots {
+            root: root.path(),
+            cwd: root.path(),
+            others: &others,
+        };
+        let mut c = turns(1);
+        c.turns[0].final_text = format!(
+            "{} and {} but not {}",
+            other.path().join("decisions.md").display(),
+            nested.join("docs").join("deep.md").display(),
+            nowhere.path().join("stray.md").display()
+        );
+        let links = link_map(&c, roots, &Links::new());
+        let found = &links[&file_refs::text_key(&c.turns[0].final_text)];
+        let named: Vec<(Option<&str>, &str)> = found
+            .iter()
+            .map(|l| (l.project.as_deref(), l.path.as_str()))
+            .collect();
+        // The deepest root that holds a path serves it; a path under no
+        // project is no link.
+        assert_eq!(
+            named,
+            [
+                (Some(outer.0.to_string().as_str()), "decisions.md"),
+                (Some(inner.0.to_string().as_str()), "docs/deep.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_search_reads_every_root_best_first_and_names_each_hits_project() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::create_dir_all(a.path().join("src")).unwrap();
+        std::fs::write(a.path().join("src").join("decide.rs"), "").unwrap();
+        std::fs::write(a.path().join(".gitignore"), "ignored/\n").unwrap();
+        std::fs::create_dir_all(a.path().join("ignored")).unwrap();
+        std::fs::write(a.path().join("ignored").join("decisions.md"), "").unwrap();
+        std::fs::write(b.path().join("decisions.md"), "").unwrap();
+        let (pa, pb) = (
+            ProjectId(uuid::Uuid::from_u128(1)),
+            ProjectId(uuid::Uuid::from_u128(2)),
+        );
+        let roots = [
+            FindRoot {
+                project: pa,
+                root: a.path().to_path_buf(),
+                shown: Vec::new(),
+            },
+            FindRoot {
+                project: pb,
+                root: b.path().to_path_buf(),
+                shown: Vec::new(),
+            },
+            FindRoot {
+                project: pb,
+                root: b.path().join("gone"),
+                shown: Vec::new(),
+            },
+        ];
+        let mut cache = Cache::new(
+            Arc::new(crate::adapters::fakes::FakeSecrets::default()),
+            Arc::new(crate::adapters::fakes::FakeWorking::at(a.path(), "abc")),
+        );
+        let (_, body) = cache.find(&roots, "decisions", 10);
+        // The ignored copy is not listed; the unreadable root has no hits.
+        assert_eq!(
+            body["hits"],
+            serde_json::json!([{"project": pb.0.to_string(), "path": "decisions.md"}]),
+            "{body}"
+        );
+        assert_eq!(body["truncated"], false);
+        let (_, body) = cache.find(&roots, "dec", 1);
+        assert_eq!(body["hits"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["truncated"], true, "{body}");
+        // A listing a moment old answers without another walk.
+        std::fs::write(b.path().join("decisions-2.md"), "").unwrap();
+        let (_, body) = cache.find(&roots, "decisions-2", 10);
+        assert_eq!(body["hits"], serde_json::json!([]));
+    }
+
+    #[test]
     fn prose_paths_under_the_root_become_links_and_a_cut_text_keeps_only_those_it_still_holds() {
         let root = tempfile::tempdir().unwrap();
         let cwd = root.path().join("sub");
@@ -1789,7 +2070,12 @@ mod tests {
             detail: None,
             text: Some("Edited plan.md first".into()),
         });
-        let links = link_map(&c, root.path(), &cwd, &Links::new());
+        let roots = Roots {
+            root: root.path(),
+            cwd: &cwd,
+            others: &[],
+        };
+        let links = link_map(&c, roots, &Links::new());
         let page = conversation_page(&c, &links, "r", PageFrom::Turn(1), 10);
         let turn = &page["turns"][0];
         assert_eq!(
@@ -1806,14 +2092,14 @@ mod tests {
 
         // A message cut to its head keeps the links in the head.
         c.turns[0].activity[0].text = Some(format!("Edited plan.md, {}", "x".repeat(2000)));
-        let links = link_map(&c, root.path(), &cwd, &links);
+        let links = link_map(&c, roots, &links);
         let page = conversation_page(&c, &links, "r", PageFrom::Turn(1), 10);
         let row = &page["turns"][0]["activity"][0];
         assert_eq!(row["more"], true);
         assert_eq!(row["links"][0]["path"], "plan.md", "{row}");
         // One cut from its front keeps none.
         c.turns[0].final_text = format!("plan.md {}", "y".repeat(TURN_BYTES_CAP));
-        let links = link_map(&c, root.path(), &cwd, &links);
+        let links = link_map(&c, roots, &links);
         let page = conversation_page(&c, &links, "r", PageFrom::Turn(1), 10);
         assert_eq!(page["turns"][0]["truncated"], true);
         assert_eq!(page["turns"][0]["links"], serde_json::json!([]));

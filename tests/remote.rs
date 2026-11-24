@@ -5934,3 +5934,103 @@ fn a_device_adds_a_project_only_below_a_folder_of_the_home_directory() {
         "the project was made at the canonical root"
     );
 }
+
+/// A file a session wrote or named under another project's root is
+/// listed and linked with that project's id, a search over every
+/// project finds it by name, and the file route of its own project
+/// reads it; a query that is missing or badly escaped is refused.
+#[test]
+fn a_file_in_another_project_is_listed_linked_found_and_read_there() {
+    let other_root = tempfile::tempdir().unwrap();
+    let decisions = other_root.path().join("zq-decisions.md");
+    std::fs::write(&decisions, "# Open decisions\n").unwrap();
+    let mut port = port_working(
+        FakeHost::default(),
+        FakeSecrets::default(),
+        FakeRemoteStore::default(),
+        FakeDispatch::default(),
+        edited_working(),
+    );
+    let (space, _, session) = seed(&mut port, "");
+    let reply = control(
+        &mut port,
+        Request::new(
+            "pj2",
+            Body::ProjectAdd {
+                space,
+                name: "#2".into(),
+                root: other_root.path().to_path_buf(),
+            },
+        ),
+    );
+    let other = made_id(&reply, RecordKind::Project);
+    port.transcripts.set(Some(Conversation {
+        turns: vec![Turn {
+            n: 1,
+            activity: vec![
+                writes("Write", "/tmp/src/a.rs", false),
+                writes("Edit", &decisions.to_string_lossy(), false),
+            ],
+            final_text: format!("Updated {}.", decisions.display()),
+            ..Turn::default()
+        }],
+        ..Conversation::default()
+    }));
+    let token = pair(&mut port, "ABCD2345", Scope::Read, "Vision Pro");
+    let t = Some(token.as_str());
+    launched(&mut port, &session);
+
+    let (status, files) = get(&mut port, &format!("/api/v1/sessions/{session}/files"), t);
+    assert_eq!(status, 200, "{files}");
+    let listed: Vec<(&str, Option<&str>)> = files["body"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| (f["path"].as_str().unwrap(), f["project"].as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            ("zq-decisions.md", Some(other.as_str())),
+            ("src/a.rs", None)
+        ]
+    );
+
+    let (status, last) = get(
+        &mut port,
+        &format!("/api/v1/sessions/{session}/last-response"),
+        t,
+    );
+    assert_eq!(status, 200, "{last}");
+    let link = &last["body"]["links"][0];
+    assert_eq!(link["path"], "zq-decisions.md", "{last}");
+    assert_eq!(link["project"], other.as_str());
+
+    let (status, found) = get(&mut port, "/api/v1/files/find?q=zq-dec%69sions", t);
+    assert_eq!(status, 200, "{found}");
+    let hits = found["body"]["hits"].as_array().unwrap();
+    assert!(
+        hits.iter()
+            .any(|h| h["project"] == other.as_str() && h["path"] == "zq-decisions.md"),
+        "{found}"
+    );
+
+    let (status, file) = get(
+        &mut port,
+        &format!("/api/v1/projects/{other}/files/zq-decisions.md"),
+        t,
+    );
+    assert_eq!(status, 200, "{file}");
+    assert_eq!(file["body"]["text"], "# Open decisions\n");
+
+    for bad in [
+        "/api/v1/files/find",
+        "/api/v1/files/find?q=",
+        "/api/v1/files/find?q=%zz",
+    ] {
+        let (status, refused) = get(&mut port, bad, t);
+        assert_eq!(status, 400, "{bad}: {refused}");
+    }
+    let (status, _) = get(&mut port, "/api/v1/files/find?q=zq", None);
+    assert_eq!(status, 401);
+}

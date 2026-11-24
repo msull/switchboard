@@ -95,6 +95,87 @@ final class EditsTests: XCTestCase {
         XCTAssertFalse(SlotChoices.matches("zzz", "notes.md"))
     }
 
+    func testAFileInAnotherProjectDecodesLinksAndIsOfferedThere() throws {
+        let json = """
+            {"base":null,"files":[
+              {"path":"decisions.md","project":"other","in_repo":false,"changed":false,"added":0,"removed":0,"binary":false},
+              {"path":"src/a.rs","project":null,"in_repo":true,"changed":true,"added":1,"removed":0,"binary":false}]}
+            """
+        let files = try JSONDecoder().decode(EditedFilesBody.self, from: Data(json.utf8)).files
+        XCTAssertEqual(files.map(\.project), ["other", nil])
+        let owner = SessionRef(serverID: ServerID("host"), recordID: "me")
+        XCTAssertEqual(
+            SlotChoices.written(files, owner: owner, project: "mine", query: ""),
+            [
+                FileRef(serverID: ServerID("host"), projectID: "other", path: "decisions.md"),
+                FileRef(serverID: ServerID("host"), projectID: "mine", path: "src/a.rs"),
+            ])
+
+        // A link into another project carries it, and one into the
+        // session's own carries none.
+        let url = try XCTUnwrap(FileLinks.url(path: "docs/open decisions.md", line: 3, project: "0a1b-2c"))
+        let parsed = try XCTUnwrap(FileLinks.parse(try XCTUnwrap(URL(string: url))))
+        XCTAssertEqual(parsed.path, "docs/open decisions.md")
+        XCTAssertEqual(parsed.line, 3)
+        XCTAssertEqual(parsed.project, "0a1b-2c")
+        let own = try XCTUnwrap(FileLinks.url(path: "plan.md", line: nil))
+        XCTAssertNil(FileLinks.parse(try XCTUnwrap(URL(string: own)))?.project)
+        let link = try JSONDecoder().decode(
+            LinkView.self, from: Data(#"{"start":0,"end":4,"path":"a.md","line":null,"project":"p2"}"#.utf8))
+        XCTAssertEqual(link.project, "p2")
+
+        let found = try JSONDecoder().decode(
+            FindBody.self, from: Data(#"{"hits":[{"project":"p2","path":"a.md"}],"truncated":true}"#.utf8))
+        XCTAssertEqual(found.hits, [FileHit(project: "p2", path: "a.md")])
+        XCTAssertTrue(found.truncated)
+    }
+
+    func testTheChooserOffersTheNewestWrittenFilesAndTheOnesOpenedBefore() {
+        let host = ServerID("host")
+        let owner = SessionRef(serverID: host, recordID: "me")
+        let files = (1...20).map { EditedFile(path: "f\($0).txt") }
+        // The newest dozen until a filter is typed, then every match.
+        XCTAssertEqual(SlotChoices.written(files, owner: owner, project: "p", query: "").count, SlotChoices.writtenShown)
+        XCTAssertEqual(
+            SlotChoices.written(files, owner: owner, project: "p", query: "f2").map(\.path), ["f2.txt", "f20.txt"])
+
+        var state = PresentationState()
+        let a = FileRef(serverID: host, projectID: "p", path: "a.md")
+        let b = FileRef(serverID: host, projectID: "q", path: "b.md")
+        let far = FileRef(serverID: ServerID("elsewhere"), projectID: "p", path: "c.md")
+        for file in [a, b, far, a] { state.noteOpened(file) }
+        XCTAssertEqual(state.recentFiles, [a, far, b])
+        // Only the owner's host, and not what another list already shows.
+        XCTAssertEqual(SlotChoices.recent(state.recentFiles, owner: owner, query: "", besides: [b]), [a])
+        XCTAssertEqual(SlotChoices.recent(state.recentFiles, owner: owner, query: "b.m", besides: []), [b])
+        for i in 0..<(PresentationState.recentFilesCap + 5) {
+            state.noteOpened(FileRef(serverID: host, projectID: "p", path: "n\(i).md"))
+        }
+        XCTAssertEqual(state.recentFiles.count, PresentationState.recentFilesCap)
+        XCTAssertFalse(state.recentFiles.contains(a))
+    }
+
+    func testEachSideKeepsWhatItHoldsAndAnEmptiedLeftPaneStaysEmpty() throws {
+        // A card saved before the left pane could hold anything has the files there.
+        let old = try JSONDecoder().decode(
+            PaneSettings.self, from: Data(#"{"tilt":20,"leading":1,"trailing":1,"filesOpen":true,"slotOpen":false}"#.utf8))
+        XCTAssertEqual(old.leadingPane, .files)
+
+        var panes = PaneSettings()
+        XCTAssertEqual(panes.leadingPane, .files)
+        panes.leadingPane = nil
+        panes.slot = .files
+        var back = try JSONDecoder().decode(PaneSettings.self, from: JSONEncoder().encode(panes))
+        XCTAssertNil(back.leadingPane)
+        XCTAssertEqual(back.slot, .files)
+        panes.leadingPane = .document(FileRef(serverID: ServerID("host"), projectID: "p", path: "decisions.md"))
+        back = try JSONDecoder().decode(PaneSettings.self, from: JSONEncoder().encode(panes))
+        XCTAssertEqual(back, panes)
+
+        XCTAssertEqual(SidePaneLayout.drawn(.files).width, 360)
+        XCTAssertGreaterThan(SidePaneLayout.drawn(panes.leadingPane).width, SidePaneLayout.drawn(nil).width)
+    }
+
     func testClearingUnchangedLeavesOffOnlyFilesThatMatchTheBase() {
         let files = [
             EditedFile(path: "same.rs", changed: false),

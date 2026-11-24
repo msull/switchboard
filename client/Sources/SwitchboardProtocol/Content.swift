@@ -53,12 +53,15 @@ public struct LinkView: Decodable, Sendable, Equatable, Hashable {
     public let end: Int
     public let path: String
     public let line: Int?
+    /// Another project of the host the file is in; nil for the session's own.
+    public let project: String?
 
-    public init(start: Int, end: Int, path: String, line: Int? = nil) {
+    public init(start: Int, end: Int, path: String, line: Int? = nil, project: String? = nil) {
         self.start = start
         self.end = end
         self.path = path
         self.line = line
+        self.project = project
     }
 }
 

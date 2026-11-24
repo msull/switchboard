@@ -71,7 +71,8 @@ public struct CardWindowView: View {
             guard let link = FileLinks.parse(url), let project = item?.session.project else {
                 return .systemAction
             }
-            let ref = FileRef(serverID: request.ref.serverID, projectID: project, path: link.path)
+            let ref = FileRef(
+                serverID: request.ref.serverID, projectID: link.project ?? project, path: link.path)
             openWindow(value: model.fileWindowRequest(for: ref, line: link.line))
             return .handled
         })
@@ -95,26 +96,33 @@ public struct CardWindowView: View {
         .onChange(of: paneSettings.filesOpen) { savePanes() }
         .onChange(of: paneSettings.slotOpen) { savePanes() }
         .onChange(of: paneSettings.slot) { savePanes() }
+        .onChange(of: paneSettings.leadingPane) { savePanes() }
         .onChange(of: paneSettings.hideUnchanged) { savePanes() }
         .sidePane(.leading, shown: panes && paneSettings.filesOpen, tilt: paneSettings.tilt) {
             if panes && paneSettings.filesOpen, let item {
-                let size = SidePaneLayout.size(
-                    width: 360, height: 640, windowHeight: windowHeight, factor: paneSettings.leading)
-                EditedFilesPane(
-                    model: model, ref: item.ref, project: item.session.project,
-                    hideUnchanged: $paneSettings.hideUnchanged)
-                    .frame(width: size.width, height: size.height)
+                slotPane(item, content: $paneSettings.leadingPane, factor: paneSettings.leading)
             }
         }
         .sidePane(.trailing, shown: panes && paneSettings.slotOpen, tilt: paneSettings.tilt) {
             if panes && paneSettings.slotOpen, let item {
-                let size = SidePaneLayout.size(
-                    width: paneSettings.slot == nil ? 380 : 540, height: paneSettings.slot == nil ? 560 : 860, windowHeight: windowHeight,
-                    factor: paneSettings.trailing)
-                SideSlotPane(model: model, owner: item.ref, project: item.session.project, content: $paneSettings.slot)
-                    .frame(width: size.width, height: size.height)
+                slotPane(item, content: $paneSettings.slot, factor: paneSettings.trailing)
             }
         }
+    }
+
+    /// One side's pane: whatever that side holds, at the size drawn for
+    /// it, scaled with the window and by the user's size for the side.
+    private func slotPane(_ item: UnifiedSession, content: Binding<SidePane?>, factor: Double) -> some View {
+        let files = item.session.kind == .claude
+        // A session with no files list has the chooser where the list would be.
+        let drawn = SidePaneLayout.drawn(content.wrappedValue == .files && !files ? nil : content.wrappedValue)
+        let size = SidePaneLayout.size(
+            width: drawn.width, height: drawn.height, windowHeight: windowHeight, factor: factor)
+        return SideSlotPane(
+            model: model, owner: item.ref, project: item.session.project, files: files, content: content,
+            hideUnchanged: $paneSettings.hideUnchanged
+        )
+        .frame(width: size.width, height: size.height)
     }
 
     private func savePanes() {
@@ -190,17 +198,15 @@ public struct CardWindowView: View {
             // A sheet, centred on the card, rather than a popover at the
             // button, which the right pane covered.
             .sheet(isPresented: $settingsOpen) {
-                CardSettings(settings: $paneSettings, files: item?.session.kind == .claude, save: savePanes) {
+                CardSettings(settings: $paneSettings, save: savePanes) {
                     settingsOpen = false
                 }
             }
             PinToBoardMenu(model: model, item: .session(request.ref), name: item?.session.name ?? "Board")
-            if item?.session.kind == .claude {
-                paneButton("sidebar.left", open: $paneSettings.filesOpen, label: "Files",
-                           help: "The files this session edited, beside the card")
-            }
-            paneButton("sidebar.right", open: $paneSettings.slotOpen, label: "Side pane",
-                       help: "A document or another session, beside the card")
+            paneButton("sidebar.left", open: $paneSettings.filesOpen, label: "Left pane",
+                       help: "The edited files, a file or another session, on the card's left")
+            paneButton("sidebar.right", open: $paneSettings.slotOpen, label: "Right pane",
+                       help: "A file, another session or the edited files, on the card's right")
             }
         }
     }
