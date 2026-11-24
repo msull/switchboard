@@ -5,7 +5,11 @@
 [advisories]
 # Each entry is an unmaintained crate with no safe upgrade, pulled in by
 # the GUI stack; drop it when the crate that pulls it in moves off it.
+# `chrono` is the exception: the app uses it itself, for local times and
+# the wake-up schedule, so its entry goes when the app moves to `jiff`
+# or `time`.
 ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono: unmaintained, used directly" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser: unmaintained" },
     { id = "RUSTSEC-2026-0370", reason = "zvariant: unmaintained" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names: unmaintained" },
