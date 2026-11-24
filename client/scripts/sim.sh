@@ -26,7 +26,9 @@ case "${1:-}" in
     run)
         build
         xcrun simctl boot "$SIM" 2>/dev/null || true
-        open -a Simulator
+        # A box with only the command line tools' simulator has no
+        # Simulator app to show; the run and `shot` work without it.
+        open -a Simulator 2>/dev/null || true
         xcrun simctl install "$SIM" "$APP"
         xcrun simctl launch --terminate-running-process "$SIM" "$BUNDLE"
         ;;

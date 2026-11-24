@@ -76,6 +76,13 @@ public struct RootView: View {
             }
             openWindow(id: KeysWindow.id, value: KeysWindow.value)
         }
+        // `page=<address>` opens a web window on that page.
+        for entry in pending where entry.hasPrefix("page=") {
+            if let url = WebAddress.parse(String(entry.dropFirst("page=".count))) {
+                openWindow(value: WebWindowRequest(url: url))
+            }
+        }
+        pending.removeAll { $0.hasPrefix("page=") }
         for _ in 0..<100 where !pending.isEmpty {
             for entry in pending {
                 let parts = entry.split(separator: ":", maxSplits: 1).map(String.init)

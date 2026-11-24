@@ -35,6 +35,14 @@
 	<string>Switchboard listens while you dictate a message to a session.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Switchboard turns what you dictate into the message you send a session.</string>
+	<!-- Web panes show pages a session serves on the local network,
+	     which are plain http. The exception covers web views only; the
+	     app's own connections to a host stay under the system's rules. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Switchboard finds the Macs running Switchboard on your network and talks to the ones you pair with.</string>
 </dict>
